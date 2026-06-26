@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voyager-platform"
+version = "0.1.0"
+description = "Voyager: a Bayesian-optimization platform for bioprocess development, built on BoTorch with NVIDIA BioNeMo / ESM-2 protein features."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+  "torch>=2.2",
+  "botorch>=0.11",
+  "gpytorch>=1.11",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# Real ESM-2 / BioNeMo protein embeddings. The lean KmerEmbedder needs none of this.
+protein = ["transformers>=4.40"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["voyager*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

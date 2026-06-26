@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+# secrets
+.env
+.env.*
+!.env.example
+# model / HF caches (never commit weights)
+.cache/
+models/
