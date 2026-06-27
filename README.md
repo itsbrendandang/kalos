@@ -1,4 +1,4 @@
-# Voyager Platform
+# Voyager Engine
 
 A Bayesian-optimization platform for bioprocess development, built on **BoTorch**
 (a real GP surrogate + acquisition) with **NVIDIA BioNeMo / ESM-2** protein

@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "voyager-platform"
+name = "voyager-engine"
 version = "0.1.0"
 description = "Voyager: a Bayesian-optimization platform for bioprocess development, built on BoTorch with NVIDIA BioNeMo / ESM-2 protein features."
 readme = "README.md"
