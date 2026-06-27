@@ -21,6 +21,7 @@ voyager/
     gates.py           fail-closed promotion gates (carried from the lean engine)
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
+  portal/            FastAPI web viewer over the live engine (convergence + Pareto front)
 examples/            runnable demos (BO loop, multi-objective, protein embedding)
 tests/               pytest
 ```
@@ -35,6 +36,9 @@ python examples/run_bo_loop.py          # BoTorch closed-loop demo
 python examples/run_multiobjective.py   # multi-objective (titer + purity) Pareto demo
 python examples/run_protein_embed.py    # ESM-2 embedding demo (downloads a small model)
 python -m pytest                        # tests (VOYAGER_TEST_ESM=1 to include ESM-2)
+
+python -m pip install -e ".[portal]"    # the web portal (FastAPI)
+python -m voyager.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
 ```
 
 ## Device

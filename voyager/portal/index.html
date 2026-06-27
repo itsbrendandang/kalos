@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voyager Engine</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <style>
+      :root {
+        --bg: #0c0e14; --panel: #14171f; --border: #232733; --fg: #e6e9ef;
+        --muted: #8b93a7; --brand: #2d4fcb; --brandlite: #5b79f0; --reject: #c2410c;
+        --mono: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+      header { padding: 22px 28px; border-bottom: 1px solid var(--border);
+        display: flex; align-items: baseline; gap: 12px; }
+      header h1 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+      header .sub { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+      header .live { margin-left: auto; font-family: var(--mono); font-size: 11px;
+        color: var(--brandlite); text-transform: uppercase; letter-spacing: 0.04em; }
+      main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 60px;
+        display: grid; gap: 24px; }
+      .panel { background: var(--panel); border: 1px solid var(--border);
+        border-radius: 12px; padding: 18px 20px; }
+      .panel h2 { margin: 0 0 2px; font-size: 15px; }
+      .panel p.note { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
+      .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; }
+      @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
+      .chart { width: 100%; height: 320px; }
+      .stats { display: flex; gap: 22px; margin: 4px 0 12px; flex-wrap: wrap; }
+      .stat .k { font-family: var(--mono); font-size: 10px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em; }
+      .stat .v { font-family: var(--mono); font-size: 20px; font-weight: 600; }
+      .stat .v.brand { color: var(--brandlite); }
+      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+      th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; }
+      td:first-child, th:first-child { text-align: left; }
+      button { font-family: var(--mono); font-size: 12px; color: #fff; background: var(--brand);
+        border: 0; border-radius: 7px; padding: 7px 14px; cursor: pointer; }
+      button:hover { background: var(--brandlite); }
+      button:disabled { opacity: 0.5; cursor: wait; }
+      .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .label { font-family: var(--mono); font-size: 11px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Voyager <span style="color: var(--muted)">Engine</span></h1>
+      <span class="sub">BoTorch + ESM-2</span>
+      <span class="live">live optimization</span>
+    </header>
+    <main>
+      <section class="panel">
+        <div class="head">
+          <div>
+            <h2>Single-objective optimization</h2>
+            <p class="note">Maximize titer over a 3-input recipe box. Best-so-far should climb as the loop proposes and measures.</p>
+          </div>
+          <button id="run1">Run</button>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">Best titer</div><div class="v brand" id="s1best">—</div></div>
+          <div class="stat"><div class="k">Gap to optimum</div><div class="v" id="s1gap">—</div></div>
+          <div class="stat"><div class="k">Experiments</div><div class="v" id="s1n">—</div></div>
+        </div>
+        <div class="row">
+          <div><div class="label">Convergence</div><div id="conv" class="chart"></div></div>
+          <div><div class="label">Next batch proposed</div><div id="prop1"></div></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="head">
+          <div>
+            <h2>Multi-objective optimization</h2>
+            <p class="note">Maximize titer AND purity together (they peak at different recipes). The cobalt line is the Pareto front: the achievable tradeoffs.</p>
+          </div>
+          <button id="run2">Run</button>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">Pareto front size</div><div class="v brand" id="s2pf">—</div></div>
+          <div class="stat"><div class="k">Best titer</div><div class="v" id="s2t">—</div></div>
+          <div class="stat"><div class="k">Best purity</div><div class="v" id="s2p">—</div></div>
+        </div>
+        <div class="row">
+          <div><div class="label">Titer vs purity (Pareto front)</div><div id="pareto" class="chart"></div></div>
+          <div><div class="label">Next batch proposed</div><div id="prop2"></div></div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const fg = "#8b93a7", grid = "#232733", brand = "#2d4fcb", muted = "#5b6072";
+      const base = {
+        paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+        font: { color: fg, family: "ui-monospace, monospace", size: 11 },
+        margin: { l: 48, r: 16, t: 10, b: 40 }, showlegend: false,
+      };
+      const ax = { gridcolor: grid, zerolinecolor: grid, linecolor: grid };
+
+      function table(el, rows, cols) {
+        const head = cols.map((c) => `<th>${c}</th>`).join("");
+        const body = rows.map((r) => "<tr>" + r.map((v) => `<td>${v}</td>`).join("") + "</tr>").join("");
+        el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+      }
+
+      async function runSingle() {
+        const btn = document.getElementById("run1"); btn.disabled = true; btn.textContent = "Running…";
+        const d = await (await fetch("/api/single")).json();
+        const t = d.trajectory;
+        Plotly.newPlot("conv", [{
+          x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
+          line: { color: brand, width: 2.5 }, marker: { color: brand, size: 6 },
+        }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer" } }, { displayModeBar: false, responsive: true });
+        document.getElementById("s1best").textContent = d.best_value.toFixed(3);
+        const gap = Math.sqrt(d.best_recipe.reduce((s, v, i) => s + (v - d.optimum[i]) ** 2, 0));
+        document.getElementById("s1gap").textContent = gap.toFixed(3);
+        document.getElementById("s1n").textContent = t[t.length - 1].n;
+        table(document.getElementById("prop1"), d.proposals.map((p, i) => [`#${i + 1}`, ...p]), ["", "x1", "x2", "x3"]);
+        btn.disabled = false; btn.textContent = "Run";
+      }
+
+      async function runMulti() {
+        const btn = document.getElementById("run2"); btn.disabled = true; btn.textContent = "Running…";
+        const d = await (await fetch("/api/multi")).json();
+        Plotly.newPlot("pareto", [
+          { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers",
+            marker: { color: muted, size: 7 }, name: "runs" },
+          { x: d.pareto.map((p) => p.titer), y: d.pareto.map((p) => p.purity), mode: "lines+markers",
+            line: { color: brand, width: 2.5 }, marker: { color: brand, size: 9 }, name: "Pareto front" },
+        ], { ...base, xaxis: { ...ax, title: "titer →" }, yaxis: { ...ax, title: "purity →" } }, { displayModeBar: false, responsive: true });
+        const last = d.trajectory[d.trajectory.length - 1];
+        document.getElementById("s2pf").textContent = last.pareto;
+        document.getElementById("s2t").textContent = last.best_titer.toFixed(3);
+        document.getElementById("s2p").textContent = last.best_purity.toFixed(3);
+        table(document.getElementById("prop2"), d.proposals.map((p, i) => [`#${i + 1}`, ...p]), ["", "x1", "x2", "x3"]);
+        btn.disabled = false; btn.textContent = "Run";
+      }
+
+      document.getElementById("run1").onclick = runSingle;
+      document.getElementById("run2").onclick = runMulti;
+      runSingle();
+      runMulti();
+    </script>
+  </body>
+</html>
