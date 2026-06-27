@@ -22,7 +22,7 @@ voyager/
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
   portal/            FastAPI web viewer over the live engine (convergence + Pareto front)
-examples/            runnable demos (BO loop, multi-objective, protein embedding)
+examples/            demos (BO loop, multi-objective, protein) + run_on_media_data.py (real data via VOYAGER_MEDIA_DATA)
 tests/               pytest
 ```
 
