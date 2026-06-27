@@ -14,13 +14,14 @@ promotion gates) carry over; the hand-rolled GP + EI is replaced by BoTorch.
 ```
 voyager/
   core/
-    surrogate.py     BoTorch SingleTaskGP (input-normalized, output-standardized)
-    optimize.py      qLogEI acquisition + optimize_acqf -> next batch
-    evaluation.py    grouped cross-validated Spearman (leakage-controlled)
-    gates.py         fail-closed promotion gates (carried from the lean engine)
+    surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
+    optimize.py        qLogEI acquisition + optimize_acqf -> next batch
+    multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
+    evaluation.py      grouped cross-validated Spearman (leakage-controlled)
+    gates.py           fail-closed promotion gates (carried from the lean engine)
   features/
-    protein.py       ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
-examples/            runnable demos (BO loop, protein embedding)
+    protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
+examples/            runnable demos (BO loop, multi-objective, protein embedding)
 tests/               pytest
 ```
 
@@ -31,6 +32,7 @@ python -m pip install -e .              # core (torch / botorch / gpytorch)
 python -m pip install -e ".[protein]"   # + real ESM-2 (transformers)
 
 python examples/run_bo_loop.py          # BoTorch closed-loop demo
+python examples/run_multiobjective.py   # multi-objective (titer + purity) Pareto demo
 python examples/run_protein_embed.py    # ESM-2 embedding demo (downloads a small model)
 python -m pytest                        # tests (VOYAGER_TEST_ESM=1 to include ESM-2)
 ```
@@ -44,7 +46,7 @@ to use the platform locally.
 
 ## Roadmap
 
-- Multi-objective (qNEHVI) for titer + purity together.
+- ~~Multi-objective (qNEHVI) for titer + purity together.~~ **Done** (`core/multiobjective.py`).
 - Mixed continuous/categorical inputs (carbon source, medium) via Ax or BoTorch.
 - The push-feed ingestion loop (platform streams runs in; brain proposes the next
   batch; anonymized on read).

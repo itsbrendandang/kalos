@@ -6,7 +6,15 @@ import os
 import numpy as np
 import pytest
 
-from voyager import GatesConfig, Surrogate, check_gates, grouped_cv_spearman, propose
+from voyager import (
+    GatesConfig,
+    MultiObjectiveSurrogate,
+    Surrogate,
+    check_gates,
+    grouped_cv_spearman,
+    propose,
+    propose_multiobjective,
+)
 from voyager.features import KmerEmbedder
 
 
@@ -76,6 +84,18 @@ def test_fit_with_design_bounds_normalizes_to_box():
     s = Surrogate().fit(X, y, bounds=bounds)  # normalize to the design box, not the data
     nxt = propose(s, bounds, q=2)
     assert nxt.shape == (2, 2) and (nxt >= 0).all() and (nxt <= 1).all()
+
+
+def test_multiobjective_proposes_and_pareto():
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, (12, 3))
+    Y = np.stack([-((X[:, 0] - 0.7) ** 2), -((X[:, 0] - 0.2) ** 2)], axis=-1)  # tensioned objectives
+    bounds = np.array([[0, 0, 0], [1, 1, 1]], float)
+    s = MultiObjectiveSurrogate().fit(X, Y, bounds=bounds)
+    nxt = propose_multiobjective(s, bounds, q=2)
+    assert nxt.shape == (2, 3) and (nxt >= 0).all() and (nxt <= 1).all()
+    px, py = s.pareto()
+    assert py.shape[1] == 2 and len(py) >= 1
 
 
 @pytest.mark.skipif(
