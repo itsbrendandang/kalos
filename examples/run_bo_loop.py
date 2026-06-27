@@ -8,10 +8,15 @@ Run:  python examples/run_bo_loop.py
 """
 from __future__ import annotations
 
-import numpy as np
+import sys
+from pathlib import Path
 
-from voyager.core.optimize import propose
-from voyager.core.surrogate import Surrogate
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without installing
+
+import numpy as np  # noqa: E402
+
+from voyager.core.optimize import propose  # noqa: E402
+from voyager.core.surrogate import Surrogate  # noqa: E402
 
 OPT = np.array([0.7, 0.3, 0.5])  # the (unknown) optimum of the synthetic surface
 
@@ -31,7 +36,7 @@ def main() -> int:
     y = objective(X)
     print(f"start: best {y.max():.3f} from {len(y)} random runs")
     for r in range(6):
-        s = Surrogate().fit(X, y)
+        s = Surrogate().fit(X, y, bounds=bounds)  # normalize to the fixed design box
         nxt = propose(s, bounds, q=2)
         yn = objective(nxt, seed=r + 1)
         X = np.vstack([X, nxt])

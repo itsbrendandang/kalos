@@ -31,18 +31,29 @@ class Surrogate:
         self.model: SingleTaskGP | None = None
         self._y: np.ndarray | None = None
 
-    def fit(self, X, y) -> "Surrogate":
-        Xt = torch.as_tensor(np.asarray(X, float), dtype=DTYPE, device=DEVICE)
-        yt = torch.as_tensor(np.asarray(y, float), dtype=DTYPE, device=DEVICE).reshape(-1, 1)
-        self.model = SingleTaskGP(
-            Xt,
-            yt,
-            input_transform=Normalize(d=Xt.shape[-1]),
-            outcome_transform=Standardize(m=1),
+    def fit(self, X, y, bounds=None) -> "Surrogate":
+        """Fit on (X, y). Pass `bounds` (2 x d) to tie input normalization to the
+        fixed design box rather than the training data envelope."""
+        Xa = np.asarray(X, float)
+        ya = np.asarray(y, float).reshape(-1)
+        if Xa.ndim != 2 or Xa.shape[0] == 0:
+            raise ValueError("X must be a non-empty 2-D array (n x d)")
+        if Xa.shape[0] != ya.shape[0]:
+            raise ValueError("X and y must have the same number of rows")
+        if not np.isfinite(Xa).all() or not np.isfinite(ya).all():
+            raise ValueError("X and y must be finite (no NaN/inf)")
+        Xt = torch.as_tensor(Xa, dtype=DTYPE, device=DEVICE)
+        yt = torch.as_tensor(ya, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
+        d = Xt.shape[-1]
+        normalize = (
+            Normalize(d=d, bounds=torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE))
+            if bounds is not None
+            else Normalize(d=d)
         )
+        self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
         mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         fit_gpytorch_mll(mll)
-        self._y = np.asarray(y, float).reshape(-1)
+        self._y = ya
         return self
 
     def posterior(self, X):

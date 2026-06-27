@@ -84,7 +84,9 @@ class ESM2Embedder:
         torch = self._torch
         seq = clean_sequence(sequence)
         with torch.no_grad():
-            enc = self.tokenizer(seq, return_tensors="pt").to(self.device)
+            # truncate to ESM-2's context (BOS + 1022 residues + EOS = 1024) so a
+            # long sequence or an absolute-position variant degrades, not crashes.
+            enc = self.tokenizer(seq, return_tensors="pt", truncation=True, max_length=1024).to(self.device)
             out = self.model(**enc).last_hidden_state[0]  # (L, H) incl. BOS/EOS
             emb = out[1:-1].mean(dim=0)  # mean-pool real residues
         return emb.float().cpu().numpy()

@@ -6,9 +6,14 @@ Needs the protein extra:  pip install -e ".[protein]"
 """
 from __future__ import annotations
 
-import numpy as np
+import sys
+from pathlib import Path
 
-from voyager.features import ESM2Embedder, build_feature_table
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without installing
+
+import numpy as np  # noqa: E402
+
+from voyager.features import ESM2Embedder, build_feature_table  # noqa: E402
 
 # illustrative product protein fragments (public sequences)
 PRODUCTS = {

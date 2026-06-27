@@ -53,6 +53,31 @@ def test_grouped_cv_recovers_signal():
     assert grouped_cv_spearman(X, y, n_splits=5) > 0.6
 
 
+def test_fit_rejects_bad_input():
+    s = Surrogate()
+    with pytest.raises(ValueError):
+        s.fit(np.empty((0, 3)), np.array([]))  # empty
+    with pytest.raises(ValueError):
+        s.fit([[1.0, np.nan]], [1.0])  # NaN in X
+    with pytest.raises(ValueError):
+        s.fit([[1.0, 2.0], [3.0, 4.0]], [1.0, np.nan])  # NaN in y
+
+
+def test_propose_before_fit_raises():
+    with pytest.raises(AssertionError):
+        propose(Surrogate(), np.array([[0, 0], [1, 1]], float), q=2)
+
+
+def test_fit_with_design_bounds_normalizes_to_box():
+    rng = np.random.default_rng(3)
+    X = rng.uniform(0.2, 0.8, (20, 2))  # data covers only a sub-box of [0,1]^2
+    y = X[:, 0] - 0.5 * X[:, 1]
+    bounds = np.array([[0, 0], [1, 1]], float)
+    s = Surrogate().fit(X, y, bounds=bounds)  # normalize to the design box, not the data
+    nxt = propose(s, bounds, q=2)
+    assert nxt.shape == (2, 2) and (nxt >= 0).all() and (nxt <= 1).all()
+
+
 @pytest.mark.skipif(
     not os.environ.get("VOYAGER_TEST_ESM"),
     reason="set VOYAGER_TEST_ESM=1 to run the ESM-2 model download + embed test",
