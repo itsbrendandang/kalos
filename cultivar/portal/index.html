@@ -3,53 +3,61 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Cultivar Engine</title>
+    <title>Cultivar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" />
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
       :root {
-        --bg: #0c0e14; --panel: #14171f; --border: #232733; --fg: #e6e9ef;
-        --muted: #8b93a7; --brand: #2d4fcb; --brandlite: #5b79f0; --reject: #c2410c;
-        --mono: ui-monospace, "SF Mono", Menlo, monospace;
+        --bg: #eff1ea; --card: #ffffff; --fg: #15241c; --muted: #6b7a6f;
+        --accent: #15a375; --accent-hover: #0e7c57; --accent-soft: #e4f4ed;
+        --explore: #c77e2e; --border: #e8ece3;
+        --head: "Sora", system-ui, sans-serif;
+        --sans: "Plus Jakarta Sans", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
       }
       * { box-sizing: border-box; }
-      body { margin: 0; background: var(--bg); color: var(--fg);
-        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
-      header { padding: 22px 28px; border-bottom: 1px solid var(--border);
-        display: flex; align-items: baseline; gap: 12px; }
-      header h1 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
+      header { padding: 20px 30px; display: flex; align-items: center; gap: 11px; }
+      header .mark { display: flex; align-items: center; gap: 9px; }
+      header h1 { margin: 0; font-family: var(--head); font-weight: 700; font-size: 19px; letter-spacing: -0.01em; }
       header .sub { color: var(--muted); font-family: var(--mono); font-size: 12px; }
-      header .live { margin-left: auto; font-family: var(--mono); font-size: 11px;
-        color: var(--brandlite); text-transform: uppercase; letter-spacing: 0.04em; }
-      main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 60px;
-        display: grid; gap: 24px; }
-      .panel { background: var(--panel); border: 1px solid var(--border);
-        border-radius: 12px; padding: 18px 20px; }
-      .panel h2 { margin: 0 0 2px; font-size: 15px; }
-      .panel p.note { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
-      .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; }
+      header .live { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent);
+        background: var(--accent-soft); padding: 5px 11px; border-radius: 999px; }
+      main { max-width: 1080px; margin: 0 auto; padding: 8px 30px 64px; display: grid; gap: 22px; }
+      .panel { background: var(--card); border-radius: 16px; padding: 20px 22px;
+        box-shadow: 0 1px 2px rgba(20,40,30,.04), 0 10px 26px rgba(20,40,30,.05); }
+      .panel h2 { margin: 0 0 2px; font-family: var(--head); font-weight: 600; font-size: 16px; }
+      .panel p.note { margin: 0 0 14px; color: var(--muted); font-size: 13px; max-width: 62ch; }
+      .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
       @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
-      .chart { width: 100%; height: 320px; }
-      .stats { display: flex; gap: 22px; margin: 4px 0 12px; flex-wrap: wrap; }
-      .stat .k { font-family: var(--mono); font-size: 10px; color: var(--muted);
-        text-transform: uppercase; letter-spacing: 0.04em; }
-      .stat .v { font-family: var(--mono); font-size: 20px; font-weight: 600; }
-      .stat .v.brand { color: var(--brandlite); }
-      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
-      th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }
-      th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; }
-      td:first-child, th:first-child { text-align: left; }
-      button { font-family: var(--mono); font-size: 12px; color: #fff; background: var(--brand);
-        border: 0; border-radius: 7px; padding: 7px 14px; cursor: pointer; }
-      button:hover { background: var(--brandlite); }
-      button:disabled { opacity: 0.5; cursor: wait; }
-      .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-      .label { font-family: var(--mono); font-size: 11px; color: var(--muted);
-        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+      .chart { width: 100%; height: 300px; }
+      .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 4px 0 16px; }
+      .kpi { background: var(--bg); border-radius: 12px; padding: 12px 14px; }
+      .kpi.hero { background: var(--accent); box-shadow: 0 6px 18px rgba(21,163,117,.22); }
+      .kpi .k { font-size: 11px; color: var(--muted); font-weight: 500; }
+      .kpi.hero .k { color: #cfefe1; }
+      .kpi .v { font-family: var(--mono); font-size: 22px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
+      .kpi.hero .v { color: #fff; }
+      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+      th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+      td:first-child, th:first-child { text-align: left; color: var(--muted); }
+      button { font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: var(--accent);
+        border: 0; border-radius: 10px; padding: 9px 16px; cursor: pointer; box-shadow: 0 2px 8px rgba(21,163,117,.28);
+        display: inline-flex; align-items: center; gap: 7px; transition: background .15s ease; }
+      button:hover { background: var(--accent-hover); }
+      button:disabled { opacity: 0.55; cursor: wait; }
+      .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+      .label { font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 8px; }
     </style>
   </head>
   <body>
     <header>
-      <h1>Cultivar <span style="color: var(--muted)">Engine</span></h1>
+      <span class="mark">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#5bd39b"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#15a375"/></svg>
+        <h1>Cultivar</h1>
+      </span>
       <span class="sub">BoTorch + ESM-2</span>
       <span class="live">live optimization</span>
     </header>
@@ -58,17 +66,17 @@
         <div class="head">
           <div>
             <h2>Single-objective optimization</h2>
-            <p class="note">Maximize titer over a 3-input recipe box. Best-so-far should climb as the loop proposes and measures.</p>
+            <p class="note">Maximize titer over a 3-input recipe. Best-so-far should climb as the loop proposes and measures.</p>
           </div>
-          <button id="run1">Run</button>
+          <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg>Run</button>
         </div>
         <div class="stats">
-          <div class="stat"><div class="k">Best titer</div><div class="v brand" id="s1best">—</div></div>
-          <div class="stat"><div class="k">Gap to optimum</div><div class="v" id="s1gap">—</div></div>
-          <div class="stat"><div class="k">Experiments</div><div class="v" id="s1n">—</div></div>
+          <div class="kpi hero"><div class="k">Best titer</div><div class="v" id="s1best">—</div></div>
+          <div class="kpi"><div class="k">Gap to optimum</div><div class="v" id="s1gap">—</div></div>
+          <div class="kpi"><div class="k">Experiments</div><div class="v" id="s1n">—</div></div>
         </div>
         <div class="row">
-          <div><div class="label">Convergence</div><div id="conv" class="chart"></div></div>
+          <div><div class="label">Convergence — best titer vs experiments</div><div id="conv" class="chart"></div></div>
           <div><div class="label">Next batch proposed</div><div id="prop1"></div></div>
         </div>
       </section>
@@ -77,28 +85,28 @@
         <div class="head">
           <div>
             <h2>Multi-objective optimization</h2>
-            <p class="note">Maximize titer AND purity together (they peak at different recipes). The cobalt line is the Pareto front: the achievable tradeoffs.</p>
+            <p class="note">Maximize titer and purity together (they peak at different recipes). The emerald line is the Pareto front: the achievable tradeoffs.</p>
           </div>
-          <button id="run2">Run</button>
+          <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg>Run</button>
         </div>
         <div class="stats">
-          <div class="stat"><div class="k">Pareto front size</div><div class="v brand" id="s2pf">—</div></div>
-          <div class="stat"><div class="k">Best titer</div><div class="v" id="s2t">—</div></div>
-          <div class="stat"><div class="k">Best purity</div><div class="v" id="s2p">—</div></div>
+          <div class="kpi hero"><div class="k">Pareto front</div><div class="v" id="s2pf">—</div></div>
+          <div class="kpi"><div class="k">Best titer</div><div class="v" id="s2t">—</div></div>
+          <div class="kpi"><div class="k">Best purity</div><div class="v" id="s2p">—</div></div>
         </div>
         <div class="row">
-          <div><div class="label">Titer vs purity (Pareto front)</div><div id="pareto" class="chart"></div></div>
+          <div><div class="label">Titer vs purity</div><div id="pareto" class="chart"></div></div>
           <div><div class="label">Next batch proposed</div><div id="prop2"></div></div>
         </div>
       </section>
     </main>
 
     <script>
-      const fg = "#8b93a7", grid = "#232733", brand = "#2d4fcb", muted = "#5b6072";
+      const accent = "#15a375", explore = "#c77e2e", grid = "#e8ece3", ink = "#6b7a6f", dot = "#b9c2ba";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-        font: { color: fg, family: "ui-monospace, monospace", size: 11 },
-        margin: { l: 48, r: 16, t: 10, b: 40 }, showlegend: false,
+        font: { color: ink, family: "JetBrains Mono, monospace", size: 11 },
+        margin: { l: 50, r: 16, t: 10, b: 42 }, showlegend: false,
       };
       const ax = { gridcolor: grid, zerolinecolor: grid, linecolor: grid };
 
@@ -114,7 +122,8 @@
         const t = d.trajectory;
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
-          line: { color: brand, width: 2.5 }, marker: { color: brand, size: 6 },
+          line: { color: accent, width: 2.5, shape: "spline" }, marker: { color: accent, size: 6 },
+          fill: "tozeroy", fillcolor: "rgba(21,163,117,0.10)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer" } }, { displayModeBar: false, responsive: true });
         document.getElementById("s1best").textContent = d.best_value.toFixed(3);
         const gap = Math.sqrt(d.best_recipe.reduce((s, v, i) => s + (v - d.optimum[i]) ** 2, 0));
@@ -129,9 +138,9 @@
         const d = await (await fetch("/api/multi")).json();
         Plotly.newPlot("pareto", [
           { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers",
-            marker: { color: muted, size: 7 }, name: "runs" },
+            marker: { color: dot, size: 7 }, name: "runs" },
           { x: d.pareto.map((p) => p.titer), y: d.pareto.map((p) => p.purity), mode: "lines+markers",
-            line: { color: brand, width: 2.5 }, marker: { color: brand, size: 9 }, name: "Pareto front" },
+            line: { color: accent, width: 2.5 }, marker: { color: accent, size: 9 }, name: "Pareto front" },
         ], { ...base, xaxis: { ...ax, title: "titer →" }, yaxis: { ...ax, title: "purity →" } }, { displayModeBar: false, responsive: true });
         const last = d.trajectory[d.trajectory.length - 1];
         document.getElementById("s2pf").textContent = last.pareto;
