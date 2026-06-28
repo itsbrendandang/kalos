@@ -1,11 +1,11 @@
-"""Voyager Engine portal — a small web view that runs the real engine.
+"""Cultivar Engine portal — a small web view that runs the real engine.
 
 A FastAPI app that, on request, runs the BoTorch optimization (single- and
 multi-objective) on a synthetic bioprocess surface and returns the results, plus
 a single page that charts them. It is a *viewer over the live engine*, not a
 mock: every number comes from an actual BoTorch fit + acquisition.
 
-Run:  python -m voyager.portal   (then open http://127.0.0.1:8050)
+Run:  python -m cultivar.portal   (then open http://127.0.0.1:8050)
 Needs the portal extra:  pip install -e ".[portal]"
 """
 from __future__ import annotations
@@ -16,11 +16,11 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from voyager.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
-from voyager.core.optimize import propose
-from voyager.core.surrogate import Surrogate
+from cultivar.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
+from cultivar.core.optimize import propose
+from cultivar.core.surrogate import Surrogate
 
-app = FastAPI(title="Voyager Engine Portal")
+app = FastAPI(title="Cultivar Engine Portal")
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)

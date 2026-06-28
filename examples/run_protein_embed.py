@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without inst
 
 import numpy as np  # noqa: E402
 
-from voyager.features import ESM2Embedder, build_feature_table  # noqa: E402
+from cultivar.features import ESM2Embedder, build_feature_table  # noqa: E402
 
 # illustrative product protein fragments (public sequences)
 PRODUCTS = {

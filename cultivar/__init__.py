@@ -1,4 +1,4 @@
-"""Voyager platform: BoTorch Bayesian optimization for bioprocess development,
+"""Cultivar platform: BoTorch Bayesian optimization for bioprocess development,
 with NVIDIA BioNeMo / ESM-2 protein features.
 """
 from .core.surrogate import Surrogate
