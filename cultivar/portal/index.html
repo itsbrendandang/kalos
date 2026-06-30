@@ -99,6 +99,22 @@
           <div><div class="label">Next batch proposed</div><div id="prop2"></div></div>
         </div>
       </section>
+
+      <section class="panel">
+        <div class="head">
+          <div>
+            <h2>Run your own data</h2>
+            <p class="note">Drop a CSV, TSV, or Excel run sheet — one experiment per row, with a measured output column. The engine fits, cross-validates honestly (grouped, leakage-controlled), ranks the drivers, and proposes the next batch. Parsed by this local server only.</p>
+          </div>
+        </div>
+        <div id="drop" style="display:flex; flex-direction:column; align-items:center; gap:10px; border:2px dashed var(--border); border-radius:14px; background:var(--bg); padding:34px 20px; text-align:center; cursor:pointer; transition:border-color .15s, background .15s;">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg>
+          <div style="font-weight:600; color:var(--fg);">Drop a run sheet here<span style="font-weight:400; color:var(--muted);"> or click to choose</span></div>
+          <div style="font-family:var(--mono); font-size:11px; color:var(--muted);">CSV · TSV · XLSX · parsed locally</div>
+        </div>
+        <input id="rfile" type="file" accept=".csv,.tsv,.xlsx,.xls" style="display:none" />
+        <div id="runresult" style="margin-top:18px;"></div>
+      </section>
     </main>
 
     <script>
@@ -154,6 +170,76 @@
       document.getElementById("run2").onclick = runMulti;
       runSingle();
       runMulti();
+    </script>
+
+    <script>
+      (function () {
+        const accent = "#15a375", explore = "#c77e2e", grid = "#e8ece3", ink = "#586a5e", dot = "#b9c2ba";
+        const drop = document.getElementById("drop"), inp = document.getElementById("rfile"), out = document.getElementById("runresult");
+        let curFile = null;
+        const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+        const fmt = (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(3));
+        const pbase = { paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", showlegend: false, font: { color: ink, family: "JetBrains Mono, monospace", size: 10 } };
+
+        drop.onclick = () => inp.click();
+        inp.onchange = (e) => { const f = e.target.files[0]; if (f) runFile(f); };
+        drop.ondragover = (e) => { e.preventDefault(); drop.style.borderColor = accent; drop.style.background = "var(--accent-soft)"; };
+        drop.ondragleave = () => { drop.style.borderColor = "var(--border)"; drop.style.background = "var(--bg)"; };
+        drop.ondrop = (e) => { e.preventDefault(); drop.style.borderColor = "var(--border)"; drop.style.background = "var(--bg)"; const f = e.dataTransfer.files[0]; if (f) runFile(f); };
+
+        const errBox = (m) => '<div style="border:1px solid #e6c2a0;background:#fbefdd;color:#a05f20;border-radius:10px;padding:10px 12px;font-size:13px;">' + esc(m) + "</div>";
+
+        async function runFile(file, target) {
+          curFile = file;
+          out.innerHTML = '<div style="font-family:var(--mono);font-size:12px;color:var(--muted);padding:8px 0;">Analyzing ' + esc(file.name) + " …</div>";
+          const fd = new FormData(); fd.append("file", file); if (target) fd.append("target", target);
+          let d;
+          try { d = await (await fetch("/api/run", { method: "POST", body: fd })).json(); }
+          catch (err) { out.innerHTML = errBox("Could not reach the engine."); return; }
+          if (d.error) { out.innerHTML = errBox(d.error); return; }
+          render(d);
+        }
+
+        function render(d) {
+          const cv = d.cv_spearman == null ? "n/a" : d.cv_spearman.toFixed(2);
+          const sel = '<select id="tsel" style="font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:8px;padding:4px 6px;background:#fff;color:var(--fg);">' +
+            d.targets.map((t) => '<option ' + (t === d.target ? "selected" : "") + ">" + esc(t) + "</option>").join("") + "</select>";
+          out.innerHTML =
+            '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;">' +
+              '<div style="font-family:var(--mono);font-size:12px;color:var(--muted);">' + esc(curFile.name) + " · " + d.n + " rows · " + d.d + " inputs" + (d.group_col ? " · grouped by " + esc(d.group_col) : "") + "</div>" +
+              '<label style="margin-left:auto;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);">maximize ' + sel + "</label>" +
+            "</div>" +
+            '<div class="stats">' +
+              '<div class="kpi hero"><div class="k">Best ' + esc(d.target) + '</div><div class="v">' + fmt(d.best) + "</div></div>" +
+              '<div class="kpi"><div class="k">Held-out rank corr</div><div class="v">' + cv + "</div></div>" +
+              '<div class="kpi"><div class="k">Runs / inputs</div><div class="v">' + d.n + "/" + d.d + "</div></div>" +
+            "</div>" +
+            '<div class="row" style="margin-bottom:14px;">' +
+              '<div><div class="label">Drivers — rank correlation with ' + esc(d.target) + '</div><div id="rdrv" class="chart"></div></div>' +
+              '<div><div class="label">Predicted vs measured (out-of-fold)</div><div id="rpvm" class="chart"></div></div>' +
+            "</div>" +
+            '<div class="label">Recommended next experiments</div><div id="rtbl"></div>';
+
+          document.getElementById("tsel").onchange = (e) => runFile(curFile, e.target.value);
+
+          const dn = d.drivers.map((x) => x.name).reverse(), dv = d.drivers.map((x) => x.rho).reverse();
+          Plotly.newPlot("rdrv", [{ type: "bar", orientation: "h", x: dv, y: dn, marker: { color: dv.map((v) => (v >= 0 ? accent : explore)) } }],
+            { ...pbase, margin: { l: 134, r: 12, t: 6, b: 28 }, xaxis: { gridcolor: grid, zeroline: true, zerolinecolor: "#cfd6cd" }, yaxis: { automargin: true } },
+            { displayModeBar: false, responsive: true });
+
+          const a = d.oof.map((p) => p[0]), pr = d.oof.map((p) => p[1]);
+          const lo = Math.min(...a, ...pr), hi = Math.max(...a, ...pr);
+          Plotly.newPlot("rpvm", [
+            { x: a, y: pr, mode: "markers", marker: { color: accent, size: 6 } },
+            { x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: dot, width: 1.5, dash: "dash" } }],
+            { ...pbase, margin: { l: 48, r: 12, t: 6, b: 34 }, xaxis: { title: "measured", gridcolor: grid }, yaxis: { title: "predicted", gridcolor: grid } },
+            { displayModeBar: false, responsive: true });
+
+          const head = d.proposal_features.map((c) => "<th>" + esc(c) + "</th>").join("");
+          const body = d.proposals.map((r, i) => "<tr><td>#" + (i + 1) + "</td>" + r.map((v) => "<td>" + v + "</td>").join("") + "</tr>").join("");
+          document.getElementById("rtbl").innerHTML = "<table><thead><tr><th></th>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+        }
+      })();
     </script>
   </body>
 </html>

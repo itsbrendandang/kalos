@@ -23,7 +23,7 @@ dependencies = [
 # Real ESM-2 / BioNeMo protein embeddings. The lean KmerEmbedder needs none of this.
 protein = ["transformers>=4.40"]
 # The web portal (FastAPI viewer over the live engine).
-portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
 dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
