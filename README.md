@@ -18,12 +18,36 @@ kalos/
     optimize.py        qLogEI acquisition + optimize_acqf -> next batch
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
     evaluation.py      grouped cross-validated Spearman (leakage-controlled)
-    gates.py           fail-closed promotion gates (carried from the lean engine)
+    splits.py          group-aware CV + a leakage tripwire (assert_no_group_leakage)
+    drivers.py         signed Spearman drivers with bootstrap confidence intervals
+    conformal.py       split-conformal prediction intervals (distribution-free)
+    gates.py           fail-closed promotion gates
+  data/
+    anonymizer.py      strip identity, hash grouping keys, mint stable barcodes
+    barcode_registry.py  the organized home for all run data (barcode -> run, queryable, persistable)
+  ingest/
+    feed.py            push DataFeed + ProposalSink, anonymized on read
+    runner.py          decoupled closed loop: read feed -> fit -> propose -> sink
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
-  portal/            FastAPI web viewer over the live engine (convergence + Pareto front)
-examples/            demos (BO loop, multi-objective, protein) + run_on_media_data.py (real data via KALOS_MEDIA_DATA)
+  portal/            FastAPI web viewer + a "run your own data" drop zone
+examples/            demos + run_on_media_data.py + organize_data.py (folder -> barcode registry)
 tests/               pytest
+```
+
+A lot of the honest-evaluation and data machinery was carried over from a prior
+lean engine (`voyager-brain-rebuild`): the leakage-controlled splits, the
+bootstrap-Spearman drivers, the data anonymization, and the push-feed ingestion.
+
+## Data registry (barcodes)
+
+All run data is organized through a barcode registry: every dataset gets a
+`KAL-DS-*` barcode and every run a stable, content-derived `KAL-*` barcode, with
+client/strain identity stripped and grouping keys hashed on the way in. Look a
+run up by barcode, filter by dataset, or export a training table.
+
+```bash
+python examples/organize_data.py <data_dir> registry.json   # folder of CSV/TSV -> one registry
 ```
 
 ## Install / run
