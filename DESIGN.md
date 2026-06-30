@@ -21,8 +21,8 @@ Two hues, used for meaning, never decoration.
 - **Surfaces:** warm paper page `--bg: #EFF1EA`, white cards `--card: #FFFFFF`,
   and a single grounding deep-green sidebar `--ink-surface: #13231C`. The dark
   sidebar is the only dark element; it anchors the bright canvas.
-- **Ink:** `--fg: #15241C` (near-black with a green cast), `--muted: #6B7A6F`,
-  faint `--muted-2: #98A69C`.
+- **Ink:** `--fg: #15241C` (near-black with a green cast), `--muted: #586A5E`
+  (darkened to clear WCAG AA 4.5:1 on the warm paper), faint `--muted-2: #98A69C`.
 - **Lines:** `--border: #E8ECE3`, soft. Used sparingly; depth comes from
   elevation, not boxes.
 - **Diverging data** (correlations, signed drivers): emerald for positive, clay
@@ -62,8 +62,11 @@ Three roles, each a real typeface (no Inter / Roboto / Arial / system default).
   10%-opacity emerald area fill, clay for the second series, `--border` grid,
   muted mono axis labels, no animation on chrome. A filled end-dot with a soft
   halo marks "current best."
-- **Badges / chips** — pill, soft-fill background with the same-hue dark text
-  (emerald chip = emerald text on `#E4F4ED`; clay chip = clay text on `#FBEFDD`).
+- **Badges / chips** — pill, soft-fill background with the same-hue *deep* text
+  for AA contrast (emerald chip = `#0E7C57` text on `#E4F4ED`; clay chip =
+  `#A05F20` text on `#FBEFDD`). Never the mid-tone accent on its own soft fill.
+- **Hero on color** — the emerald hero card uses the deeper `#0E7C57` so white
+  label and value both clear AA, not the mid `#15A375`.
 - **Sidebar** — deep-green `--ink-surface`, the leaf wordmark, active item in
   emerald fill, inactive in muted sage. The one dark surface.
 

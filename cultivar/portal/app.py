@@ -28,13 +28,21 @@ TITER_OPT = np.array([0.7, 0.3, 0.5])
 PURITY_OPT = np.array([0.2, 0.8, 0.4])  # different recipe -> titer/purity trade off
 
 
+# Synthetic but honest demo objectives in real units: titer 0..22 mg/L (peaks at
+# TITER_OPT), purity 0..100 % (peaks at a different recipe, so they trade off).
 def _titer(X: np.ndarray) -> np.ndarray:
-    return -np.sum((np.atleast_2d(X) - TITER_OPT) ** 2, axis=1)
+    d = np.sum((np.atleast_2d(X) - TITER_OPT) ** 2, axis=1)
+    return 22.0 * np.exp(-3.0 * d)
+
+
+def _purity(X: np.ndarray) -> np.ndarray:
+    d = np.sum((np.atleast_2d(X) - PURITY_OPT) ** 2, axis=1)
+    return 100.0 * np.exp(-3.0 * d)
 
 
 def _objectives(X: np.ndarray) -> np.ndarray:
     x = np.atleast_2d(X)
-    return np.stack([_titer(x), -np.sum((x - PURITY_OPT) ** 2, axis=1)], axis=-1)
+    return np.stack([_titer(x), _purity(x)], axis=-1)
 
 
 @app.get("/", response_class=HTMLResponse)
