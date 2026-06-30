@@ -4,10 +4,10 @@
 Honest test of the BoTorch engine on actual Anagram runs: leakage-controlled
 grouped-CV of the surrogate, a proposed next batch, and the multi-objective
 titer-vs-purity Pareto front. The data is proprietary and read from
-CULTIVAR_MEDIA_DATA (a merged *_protein_expression_and_media_composition.tsv);
+KALOS_MEDIA_DATA (a merged *_protein_expression_and_media_composition.tsv);
 nothing is vendored.
 
-Run:  CULTIVAR_MEDIA_DATA=/path/to/combined.tsv python examples/run_on_media_data.py
+Run:  KALOS_MEDIA_DATA=/path/to/combined.tsv python examples/run_on_media_data.py
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from cultivar import (  # noqa: E402
+from kalos import (  # noqa: E402
     MultiObjectiveSurrogate,
     Surrogate,
     check_gates,
@@ -56,9 +56,9 @@ def load(path: Path):
 
 
 def main() -> int:
-    path = Path(os.environ.get("CULTIVAR_MEDIA_DATA", "")).expanduser()
+    path = Path(os.environ.get("KALOS_MEDIA_DATA", "")).expanduser()
     if not path.exists():
-        print("set CULTIVAR_MEDIA_DATA to a merged media+titer TSV.")
+        print("set KALOS_MEDIA_DATA to a merged media+titer TSV.")
         return 1
     df, feats = load(path)
     X = df[feats].to_numpy(float)
@@ -67,7 +67,7 @@ def main() -> int:
     groups = df[GROUP].tolist() if GROUP in df.columns else None
 
     print("=" * 72)
-    print(f"CULTIVAR on real media data  ({path.name})")
+    print(f"KALOS on real media data  ({path.name})")
     print(f"  {len(df)} runs x {len(feats)} varying inputs -> {TARGET}")
     print(f"  titer range {y.min():.4f}..{y.max():.4f}  | non-producers {int((y == 0).sum())} "
           f"({100 * (y == 0).mean():.0f}%)  | groups: {GROUP}")

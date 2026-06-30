@@ -1,4 +1,4 @@
-# Cultivar
+# Kalos
 
 A Bayesian-optimization platform for bioprocess development, built on **BoTorch**
 (a real GP surrogate + acquisition) with **NVIDIA BioNeMo / ESM-2** protein
@@ -12,7 +12,7 @@ hand-rolled GP + EI.
 ## What's here
 
 ```
-cultivar/
+kalos/
   core/
     surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
     optimize.py        qLogEI acquisition + optimize_acqf -> next batch
@@ -22,7 +22,7 @@ cultivar/
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
   portal/            FastAPI web viewer over the live engine (convergence + Pareto front)
-examples/            demos (BO loop, multi-objective, protein) + run_on_media_data.py (real data via CULTIVAR_MEDIA_DATA)
+examples/            demos (BO loop, multi-objective, protein) + run_on_media_data.py (real data via KALOS_MEDIA_DATA)
 tests/               pytest
 ```
 
@@ -35,10 +35,10 @@ python -m pip install -e ".[protein]"   # + real ESM-2 (transformers)
 python examples/run_bo_loop.py          # BoTorch closed-loop demo
 python examples/run_multiobjective.py   # multi-objective (titer + purity) Pareto demo
 python examples/run_protein_embed.py    # ESM-2 embedding demo (downloads a small model)
-python -m pytest                        # tests (CULTIVAR_TEST_ESM=1 to include ESM-2)
+python -m pytest                        # tests (KALOS_TEST_ESM=1 to include ESM-2)
 
 python -m pip install -e ".[portal]"    # the web portal (FastAPI)
-python -m cultivar.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
+python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
 ```
 
 ## Device

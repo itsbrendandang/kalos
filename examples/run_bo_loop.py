@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without inst
 
 import numpy as np  # noqa: E402
 
-from cultivar.core.optimize import propose  # noqa: E402
-from cultivar.core.surrogate import Surrogate  # noqa: E402
+from kalos.core.optimize import propose  # noqa: E402
+from kalos.core.surrogate import Surrogate  # noqa: E402
 
 OPT = np.array([0.7, 0.3, 0.5])  # the (unknown) optimum of the synthetic surface
 

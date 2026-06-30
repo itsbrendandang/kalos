@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pytest
 
-from cultivar import (
+from kalos import (
     GatesConfig,
     MultiObjectiveSurrogate,
     Surrogate,
@@ -15,7 +15,7 @@ from cultivar import (
     propose,
     propose_multiobjective,
 )
-from cultivar.features import KmerEmbedder
+from kalos.features import KmerEmbedder
 
 
 def test_surrogate_fits_signal():
@@ -99,12 +99,12 @@ def test_multiobjective_proposes_and_pareto():
 
 
 @pytest.mark.skipif(
-    not os.environ.get("CULTIVAR_TEST_ESM"),
-    reason="set CULTIVAR_TEST_ESM=1 to run the ESM-2 model download + embed test",
+    not os.environ.get("KALOS_TEST_ESM"),
+    reason="set KALOS_TEST_ESM=1 to run the ESM-2 model download + embed test",
 )
 def test_esm2_embeds():
     pytest.importorskip("transformers")
-    from cultivar.features import ESM2Embedder
+    from kalos.features import ESM2Embedder
 
     e = ESM2Embedder()
     v = e.embed("MKWVTFISLLFLFSSAYSRGVF")

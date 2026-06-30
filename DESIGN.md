@@ -1,11 +1,11 @@
-# Design notes — Cultivar
+# Design notes — Kalos
 
-Authored for this repo. The source of truth for how Cultivar looks and feels.
+Authored for this repo. The source of truth for how Kalos looks and feels.
 Standalone identity, deliberately unlike any prior project.
 
 ## The memorable thing
 
-After someone sees Cultivar once, they should remember: **a calm, optimistic
+After someone sees Kalos once, they should remember: **a calm, optimistic
 tool about growth.** Bright and warm, not a dark instrument console. Precise
 where it counts, friendly everywhere else. Every choice below serves that.
 
@@ -78,7 +78,7 @@ drawing). Chrome stays still. 150-250ms ease. Respect `prefers-reduced-motion`.
 ## Rules / anti-slop
 
 - No dark terminal aesthetic, no cobalt, no hairline-grid console look (that was
-  the prior, separate project — Cultivar is its own thing).
+  the prior, separate project — Kalos is its own thing).
 - No purple gradients, no glow on text, no 3-equal-icon-card rows, no centered
   everything, no decorative blobs.
 - Sentence case everywhere. No ALL CAPS headers.

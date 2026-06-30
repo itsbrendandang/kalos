@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without inst
 
 import numpy as np  # noqa: E402
 
-from cultivar.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective  # noqa: E402
+from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective  # noqa: E402
 
 TITER_OPT = np.array([0.7, 0.3, 0.5])
 PURITY_OPT = np.array([0.2, 0.8, 0.4])  # different recipe -> the two objectives tension
