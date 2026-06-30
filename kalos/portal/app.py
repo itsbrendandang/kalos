@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
 
@@ -25,7 +26,15 @@ from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobje
 from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
 
-app = FastAPI(title="Kalos Engine Portal")
+app = FastAPI(title="Kalos Engine API")
+
+# Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)
