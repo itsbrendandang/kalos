@@ -49,7 +49,17 @@
       button:hover { background: var(--accent-hover); }
       button:disabled { opacity: 0.55; cursor: wait; }
       .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-      .label { font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 8px; }
+      .label { font-size: 12.5px; color: var(--fg); font-weight: 600; margin-bottom: 8px; }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 10px; }
+      .tag { display: inline-block; font-family: var(--sans); font-size: 10px; font-weight: 600;
+        padding: 2px 8px; border-radius: 999px; }
+      .tag.exploit { color: var(--accent-hover); background: var(--accent-soft); }
+      .tag.explore { color: #8f5418; background: #fbefdd; }
+      .intro { max-width: 1080px; margin: -2px auto 0; padding: 0 30px; color: var(--muted); font-size: 13px; }
+      .intro b { color: var(--fg); font-weight: 600; }
+      .demo-badge { font-family: var(--sans); font-size: 10px; font-weight: 600; color: #8f5418;
+        background: #fbefdd; padding: 3px 9px; border-radius: 999px; }
+      .hint { cursor: help; border-bottom: 1px dotted var(--muted); }
     </style>
   </head>
   <body>
@@ -58,17 +68,18 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#5bd39b"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#15a375"/></svg>
         <h1>Kalos</h1>
       </span>
-      <span class="sub">BoTorch + ESM-2</span>
+      <span class="sub" title="Built on BoTorch + ESM-2">powered by BoTorch</span>
       <span class="live">live optimization</span>
     </header>
+    <p class="intro"><b>Kalos suggests which experiment to run next</b> to reach your target with fewer experiments. Drop your own data below, or explore the live examples.</p>
     <main>
       <section class="panel">
         <div class="head">
           <div>
-            <h2>Single-objective optimization</h2>
-            <p class="note">Maximize titer over a 3-input recipe. Best-so-far should climb as the loop proposes and measures.</p>
+            <h2>Optimize one outcome <span class="demo-badge">Example data</span></h2>
+            <p class="note">Maximize titer over a 3-input recipe. Best-so-far should climb as the loop proposes and measures. (single-objective)</p>
           </div>
-          <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg>Run</button>
+          <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
         </div>
         <div class="stats">
           <div class="kpi hero"><div class="k">Best titer (mg/L)</div><div class="v" id="s1best">—</div></div>
@@ -84,10 +95,10 @@
       <section class="panel">
         <div class="head">
           <div>
-            <h2>Multi-objective optimization</h2>
-            <p class="note">Maximize titer and purity together (they peak at different recipes). The emerald line is the Pareto front: the achievable tradeoffs.</p>
+            <h2>Optimize two outcomes at once <span class="demo-badge">Example data</span></h2>
+            <p class="note">Maximize titer and purity together (they peak at different recipes). The emerald line is the Pareto front: the achievable tradeoffs you can pick from. (multi-objective)</p>
           </div>
-          <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg>Run</button>
+          <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
         </div>
         <div class="stats">
           <div class="kpi hero"><div class="k">Pareto front</div><div class="v" id="s2pf">—</div></div>
@@ -126,44 +137,58 @@
       };
       const ax = { gridcolor: grid, zerolinecolor: grid, linecolor: grid };
 
-      function table(el, rows, cols) {
-        const head = cols.map((c) => `<th>${c}</th>`).join("");
-        const body = rows.map((r) => "<tr>" + r.map((v) => `<td>${v}</td>`).join("") + "</tr>").join("");
+      function esc(s) { return String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
+      function setRun(btn, running) {
+        btn.disabled = running;
+        const lab = btn.querySelector(".rlabel");
+        if (lab) lab.textContent = running ? "Running…" : "Run";
+      }
+      // proposal table: inputs + predicted value (with uncertainty) + a why tag
+      function propTable(el, cols, proposals, predHead, predFn) {
+        const head = "<th></th>" + cols.map((c) => `<th>${esc(c)}</th>`).join("") +
+          `<th>${esc(predHead)}</th><th style="text-align:left">why</th>`;
+        const body = proposals.map((p, i) => {
+          const vals = p.vals.map((v) => `<td>${v}</td>`).join("");
+          const why = `<span class="tag ${p.mode}">${p.mode}</span> <span style="color:var(--muted)">${esc(p.reason)}</span>`;
+          return `<tr><td>#${i + 1}</td>${vals}<td>${predFn(p)}</td><td style="text-align:left">${why}</td></tr>`;
+        }).join("");
         el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
       }
 
       async function runSingle() {
-        const btn = document.getElementById("run1"); btn.disabled = true; btn.textContent = "Running…";
+        const btn = document.getElementById("run1"); setRun(btn, true);
         const d = await (await fetch("/api/single")).json();
         const t = d.trajectory;
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
-          line: { color: accent, width: 2.5, shape: "spline" }, marker: { color: accent, size: 6 },
+          line: { color: accent, width: 2.5 }, marker: { color: accent, size: 6 },
           fill: "tozeroy", fillcolor: "rgba(21,163,117,0.10)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer (mg/L)" } }, { displayModeBar: false, responsive: true });
+        document.getElementById("conv").setAttribute("aria-label", `Best titer rose to ${d.best_value.toFixed(1)} mg/L over ${t[t.length - 1].n} experiments.`);
         document.getElementById("s1best").textContent = d.best_value.toFixed(1);
         const gap = Math.sqrt(d.best_recipe.reduce((s, v, i) => s + (v - d.optimum[i]) ** 2, 0));
         document.getElementById("s1gap").textContent = gap.toFixed(3);
         document.getElementById("s1n").textContent = t[t.length - 1].n;
-        table(document.getElementById("prop1"), d.proposals.map((p, i) => [`#${i + 1}`, ...p]), ["", "x1", "x2", "x3"]);
-        btn.disabled = false; btn.textContent = "Run";
+        propTable(document.getElementById("prop1"), ["x1", "x2", "x3"], d.proposals, "pred. titer", (p) => `${p.pred} ± ${p.std}`);
+        setRun(btn, false);
       }
 
       async function runMulti() {
-        const btn = document.getElementById("run2"); btn.disabled = true; btn.textContent = "Running…";
+        const btn = document.getElementById("run2"); setRun(btn, true);
         const d = await (await fetch("/api/multi")).json();
         Plotly.newPlot("pareto", [
-          { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers",
-            marker: { color: dot, size: 7 }, name: "runs" },
-          { x: d.pareto.map((p) => p.titer), y: d.pareto.map((p) => p.purity), mode: "lines+markers",
-            line: { color: accent, width: 2.5 }, marker: { color: accent, size: 9 }, name: "Pareto front" },
-        ], { ...base, xaxis: { ...ax, title: "titer (mg/L) →" }, yaxis: { ...ax, title: "purity (%) →" } }, { displayModeBar: false, responsive: true });
+          { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers", name: "all runs",
+            marker: { color: "#8a948c", size: 7, symbol: "circle-open" } },
+          { x: d.pareto.map((p) => p.titer), y: d.pareto.map((p) => p.purity), mode: "lines+markers", name: "Pareto front",
+            line: { color: accent, width: 2.5 }, marker: { color: accent, size: 9 } },
+        ], { ...base, showlegend: true, legend: { orientation: "h", y: 1.14, x: 0, font: { size: 10 } }, xaxis: { ...ax, title: "titer (mg/L) →" }, yaxis: { ...ax, title: "purity (%) →" } }, { displayModeBar: false, responsive: true });
         const last = d.trajectory[d.trajectory.length - 1];
+        document.getElementById("pareto").setAttribute("aria-label", `Pareto front of ${last.pareto} tradeoff points; best titer ${last.best_titer.toFixed(1)} mg/L, best purity ${last.best_purity.toFixed(0)} percent.`);
         document.getElementById("s2pf").textContent = last.pareto;
         document.getElementById("s2t").textContent = last.best_titer.toFixed(1);
         document.getElementById("s2p").textContent = last.best_purity.toFixed(0);
-        table(document.getElementById("prop2"), d.proposals.map((p, i) => [`#${i + 1}`, ...p]), ["", "x1", "x2", "x3"]);
-        btn.disabled = false; btn.textContent = "Run";
+        propTable(document.getElementById("prop2"), ["x1", "x2", "x3"], d.proposals, "pred. titer / purity", (p) => `${p.pred_titer} / ${p.pred_purity}%`);
+        setRun(btn, false);
       }
 
       document.getElementById("run1").onclick = runSingle;
@@ -181,13 +206,17 @@
         const fmt = (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(3));
         const pbase = { paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", showlegend: false, font: { color: ink, family: "JetBrains Mono, monospace", size: 10 } };
 
+        drop.setAttribute("role", "button");
+        drop.setAttribute("tabindex", "0");
+        drop.setAttribute("aria-label", "Upload a run sheet (CSV, TSV, or Excel)");
         drop.onclick = () => inp.click();
+        drop.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inp.click(); } };
         inp.onchange = (e) => { const f = e.target.files[0]; if (f) runFile(f); };
         drop.ondragover = (e) => { e.preventDefault(); drop.style.borderColor = accent; drop.style.background = "var(--accent-soft)"; };
         drop.ondragleave = () => { drop.style.borderColor = "var(--border)"; drop.style.background = "var(--bg)"; };
         drop.ondrop = (e) => { e.preventDefault(); drop.style.borderColor = "var(--border)"; drop.style.background = "var(--bg)"; const f = e.dataTransfer.files[0]; if (f) runFile(f); };
 
-        const errBox = (m) => '<div style="border:1px solid #e6c2a0;background:#fbefdd;color:#a05f20;border-radius:10px;padding:10px 12px;font-size:13px;">' + esc(m) + "</div>";
+        const errBox = (m) => '<div style="border:1px solid #e6c2a0;background:#fbefdd;color:#8f5418;border-radius:10px;padding:10px 12px;font-size:13px;">' + esc(m) + "</div>";
 
         async function runFile(file, target) {
           curFile = file;
@@ -201,8 +230,10 @@
         }
 
         function render(d) {
-          const cv = d.cv_spearman == null ? "n/a" : d.cv_spearman.toFixed(2);
-          const sel = '<select id="tsel" style="font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:8px;padding:4px 6px;background:#fff;color:var(--fg);">' +
+          const rv = d.cv_spearman;
+          const relWord = rv == null ? "n/a" : rv < 0.2 ? "Low" : rv < 0.5 ? "Moderate" : "Good";
+          const relTip = "How well the model predicted runs it had never seen (held-out rank correlation). Higher = more trustworthy suggestions. 0 = guessing, 1 = perfect.";
+          const sel = '<select id="tsel" style="font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:8px;padding:6px 8px;min-height:28px;background:#fff;color:var(--fg);">' +
             d.targets.map((t) => '<option ' + (t === d.target ? "selected" : "") + ">" + esc(t) + "</option>").join("") + "</select>";
           out.innerHTML =
             '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;">' +
@@ -211,7 +242,7 @@
             "</div>" +
             '<div class="stats">' +
               '<div class="kpi hero"><div class="k">Best ' + esc(d.target) + '</div><div class="v">' + fmt(d.best) + "</div></div>" +
-              '<div class="kpi"><div class="k">Held-out rank corr</div><div class="v">' + cv + "</div></div>" +
+              '<div class="kpi" title="' + relTip + '"><div class="k"><span class="hint">Model reliability</span></div><div class="v">' + relWord + (rv == null ? "" : ' <span style="font-size:13px;color:var(--muted)">(' + rv.toFixed(2) + ")</span>") + "</div></div>" +
               '<div class="kpi"><div class="k">Runs / inputs</div><div class="v">' + d.n + "/" + d.d + "</div></div>" +
             "</div>" +
             '<div class="row" style="margin-bottom:14px;">' +
@@ -226,18 +257,27 @@
           Plotly.newPlot("rdrv", [{ type: "bar", orientation: "h", x: dv, y: dn, marker: { color: dv.map((v) => (v >= 0 ? accent : explore)) } }],
             { ...pbase, margin: { l: 134, r: 12, t: 6, b: 28 }, xaxis: { gridcolor: grid, zeroline: true, zerolinecolor: "#cfd6cd" }, yaxis: { automargin: true } },
             { displayModeBar: false, responsive: true });
+          const topUp = d.drivers.filter((x) => x.rho > 0)[0], topDn = d.drivers.filter((x) => x.rho < 0)[0];
+          document.getElementById("rdrv").setAttribute("aria-label",
+            "Drivers of " + d.target + (topUp ? ". Raises it most: " + topUp.name : "") + (topDn ? ". Lowers it most: " + topDn.name : "") + ".");
 
           const a = d.oof.map((p) => p[0]), pr = d.oof.map((p) => p[1]);
           const lo = Math.min(...a, ...pr), hi = Math.max(...a, ...pr);
           Plotly.newPlot("rpvm", [
-            { x: a, y: pr, mode: "markers", marker: { color: accent, size: 6 } },
-            { x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: dot, width: 1.5, dash: "dash" } }],
-            { ...pbase, margin: { l: 48, r: 12, t: 6, b: 34 }, xaxis: { title: "measured", gridcolor: grid }, yaxis: { title: "predicted", gridcolor: grid } },
+            { x: a, y: pr, mode: "markers", name: "held-out runs", marker: { color: accent, size: 6 } },
+            { x: [lo, hi], y: [lo, hi], mode: "lines", name: "perfect (y=x)", line: { color: "#8a948c", width: 1.5, dash: "dash" } }],
+            { ...pbase, showlegend: true, legend: { orientation: "h", y: 1.16, x: 0, font: { size: 9 } }, margin: { l: 48, r: 12, t: 6, b: 34 }, xaxis: { title: "measured", gridcolor: grid }, yaxis: { title: "predicted", gridcolor: grid } },
             { displayModeBar: false, responsive: true });
 
-          const head = d.proposal_features.map((c) => "<th>" + esc(c) + "</th>").join("");
-          const body = d.proposals.map((r, i) => "<tr><td>#" + (i + 1) + "</td>" + r.map((v) => "<td>" + v + "</td>").join("") + "</tr>").join("");
-          document.getElementById("rtbl").innerHTML = "<table><thead><tr><th></th>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+          // proposals: inputs + predicted target (with uncertainty) + why
+          const cols = d.proposal_features;
+          const head = "<th></th>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") + "<th>pred. " + esc(d.target) + "</th><th style='text-align:left'>why</th>";
+          const body = d.proposals.map((p, i) => {
+            const vals = p.vals.map((v) => "<td>" + v + "</td>").join("");
+            const why = '<span class="tag ' + p.mode + '">' + p.mode + '</span> <span style="color:var(--muted)">' + esc(p.reason) + "</span>";
+            return "<tr><td>#" + (i + 1) + "</td>" + vals + "<td>" + p.pred + " ± " + p.std + "</td><td style='text-align:left'>" + why + "</td></tr>";
+          }).join("");
+          document.getElementById("rtbl").innerHTML = "<table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
         }
       })();
     </script>

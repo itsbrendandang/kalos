@@ -64,7 +64,8 @@ Three roles, each a real typeface (no Inter / Roboto / Arial / system default).
   halo marks "current best."
 - **Badges / chips** — pill, soft-fill background with the same-hue *deep* text
   for AA contrast (emerald chip = `#0E7C57` text on `#E4F4ED`; clay chip =
-  `#A05F20` text on `#FBEFDD`). Never the mid-tone accent on its own soft fill.
+  `#8F5418` text on `#FBEFDD`, which clears 4.5:1). Never the mid-tone accent on
+  its own soft fill.
 - **Hero on color** — the emerald hero card uses the deeper `#0E7C57` so white
   label and value both clear AA, not the mid `#15A375`.
 - **Sidebar** — deep-green `--ink-surface`, the leaf wordmark, active item in

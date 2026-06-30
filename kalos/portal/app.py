@@ -23,7 +23,7 @@ from scipy.stats import spearmanr
 from kalos.core.evaluation import grouped_folds
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
 from kalos.core.optimize import propose
-from kalos.core.surrogate import Surrogate
+from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
 
 app = FastAPI(title="Kalos Engine Portal")
 
@@ -50,6 +50,32 @@ def _objectives(X: np.ndarray) -> np.ndarray:
     return np.stack([_titer(x), _purity(x)], axis=-1)
 
 
+def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
+    """Attach predicted value, uncertainty, and an explore/exploit rationale to
+    each proposed experiment. Explore = high model uncertainty (chosen to learn);
+    exploit = high predicted value (chosen to win). Current human-in-the-loop BO
+    research says a recommendation must carry exactly this."""
+    mean = np.asarray(mean, float).reshape(-1)
+    std = np.asarray(std, float).reshape(-1)
+    thr = float(np.quantile(std, 2 / 3)) if len(std) > 2 else float(std.max() if len(std) else 0.0)
+    eps = 0.02 * max(abs(best), 1e-9)
+    rows = []
+    for i in range(len(batch)):
+        m, sd = float(mean[i]), float(std[i])
+        gain = m - best
+        if gain > eps:
+            mode, reason = "exploit", f"predicted high (+{gain:.3g} vs best)"
+        elif sd >= thr:
+            mode, reason = "explore", f"reduce model uncertainty here (±{sd:.3g})"
+        else:
+            mode, reason = "explore", f"diversifies the batch (predicted {m:.3g}, ±{sd:.3g})"
+        row = {"pred": round(m, 3), "std": round(sd, 3), "mode": mode, "reason": reason}
+        row["vals"] = (np.round(batch[i], 3).tolist() if cols is None
+                       else [round(float(batch[i][j]), 3) for j in cols])
+        rows.append(row)
+    return rows
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _HTML
@@ -68,7 +94,10 @@ def run_single(rounds: int = 6, q: int = 2) -> dict:
         X = np.vstack([X, nxt])
         y = np.concatenate([y, _titer(nxt)])
         traj.append({"round": r + 1, "best": float(y.max()), "n": int(len(y))})
-        proposals = np.round(nxt, 3).tolist()
+    # annotate the last proposed batch with predicted value + uncertainty + why
+    incumbent = float(y[:-q].max())  # best before this batch was measured
+    mean, std = s.posterior(nxt)
+    proposals = _annotate(nxt, mean, std, incumbent)
     bi = int(y.argmax())
     return {
         "trajectory": traj,
@@ -95,8 +124,21 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
         traj.append(
             {"round": r + 1, "pareto": int(len(py)), "best_titer": float(Y[:, 0].max()), "best_purity": float(Y[:, 1].max())}
         )
-        proposals = np.round(nxt, 3).tolist()
+        last_batch = nxt
     s = MultiObjectiveSurrogate().fit(X, Y, bounds=BOUNDS)
+    # predicted titer + purity (with uncertainty) for each proposed experiment
+    import torch
+    post = s.model.posterior(torch.as_tensor(last_batch, dtype=DTYPE, device=DEVICE))
+    mY = post.mean.detach().cpu().numpy().reshape(len(last_batch), -1)
+    sdY = post.variance.clamp_min(1e-12).sqrt().detach().cpu().numpy().reshape(len(last_batch), -1)
+    sd_mean = sdY.mean(axis=1)
+    sd_thr = float(np.quantile(sd_mean, 2 / 3)) if len(sd_mean) > 2 else float(sd_mean.max())
+    proposals = [{
+        "vals": np.round(last_batch[i], 3).tolist(),
+        "pred_titer": round(float(mY[i, 0]), 1), "pred_purity": round(float(mY[i, 1]), 0),
+        "mode": "explore" if sd_mean[i] >= sd_thr else "exploit",
+        "reason": "fills a gap on the titer/purity frontier",
+    } for i in range(len(last_batch))]
     _, py = s.pareto()
     order = np.argsort(py[:, 0])
     return {
@@ -184,11 +226,12 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
     drv.sort(key=lambda d: -abs(d[1]))
     drv = drv[:8]
 
-    # proposed next batch
+    # proposed next batch, with predicted target + uncertainty + a why per row
     s = Surrogate().fit(X, y, bounds=bounds)
     batch = propose(s, bounds, q=5)
     show = [d[0] for d in drv[:4]]
     show_idx = [feats.index(f) for f in show]
+    p_mean, p_std = s.posterior(batch)
 
     return {
         "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
@@ -197,7 +240,7 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
         "best": round(float(y.max()), 4),
         "drivers": [{"name": c, "rho": round(r, 3)} for c, r in drv],
         "proposal_features": show,
-        "proposals": [[round(float(row[i]), 3) for i in show_idx] for row in batch],
+        "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
     }
 
