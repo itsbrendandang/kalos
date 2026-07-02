@@ -63,8 +63,8 @@ def make_splits(
     if use_strat:
         n_splits = min(n_splits, int(pd.Series(y_arr).value_counts().min()))
     if n_splits < 2:
-        warnings.warn("n_splits < 2 after guards; returning one dummy split (all-train).")
-        return [(np.arange(n), np.arange(n))]
+        warnings.warn("n_splits < 2 after guards; returning no splits (too few groups to evaluate).")
+        return []
 
     splits: List[Tuple[np.ndarray, np.ndarray]] = []
     if use_strat:

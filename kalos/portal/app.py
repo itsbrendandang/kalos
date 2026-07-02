@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
@@ -27,6 +27,9 @@ from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
 
 app = FastAPI(title="Kalos Engine API")
+
+# Reject run-sheet uploads larger than this (25 MiB) to bound memory use.
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 # Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
 app.add_middleware(
@@ -254,9 +257,31 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
     }
 
 
+async def _read_capped(file: UploadFile, limit: int) -> bytes | None:
+    """Read the upload in chunks, returning None if it exceeds `limit` bytes."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/run")
-async def run_uploaded(file: UploadFile = File(...), target: str = Form(default="")) -> JSONResponse:
-    raw = await file.read()
+async def run_uploaded(
+    request: Request, file: UploadFile = File(...), target: str = Form(default="")
+) -> JSONResponse:
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": "upload too large"}, status_code=413)
+    raw = await _read_capped(file, MAX_UPLOAD_BYTES)
+    if raw is None:
+        return JSONResponse({"error": "upload too large"}, status_code=413)
     name = (file.filename or "").lower()
     try:
         if name.endswith((".xlsx", ".xls")):

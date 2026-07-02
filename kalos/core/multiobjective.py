@@ -12,6 +12,8 @@ surrogate).
 """
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import torch
 from botorch.acquisition.multi_objective.logei import (
@@ -77,6 +79,16 @@ class MultiObjectiveSurrogate:
         return (y.min(dim=0).values - margin * span).cpu().numpy()
 
 
+def _make_sampler(mc_samples: int, seed: int) -> SobolQMCNormalSampler:
+    """Build the MC sampler, passing `seed` if this BoTorch supports it; otherwise
+    seed the global torch RNG before constructing it so sampling is reproducible."""
+    sample_shape = torch.Size([mc_samples])
+    if "seed" in inspect.signature(SobolQMCNormalSampler.__init__).parameters:
+        return SobolQMCNormalSampler(sample_shape=sample_shape, seed=seed)
+    torch.manual_seed(seed)
+    return SobolQMCNormalSampler(sample_shape=sample_shape)
+
+
 def propose_multiobjective(
     surrogate: MultiObjectiveSurrogate,
     bounds,
@@ -85,8 +97,12 @@ def propose_multiobjective(
     num_restarts: int = 10,
     raw_samples: int = 128,
     mc_samples: int = 128,
+    seed: int = 0,
 ) -> np.ndarray:
-    """Return q proposed points (q x d) that best expand the Pareto front."""
+    """Return q proposed points (q x d) that best expand the Pareto front.
+
+    seed: seeds the MC sampler and the acquisition optimizer for reproducibility.
+    """
     assert surrogate.model is not None and surrogate._X is not None, "fit the surrogate first"
     b = torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE)
     rp = surrogate.default_ref_point() if ref_point is None else np.asarray(ref_point, float)
@@ -96,8 +112,9 @@ def propose_multiobjective(
         ref_point=rp,
         X_baseline=surrogate._X,
         prune_baseline=True,
-        sampler=SobolQMCNormalSampler(sample_shape=torch.Size([mc_samples])),
+        sampler=_make_sampler(mc_samples, seed),
     )
+    torch.manual_seed(seed)
     candidates, _ = optimize_acqf(
         acq_function=acq, bounds=b, q=q, num_restarts=num_restarts, raw_samples=raw_samples
     )

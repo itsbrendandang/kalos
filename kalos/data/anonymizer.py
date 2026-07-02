@@ -55,7 +55,7 @@ class Anonymizer:
     def run_barcode(self, dataset_id: str, features: Dict, results: Dict, prefix: str = "KAL") -> str:
         """Content-stable barcode for one run: same recipe+result -> same barcode."""
         h = _hash(_stable_payload({"d": dataset_id, "f": features, "r": results}), self.salt)
-        return f"{prefix}-{h[:8].upper()}"
+        return f"{prefix}-{h[:16].upper()}"
 
     def dataset_barcode(self, name: str, prefix: str = "KAL-DS") -> str:
         return f"{prefix}-{_hash(name, self.salt)[:6].upper()}"

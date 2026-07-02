@@ -21,14 +21,17 @@ def propose(
     q: int = 3,
     num_restarts: int = 10,
     raw_samples: int = 256,
+    seed: int = 0,
 ) -> np.ndarray:
     """Return `q` proposed points (shape q x d) maximizing constrained-free qLogEI.
 
     bounds: array-like of shape (2, d) = [lower_row, upper_row].
+    seed: seeds the acquisition optimizer so a given fit + seed is reproducible.
     """
     assert surrogate.model is not None, "fit the surrogate first"
     b = torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE)
     acq = qLogExpectedImprovement(surrogate.model, best_f=surrogate.best_f)
+    torch.manual_seed(seed)
     candidates, _ = optimize_acqf(
         acq_function=acq,
         bounds=b,

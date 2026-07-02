@@ -44,7 +44,7 @@ def propose_next_batch(feed: DataFeed, problem: Problem, batch: int = 3, seed: i
     bounds = np.array([[problem.bounds[f][0] for f in feats], [problem.bounds[f][1] for f in feats]], float)
 
     s = Surrogate().fit(X, y, bounds=bounds)
-    batch_arr = propose(s, bounds, q=batch)
+    batch_arr = propose(s, bounds, q=batch, seed=seed)
     return pd.DataFrame(batch_arr, columns=feats)
 
 

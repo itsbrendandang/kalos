@@ -2,6 +2,14 @@
 
 Newest first.
 
+## 2026-07-02
+
+### Fixed — reproducibility, data integrity, and upload hardening
+- **Seeded acquisition optimization.** `propose` and `propose_multiobjective` now take a `seed` argument and call `torch.manual_seed(seed)` before every `optimize_acqf`. The multi-objective path also seeds the `SobolQMCNormalSampler` (via `seed=` when the installed BoTorch supports it, else a global reseed). `IngestionLoop.step(..., seed=0)` -> `propose_next_batch` -> `propose` is now wired end-to-end, so the previously ignored `seed` parameter makes a step deterministic.
+- **Wider run barcodes.** `Anonymizer.run_barcode` now uses 16 hex chars (64 bits) instead of 8 (32 bits), and `BarcodeRegistry.register_run` raises on a barcode collision with differing content instead of silently dropping the second run. Identical re-registration stays idempotent.
+- **Upload size cap.** `POST /api/run` now rejects uploads over `MAX_UPLOAD_BYTES` (25 MiB) with HTTP 413, checking `Content-Length` when present and reading the body in capped chunks so an absent/spoofed header cannot exhaust memory.
+- **No train==val fallback.** When too few groups remain for CV, `make_splits` now returns `[]` (still warning) instead of one all-train "dummy" split, so evaluators fail loudly rather than grading a model on its own training data.
+
 ## 2026-06-26
 
 ### Fixed — research-backed design-critique priorities (4-lens multi-agent review)

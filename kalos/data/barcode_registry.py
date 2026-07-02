@@ -47,11 +47,18 @@ class BarcodeRegistry:
         self, dataset_id: str, dataset_barcode: str, features: Dict, results: Dict, meta: Optional[Dict] = None
     ) -> str:
         barcode = self.anon.run_barcode(dataset_id, features, results)
-        if barcode not in self.runs:  # idempotent: same content -> same barcode
-            self.runs[barcode] = RunRecord(
-                barcode=barcode, dataset_id=dataset_id, dataset_barcode=dataset_barcode,
-                features=dict(features), results=dict(results), meta=self.anon.anonymize_meta(meta),
-            )
+        record = RunRecord(
+            barcode=barcode, dataset_id=dataset_id, dataset_barcode=dataset_barcode,
+            features=dict(features), results=dict(results), meta=self.anon.anonymize_meta(meta),
+        )
+        existing = self.runs.get(barcode)
+        if existing is None:
+            self.runs[barcode] = record
+        elif (existing.dataset_id, existing.features, existing.results) != (
+            record.dataset_id, record.features, record.results
+        ):  # same barcode, different content -> hash collision, never silently drop
+            raise ValueError(f"barcode collision on {barcode!r}: differing content for the same id")
+        # else: identical re-registration is idempotent (same content -> same barcode)
         return barcode
 
     def register_dataset(
