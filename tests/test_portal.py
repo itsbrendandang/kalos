@@ -35,3 +35,30 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
     assert isinstance(out["cv_n_groups"], int) and out["cv_n_groups"] >= 2
     assert len(out["oof"]) > 0
     assert len(out["proposals"]) >= 1
+
+
+def test_latest_reflects_last_upload(tmp_path, monkeypatch):
+    from kalos.portal import app as portal
+
+    monkeypatch.setattr(portal, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(portal, "_LATEST_PATH", tmp_path / "latest.json")
+    monkeypatch.setattr(portal, "_LATEST", None)
+
+    # before any upload the Overview must know there is no data (not fake it)
+    assert portal.latest() == {"has_data": False}
+
+    result = portal._analyze(_sheet())
+    portal._save_latest(result, "runs.csv")
+
+    got = portal.latest()
+    assert got["has_data"] is True
+    assert got["dataset"] == "runs.csv"
+    assert got["target"] == "lipase_titer"
+    assert got["cv_spearman"] is not None
+    assert len(got["proposals"]) >= 1
+    assert "updated" in got
+
+    # survives a restart (reloads from disk when the in-memory copy is gone)
+    monkeypatch.setattr(portal, "_LATEST", None)
+    reloaded = portal.latest()
+    assert reloaded["has_data"] is True and reloaded["dataset"] == "runs.csv"

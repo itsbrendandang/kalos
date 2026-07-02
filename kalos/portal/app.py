@@ -11,7 +11,10 @@ Needs the portal extra:  pip install -e ".[portal]"
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +87,48 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
                        else [round(float(batch[i][j]), 3) for j in cols])
         rows.append(row)
     return rows
+
+
+# --- persistence of the most-recently analyzed real dataset ------------------ #
+# The Overview reads /api/latest so the landing page reflects the LAST dataset a
+# user actually uploaded, not the synthetic demo objective. In-memory is the
+# source of truth; the JSON file is best-effort so it survives a portal restart.
+_STATE_DIR = Path(os.environ.get("KALOS_STATE_DIR", Path.home() / ".kalos"))
+_LATEST_PATH = _STATE_DIR / "latest_analysis.json"
+_LATEST: dict | None = None
+
+
+def _load_latest() -> dict | None:
+    global _LATEST
+    if _LATEST is None and _LATEST_PATH.exists():
+        try:
+            _LATEST = json.loads(_LATEST_PATH.read_text())
+        except (OSError, ValueError):  # a corrupt cache must not break the API
+            _LATEST = None
+    return _LATEST
+
+
+def _save_latest(result: dict, dataset: str) -> None:
+    global _LATEST
+    _LATEST = {**result, "dataset": dataset, "updated": time.time()}
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _LATEST_PATH.write_text(json.dumps(_LATEST))
+    except (OSError, TypeError, ValueError):
+        # Disk persistence is best-effort; in-memory still serves this run and a
+        # serialization hiccup must never fail the upload.
+        pass
+
+
+@app.get("/api/latest")
+def latest() -> dict:
+    """The most recent real (uploaded) analysis, for the Overview. `has_data` is
+    False until the first successful /api/run so the home can show an upload
+    prompt instead of pretending there is data."""
+    data = _load_latest()
+    if not data:
+        return {"has_data": False}
+    return {"has_data": True, **data}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -270,6 +315,8 @@ async def run_uploaded(file: UploadFile = File(...), target: str = Form(default=
             head = text[:4000]
             sep = "\t" if (name.endswith(".tsv") or head.count("\t") > head.count(",")) else ","
             df = pd.read_csv(io.StringIO(text), sep=sep)
-        return JSONResponse(_analyze(df, target or None))
+        result = _analyze(df, target or None)
+        _save_latest(result, file.filename or "uploaded dataset")
+        return JSONResponse(result)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": str(exc)}, status_code=400)

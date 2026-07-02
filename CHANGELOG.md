@@ -4,6 +4,16 @@ Newest first.
 
 ## 2026-07-02
 
+### Added — /api/latest: the Overview runs on real data, not the demo
+The portal persists the most recent uploaded analysis (in-memory, plus best-effort JSON at
+`$KALOS_STATE_DIR/latest_analysis.json`, default `~/.kalos`) on every `/api/run`, and serves it
+at `GET /api/latest` (`{has_data, dataset, updated, ...analysis}`). This lets the kalos-web
+Overview reflect the last dataset a user actually uploaded - real reliability, drivers, and
+proposed experiments - instead of the synthetic `_titer`/`_purity` demo objective. `has_data`
+is `false` until the first upload, so the home shows an upload prompt rather than pretending
+there is data. A serialization or disk error can never fail an upload (persistence is
+best-effort). +1 test.
+
 ### Fixed — portal upload path routed through the honest CV kit
 The `/api/run` analyzer had its own inline CV loop and grouping. Rewired it to the one
 leakage-checked path from `core`:
