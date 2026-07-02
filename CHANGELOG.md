@@ -4,6 +4,20 @@ Newest first.
 
 ## 2026-07-02
 
+### Fixed — portal upload path routed through the honest CV kit
+The `/api/run` analyzer had its own inline CV loop and grouping. Rewired it to the one
+leakage-checked path from `core`:
+- Grouping now uses `row_hash_groups` on the RAW (NaN-preserving) feature values, so rows
+  missing different components are not merged into one replicate group by the zero-fill.
+- CV now uses `grouped_cv_report`, so the portal returns a pooled out-of-fold Spearman with a
+  group-bootstrap 95% CI (`cv_ci95`) and the effective group count (`cv_n_groups`) — the honest
+  signal, not a bare point estimate.
+- Added the portal's first test (`tests/test_portal.py`): other measured outputs stay excluded
+  from features (anti-leakage) and the honest CV fields are returned. On the raw Anagram upload
+  the honest number is -0.23 [-0.42, 0.10] (23 features / 21 groups) — no reliable ranking at
+  that feature/group ratio, the truthful "reduce features / collect more data" message rather
+  than a fake positive.
+
 ### Fixed — leakage + honesty in grouped cross-validation (independent Codex + multi-agent review)
 An independent review (OpenAI Codex plus a multi-agent modeling audit) found the reported CV
 skill could be both contaminated and overstated at small n. Fixed the confirmed items:

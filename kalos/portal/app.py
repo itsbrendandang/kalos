@@ -21,7 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
 
-from kalos.core.evaluation import grouped_folds
+from kalos.core.evaluation import grouped_cv_report
+from kalos.core.splits import row_hash_groups
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
 from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
@@ -206,26 +207,27 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
 
     y_all = pd.to_numeric(df[target], errors="coerce")
     keep = y_all.notna()
-    X = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(float)
+    X_raw = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce")   # NaN preserved (for grouping)
+    X = X_raw.fillna(0.0).to_numpy(float)                                # zero-filled (for the GP)
     y = y_all[keep].to_numpy(float)
     if len(y) < 6:
         raise ValueError(f"need at least 6 rows with a numeric {target!r}; got {len(y)}")
     bounds = np.vstack([X.min(0), X.max(0)])
 
     gcol = next((c for c in df.columns if _GROUP_HINT.search(str(c))), None)
-    groups = df.loc[keep, gcol].astype(str).tolist() if gcol else [hash(tuple(np.round(r, 6))) for r in X]
+    if gcol:
+        groups = df.loc[keep, gcol].astype(str).tolist()
+    else:
+        # group on the RAW values (NaN preserved) so rows missing different
+        # components are not merged into one replicate group by the zero-fill —
+        # via the one leakage-checked, deterministic grouper.
+        groups = row_hash_groups(X_raw)
 
-    # honest out-of-fold predictions + rank correlation
-    oof_a: list = []
-    oof_p: list = []
-    for tr, te in grouped_folds(groups, 5):
-        if len(tr) < max(4, len(feats)) or len(te) < 1:
-            continue
-        s = Surrogate().fit(X[tr], y[tr], bounds=bounds)
-        m, _ = s.posterior(X[te])
-        oof_a += y[te].tolist()
-        oof_p += m.tolist()
-    rho = float(spearmanr(oof_p, oof_a).statistic) if len(oof_a) > 3 and np.std(oof_a) > 0 else float("nan")
+    # honest grouped cross-validation: pooled out-of-fold predictions + a
+    # group-level bootstrap CI, all through the single leakage-checked splitter.
+    rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds)
+    rho = rep["spearman"]
+    oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
 
     # signed drivers
     drv = []
@@ -246,6 +248,8 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
         "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
         "targets": [str(c) for c in candidate_targets], "features": [str(c) for c in feats],
         "cv_spearman": None if rho != rho else round(rho, 3),
+        "cv_ci95": None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)],
+        "cv_n_groups": rep["n_groups"],
         "best": round(float(y.max()), 4),
         "drivers": [{"name": c, "rho": round(r, 3)} for c, r in drv],
         "proposal_features": show,

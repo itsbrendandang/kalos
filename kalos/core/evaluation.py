@@ -99,6 +99,8 @@ def grouped_cv_report(
         "n_oof": int(len(pred)),
         "n_groups": int(len(uniq)),
         "n_folds": int(n_folds),
+        "oof_actual": actual.tolist(),
+        "oof_pred": pred.tolist(),
     }
 
 
