@@ -4,6 +4,19 @@ Newest first.
 
 ## 2026-07-02
 
+### Added — conformal band + honest reliability in the analyze output
+`_analyze` (and therefore `/api/run` and `/api/latest`) now also returns:
+- `conformal_q`: a distribution-free +/- half-width from the pooled out-of-fold residuals
+  (`core/conformal.q_from_residuals`, alpha=0.1). An honest, often-wider alternative to the
+  surrogate's own posterior std, which tends to be overconfident on small bioprocess datasets.
+  Coverage is exact for iid split-conformal; treat it as approximate under grouped CV.
+- `reliability`: `{spearman, ci95, spearman_floor: 0.20, clears_floor, ci_excludes_zero,
+  unmodeled}`. Only what this path can actually assess; the spearman floor mirrors
+  `GatesConfig.min_spearman`. It deliberately does NOT assert feasibility or calibration gates
+  (listed under `unmodeled`), which this path does not measure. Consumed by the kalos-web
+  Voyager "Phase 2 (live)" view so the UI shows a truthful uncertainty band and trust signal
+  instead of a fabricated success probability or scale-up curve.
+
 ### Added — /api/latest: the Overview runs on real data, not the demo
 The portal persists the most recent uploaded analysis (in-memory, plus best-effort JSON at
 `$KALOS_STATE_DIR/latest_analysis.json`, default `~/.kalos`) on every `/api/run`, and serves it

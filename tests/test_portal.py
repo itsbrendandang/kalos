@@ -35,6 +35,13 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
     assert isinstance(out["cv_n_groups"], int) and out["cv_n_groups"] >= 2
     assert len(out["oof"]) > 0
     assert len(out["proposals"]) >= 1
+    # honest uncertainty band + reliability verdict (only what this path can assess)
+    assert isinstance(out["conformal_q"], float) and out["conformal_q"] >= 0
+    rel = out["reliability"]
+    assert rel["spearman_floor"] == 0.20
+    assert rel["clears_floor"] == (out["cv_spearman"] >= 0.20)
+    assert set(rel) == {"spearman", "ci95", "spearman_floor", "clears_floor", "ci_excludes_zero", "unmodeled"}
+    assert "scale-up transfer" in rel["unmodeled"]
 
 
 def test_latest_reflects_last_upload(tmp_path, monkeypatch):

@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
 
+from kalos.core.conformal import q_from_residuals
 from kalos.core.evaluation import grouped_cv_report
 from kalos.core.splits import row_hash_groups
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
@@ -274,6 +275,25 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
     rho = rep["spearman"]
     oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
 
+    # distribution-free +/- band from the pooled out-of-fold residuals (approximate
+    # coverage under grouped CV). Honest alternative to the surrogate's own std,
+    # which is often overconfident on small bioprocess datasets.
+    resid = np.asarray(oof_a, float) - np.asarray(oof_p, float)
+    conformal_q = round(q_from_residuals(resid, alpha=0.1), 4) if len(resid) else None
+
+    # Honest reliability verdict: only what this path can actually assess. The
+    # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
+    # NOT assert feasibility or calibration gates, which are not measured here.
+    ci95 = None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)]
+    reliability = {
+        "spearman": None if rho != rho else round(rho, 3),
+        "ci95": ci95,
+        "spearman_floor": 0.20,
+        "clears_floor": bool(rho == rho and rho >= 0.20),
+        "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
+        "unmodeled": ["feasibility probability", "calibration (ECE)", "scale-up transfer"],
+    }
+
     # signed drivers
     drv = []
     for c in feats:
@@ -293,8 +313,10 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
         "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
         "targets": [str(c) for c in candidate_targets], "features": [str(c) for c in feats],
         "cv_spearman": None if rho != rho else round(rho, 3),
-        "cv_ci95": None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)],
+        "cv_ci95": ci95,
         "cv_n_groups": rep["n_groups"],
+        "conformal_q": conformal_q,
+        "reliability": reliability,
         "best": round(float(y.max()), 4),
         "drivers": [{"name": c, "rho": round(r, 3)} for c, r in drv],
         "proposal_features": show,
