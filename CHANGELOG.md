@@ -2,6 +2,30 @@
 
 Newest first.
 
+## 2026-07-02
+
+### Fixed — leakage + honesty in grouped cross-validation (independent Codex + multi-agent review)
+An independent review (OpenAI Codex plus a multi-agent modeling audit) found the reported CV
+skill could be both contaminated and overstated at small n. Fixed the confirmed items:
+- **NaN grouping leak** (`core/splits.py`): `row_hash_groups` collapsed missing values to 0.0,
+  so rows missing different features hashed into one replicate group and leaked across every
+  fold. NaN now gets a distinct token, so a real 0.0 and a missing value are different groups.
+- **Degenerate split removed** (`core/splits.py`): `make_splits` returned a train==validation
+  dummy when too few groups remained. It now returns no split (CV unavailable), so a model is
+  never scored against itself.
+- **One splitter** (`core/evaluation.py`): deleted the weaker round-robin `grouped_folds` /
+  `_row_groups`; all grouped CV routes through the single leakage-checked `splits.make_splits`
+  (GroupKFold + a no-overlap assertion). `grouped_folds` stays as a thin compatible wrapper.
+- **Train/serve normalization consistency**: the CV loop fits every fold under one fixed
+  normalization box (design bounds, else the observed range), matching the deployed model
+  instead of each fold's own training envelope.
+- **Honest reporting** (`core/evaluation.py`): new `grouped_cv_report` pools out-of-fold
+  predictions and returns a group-level bootstrap 95% CI plus `n_oof` / `n_groups` / `n_folds`.
+  `grouped_cv_spearman` now pools OOF too (was: a mean of tiny per-fold rhos that can only be
+  +/-1 at this n).
+- 16 tests pass (3 new regression tests: NaN-distinct grouping, categorical grouping, no dummy
+  split); the ESM-2 model test stays skipped behind its flag.
+
 ## 2026-06-26
 
 ### Fixed — research-backed design-critique priorities (4-lens multi-agent review)

@@ -68,6 +68,34 @@ def test_splits_group_replicates_and_tripwire():
         assert "leakage" in str(e).lower()
 
 
+def test_row_hash_groups_keeps_nan_distinct_from_zero():
+    # A real 0.0 and a missing value in the same column must NOT be treated as one
+    # replicate; collapsing NaN to 0.0 merged unrelated rows and leaked them.
+    X = pd.DataFrame({"pH": [6.0, 6.0], "gly": [0.0, np.nan]})
+    g = row_hash_groups(X)
+    assert len(np.unique(g)) == 2
+
+
+def test_row_hash_groups_handles_categorical_columns():
+    # Mixed numeric + string (e.g. a medium name) must group without raising.
+    X = pd.DataFrame({"medium": ["CD Fusion", "CD Fusion", "BalanCD"], "gly": [10.0, 10.0, 20.0]})
+    g = row_hash_groups(X)
+    assert len(g) == 3 and len(np.unique(g)) == 2   # first two are replicates
+
+
+def test_make_splits_returns_no_dummy_when_too_few_groups():
+    # One group cannot be split leakage-free: must yield NO evaluable split
+    # (was: a train==validation dummy that scored the model against itself).
+    X = pd.DataFrame({"pH": [6.0, 6.0, 6.0], "gly": [10.0, 10.0, 10.0]})
+    g = row_hash_groups(X)              # all identical -> 1 group
+    y = np.array([0.1, 0.2, 0.3])
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        splits = make_splits(X, y, g, n_splits=5)
+    assert splits == []
+
+
 def test_bootstrap_drivers_rank_real_driver_first():
     rng = np.random.default_rng(0)
     n = 200

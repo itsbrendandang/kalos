@@ -27,7 +27,16 @@ def row_hash_groups(
     df = df[cols].copy()
     num = df.columns[[pd.api.types.is_numeric_dtype(df[c]) for c in df.columns]]
     if len(num):
-        df[num] = np.round(np.nan_to_num(df[num].to_numpy(float), nan=0.0), decimals)
+        # Round numeric values for replicate matching, but keep NaN DISTINCT from
+        # a real 0.0. The old `nan_to_num(..., 0.0)` collapsed missingness to zero,
+        # merging unrelated rows into one replicate group — which then leaked them
+        # across every CV split. NaN gets a reserved "NA" token no real value hits.
+        arr = np.round(df[num].to_numpy(float), decimals)
+        df[num] = pd.DataFrame(
+            np.where(np.isnan(arr), "NA", arr.astype("U32")),
+            index=df.index,
+            columns=list(num),
+        )
     keys = np.array(["|".join(map(str, row)) for row in df.to_numpy(dtype=object)])
     return pd.factorize(keys)[0]
 
@@ -63,8 +72,12 @@ def make_splits(
     if use_strat:
         n_splits = min(n_splits, int(pd.Series(y_arr).value_counts().min()))
     if n_splits < 2:
-        warnings.warn("n_splits < 2 after guards; returning one dummy split (all-train).")
-        return [(np.arange(n), np.arange(n))]
+        warnings.warn(
+            "n_splits < 2 after small-data guards: too few groups for a "
+            "leakage-free split. Returning no splits (cross-validation "
+            "unavailable) rather than a train==validation dummy."
+        )
+        return []
 
     splits: List[Tuple[np.ndarray, np.ndarray]] = []
     if use_strat:
