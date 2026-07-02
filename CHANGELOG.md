@@ -4,6 +4,21 @@ Newest first.
 
 ## 2026-07-02
 
+### Added — diagnostic figures for the small-data regime (`kalos.diagnostics`)
+Python-side matplotlib figures (opt-in `pip install -e ".[viz]"`; the core package
+stays matplotlib-free) that make the model's honesty legible. Verified on the real
+Anagram media DoE (98 runs / 36 recipe-groups):
+- `parity` — out-of-fold predicted vs observed with GP posterior error bars and a
+  y=x line; on real data a handful of high-titer runs drive the whole correlation
+  and the GP under-predicts them.
+- `cv_forest` — grouped-CV Spearman with a group-bootstrap 95% CI against a baseline
+  and a zero line: GP = 0.37 [0.10, 0.60] vs the mean baseline at 0.
+- `parallel_coordinates` — the design box colored by outcome (shows coverage gaps).
+- `pca_scatter` — PCA of the runs (explicitly PCA, not UMAP, which is untrustworthy
+  at this n).
+- `partial_dependence` — 1-D surrogate response with a posterior-std band.
+- 5 headless render tests; matplotlib added as a `viz` optional dependency.
+
 ### Fixed — leakage + honesty in grouped cross-validation (independent Codex + multi-agent review)
 An independent review (OpenAI Codex plus a multi-agent modeling audit) found the reported CV
 skill could be both contaminated and overstated at small n. Fixed the confirmed items:
