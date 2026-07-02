@@ -24,7 +24,9 @@ dependencies = [
 protein = ["transformers>=4.40"]
 # The web portal (FastAPI viewer over the live engine).
 portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
-dev = ["pytest>=7"]
+# Diagnostic figures (kalos.diagnostics): parity, CV forest, parallel-coords, PCA, PDP.
+viz = ["matplotlib>=3.7"]
+dev = ["pytest>=7", "matplotlib>=3.7"]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]
