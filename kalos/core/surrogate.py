@@ -24,6 +24,36 @@ DTYPE = torch.double
 DEVICE = torch.device("cpu")
 
 
+def sanitize_bounds(bounds) -> tuple[np.ndarray, np.ndarray]:
+    """Split `bounds` (2 x d) into finite `(lower, upper)` rows with `lower <= upper`.
+
+    A degenerate or near-constant feature (lower == upper, or a NaN/inf bound)
+    would let input normalization divide by a zero-width range and poison the fit
+    (and let the acquisition optimizer wander to an absurd value). We order the
+    rows, replace any non-finite bound with the finite partner (or 0.0 if both are
+    non-finite), and widen a zero-width interval by a tiny epsilon so both the GP
+    normalization and `optimize_acqf` see a valid, non-inverted box. This is the
+    guard behind the historical out-of-range blow-up (e.g. a constant
+    `Culture_Volume` proposing ~= 33,000,000).
+    """
+    arr = np.asarray(bounds, float)
+    if arr.ndim != 2 or arr.shape[0] != 2:
+        raise ValueError("bounds must have shape (2, d) = [lower_row, upper_row]")
+    lower = arr[0].astype(float).copy()
+    upper = arr[1].astype(float).copy()
+    for row, partner in ((lower, upper), (upper, lower)):
+        bad = ~np.isfinite(row)
+        if bad.any():
+            fill = np.where(np.isfinite(partner), partner, 0.0)
+            row[bad] = fill[bad]
+    lower, upper = np.minimum(lower, upper), np.maximum(lower, upper)
+    degenerate = upper - lower <= 0.0
+    if degenerate.any():
+        pad = 1e-6 * np.maximum(np.abs(lower), 1.0)
+        upper = np.where(degenerate, lower + pad, upper)
+    return lower, upper
+
+
 class Surrogate:
     """SingleTaskGP over a continuous design space."""
 
@@ -45,11 +75,12 @@ class Surrogate:
         Xt = torch.as_tensor(Xa, dtype=DTYPE, device=DEVICE)
         yt = torch.as_tensor(ya, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
         d = Xt.shape[-1]
-        normalize = (
-            Normalize(d=d, bounds=torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE))
-            if bounds is not None
-            else Normalize(d=d)
-        )
+        if bounds is not None:
+            lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so Normalize is finite
+            box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
+            normalize = Normalize(d=d, bounds=box)
+        else:
+            normalize = Normalize(d=d)
         self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
         mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         fit_gpytorch_mll(mll)

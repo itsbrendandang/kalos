@@ -30,7 +30,9 @@ kalos/
     runner.py          decoupled closed loop: read feed -> fit -> propose -> sink
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
-  portal/            FastAPI web viewer + a "run your own data" drop zone
+  portal/
+    app.py             FastAPI app: live-engine views + the "run your own data" upload path
+    validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
 examples/            demos + run_on_media_data.py + organize_data.py (folder -> barcode registry)
 tests/               pytest
 ```
@@ -49,6 +51,28 @@ run up by barcode, filter by dataset, or export a training table.
 ```bash
 python examples/organize_data.py <data_dir> registry.json   # folder of CSV/TSV -> one registry
 ```
+
+## Uploading a run sheet (`POST /api/run`)
+
+The portal accepts an uploaded CSV / TSV / Excel run sheet and returns the analysis
+(auto-detected target, leakage-safe features, honest grouped-CV, signed drivers, a proposed next
+batch). Because the sheet comes from an external client, the upload path is guarded:
+
+- **Size + shape caps.** A raw-byte cap (default 25 MB, override with `KALOS_MAX_UPLOAD_MB`), a
+  512-column ceiling, a 100k-row CSV cap, and a 2M-cell xlsx cap (a zip-bomb guard). Filetype is
+  sniffed by magic bytes (`PK\x03\x04` -> Excel, else text/CSV), not by extension.
+- **Safe errors.** A bad upload returns a generic HTTP 400 ("Could not parse the uploaded file.
+  Check it is a CSV or Excel run-sheet."). Parser details, column names, cell values, paths, and
+  stack traces are logged server-side and never returned to the caller.
+- **Provenance.** The response includes a `provenance` list: for every column, its status
+  (`kept_feature`, `target`, `dropped_id`, `dropped_output`, `dropped_constant`, `dropped_sparse`,
+  `dropped_all_blank`) and how many cells had to be coerced from non-numeric text (units like
+  "34.6 C"). No more silent column drops.
+- **Reproducibility.** The analyze path is seeded, so the same upload yields identical proposals;
+  the response carries `seed`, `timestamp`, and `engine_version`.
+- **Opt-in anonymization.** Pass the form field `anonymize=true` to pseudonymize identifier-type
+  columns in the response. Feature and target names are kept as-is (the owner UI legitimately shows
+  drivers like "Methanol").
 
 ## Install / run
 

@@ -2,6 +2,108 @@
 
 Newest first.
 
+## 2026-07-02 (later)
+
+### Added - Wave A1: safety + product-readiness hardening for the upload path
+The client-facing `/api/run` upload path was hardened for external, untrusted run sheets.
+No architecture change (still no auth/tenancy); the `/api/run` and `/api/latest` response
+contract is preserved and only extended.
+
+- **Upload guards** (`kalos/portal/app.py`, `_parse_upload`): a byte-size cap on the raw upload
+  (default 25 MB, env `KALOS_MAX_UPLOAD_MB`), a filetype sniff by MAGIC BYTES (`PK\x03\x04` zip
+  header -> xlsx/xls, otherwise UTF-8 text/CSV), a column ceiling (`MAX_COLUMNS=512`), a CSV row
+  cap (`MAX_CSV_ROWS=100000`), and an xlsx cell-count ceiling (`MAX_XLSX_CELLS=2,000,000`, a
+  zip-bomb guard). Any guard trip returns HTTP 400 with a generic message.
+- **Error hygiene**: the catch-all `except Exception: return {"error": str(exc)}` was replaced by
+  a narrow catch (`pandas.errors.*`, `ValueError`, `UnicodeError`) that returns a single generic
+  message ("Could not parse the uploaded file. Check it is a CSV or Excel run-sheet.") and logs
+  the full traceback server-side via the `logging` module. No parser text, column name, cell
+  value, path, or stack trace ever reaches the client.
+- **Ingestion provenance** (`kalos/portal/validate.py`): a new typed `column_provenance` returns a
+  per-column status (`kept_feature`, `target`, `dropped_id`, `dropped_output`, `dropped_constant`,
+  `dropped_sparse`, `dropped_all_blank`) plus a non-numeric `coerced_cells` count, surfaced as a
+  new `provenance` field on the analyze result. This fixes the silent-column-drop problem: clients
+  now see exactly what was used and what was dropped and why. Duplicate column labels are
+  de-duplicated (`X`, `X.1`) so both stay visible.
+- **Privacy**: raw column names and cell values never appear in logs or client error messages.
+  Feature/target names are NOT force-anonymized (the owner UI legitimately shows drivers like
+  "Methanol"); instead `/api/run` gains an opt-in `anonymize: bool = False` form field that
+  pseudonymizes identifier-type columns only (stable, irreversible hash via `data/anonymizer`).
+- **Reproducibility + audit**: the analyze path seeds `torch.manual_seed` + `np.random.seed`, so
+  the same upload yields identical proposals, and the result now carries `seed`, `timestamp`
+  (unix int), and `engine_version` (from `kalos.__version__`).
+- **Bounds-sanity** (`kalos/core/surrogate.py` `sanitize_bounds`, applied in `Surrogate.fit` and
+  `core/optimize.propose`): non-finite bounds are repaired and zero-width (constant-feature)
+  intervals are widened, and every proposed coordinate is clamped into the observed
+  `[min, max]` box. This closes the historical out-of-range blow-up (a constant `Culture_Volume`
+  proposing ~= 33,000,000) at its root: a degenerate normalization box no longer NaN-poisons the
+  GP fit, and no proposal can escape the observed range. Locked with a regression test.
+- +14 tests (`tests/test_hardening.py`): oversized/wrong-magic-bytes/too-many-columns rejections,
+  provenance on a messy sheet (units-in-cells, %-strings, a duplicate column, a constant column),
+  error-hygiene (malformed bytes -> generic 400, no stack trace/path in the body), bounds-sanity,
+  and seed reproducibility. 32 passing, 1 skipped (the ESM-2 test stays behind its flag).
+
+## 2026-07-02
+
+### Added — conformal band + honest reliability in the analyze output
+`_analyze` (and therefore `/api/run` and `/api/latest`) now also returns:
+- `conformal_q`: a distribution-free +/- half-width from the pooled out-of-fold residuals
+  (`core/conformal.q_from_residuals`, alpha=0.1). An honest, often-wider alternative to the
+  surrogate's own posterior std, which tends to be overconfident on small bioprocess datasets.
+  Coverage is exact for iid split-conformal; treat it as approximate under grouped CV.
+- `reliability`: `{spearman, ci95, spearman_floor: 0.20, clears_floor, ci_excludes_zero,
+  unmodeled}`. Only what this path can actually assess; the spearman floor mirrors
+  `GatesConfig.min_spearman`. It deliberately does NOT assert feasibility or calibration gates
+  (listed under `unmodeled`), which this path does not measure. Consumed by the kalos-web
+  Voyager "Phase 2 (live)" view so the UI shows a truthful uncertainty band and trust signal
+  instead of a fabricated success probability or scale-up curve.
+
+### Added — /api/latest: the Overview runs on real data, not the demo
+The portal persists the most recent uploaded analysis (in-memory, plus best-effort JSON at
+`$KALOS_STATE_DIR/latest_analysis.json`, default `~/.kalos`) on every `/api/run`, and serves it
+at `GET /api/latest` (`{has_data, dataset, updated, ...analysis}`). This lets the kalos-web
+Overview reflect the last dataset a user actually uploaded - real reliability, drivers, and
+proposed experiments - instead of the synthetic `_titer`/`_purity` demo objective. `has_data`
+is `false` until the first upload, so the home shows an upload prompt rather than pretending
+there is data. A serialization or disk error can never fail an upload (persistence is
+best-effort). +1 test.
+
+### Fixed — portal upload path routed through the honest CV kit
+The `/api/run` analyzer had its own inline CV loop and grouping. Rewired it to the one
+leakage-checked path from `core`:
+- Grouping now uses `row_hash_groups` on the RAW (NaN-preserving) feature values, so rows
+  missing different components are not merged into one replicate group by the zero-fill.
+- CV now uses `grouped_cv_report`, so the portal returns a pooled out-of-fold Spearman with a
+  group-bootstrap 95% CI (`cv_ci95`) and the effective group count (`cv_n_groups`) — the honest
+  signal, not a bare point estimate.
+- Added the portal's first test (`tests/test_portal.py`): other measured outputs stay excluded
+  from features (anti-leakage) and the honest CV fields are returned. On the raw Anagram upload
+  the honest number is -0.23 [-0.42, 0.10] (23 features / 21 groups) — no reliable ranking at
+  that feature/group ratio, the truthful "reduce features / collect more data" message rather
+  than a fake positive.
+
+### Fixed — leakage + honesty in grouped cross-validation (independent Codex + multi-agent review)
+An independent review (OpenAI Codex plus a multi-agent modeling audit) found the reported CV
+skill could be both contaminated and overstated at small n. Fixed the confirmed items:
+- **NaN grouping leak** (`core/splits.py`): `row_hash_groups` collapsed missing values to 0.0,
+  so rows missing different features hashed into one replicate group and leaked across every
+  fold. NaN now gets a distinct token, so a real 0.0 and a missing value are different groups.
+- **Degenerate split removed** (`core/splits.py`): `make_splits` returned a train==validation
+  dummy when too few groups remained. It now returns no split (CV unavailable), so a model is
+  never scored against itself.
+- **One splitter** (`core/evaluation.py`): deleted the weaker round-robin `grouped_folds` /
+  `_row_groups`; all grouped CV routes through the single leakage-checked `splits.make_splits`
+  (GroupKFold + a no-overlap assertion). `grouped_folds` stays as a thin compatible wrapper.
+- **Train/serve normalization consistency**: the CV loop fits every fold under one fixed
+  normalization box (design bounds, else the observed range), matching the deployed model
+  instead of each fold's own training envelope.
+- **Honest reporting** (`core/evaluation.py`): new `grouped_cv_report` pools out-of-fold
+  predictions and returns a group-level bootstrap 95% CI plus `n_oof` / `n_groups` / `n_folds`.
+  `grouped_cv_spearman` now pools OOF too (was: a mean of tiny per-fold rhos that can only be
+  +/-1 at this n).
+- 16 tests pass (3 new regression tests: NaN-distinct grouping, categorical grouping, no dummy
+  split); the ESM-2 model test stays skipped behind its flag.
+
 ## 2026-06-26
 
 ### Fixed — research-backed design-critique priorities (4-lens multi-agent review)
