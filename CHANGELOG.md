@@ -2,6 +2,47 @@
 
 Newest first.
 
+## 2026-07-02 (later)
+
+### Added - Wave A1: safety + product-readiness hardening for the upload path
+The client-facing `/api/run` upload path was hardened for external, untrusted run sheets.
+No architecture change (still no auth/tenancy); the `/api/run` and `/api/latest` response
+contract is preserved and only extended.
+
+- **Upload guards** (`kalos/portal/app.py`, `_parse_upload`): a byte-size cap on the raw upload
+  (default 25 MB, env `KALOS_MAX_UPLOAD_MB`), a filetype sniff by MAGIC BYTES (`PK\x03\x04` zip
+  header -> xlsx/xls, otherwise UTF-8 text/CSV), a column ceiling (`MAX_COLUMNS=512`), a CSV row
+  cap (`MAX_CSV_ROWS=100000`), and an xlsx cell-count ceiling (`MAX_XLSX_CELLS=2,000,000`, a
+  zip-bomb guard). Any guard trip returns HTTP 400 with a generic message.
+- **Error hygiene**: the catch-all `except Exception: return {"error": str(exc)}` was replaced by
+  a narrow catch (`pandas.errors.*`, `ValueError`, `UnicodeError`) that returns a single generic
+  message ("Could not parse the uploaded file. Check it is a CSV or Excel run-sheet.") and logs
+  the full traceback server-side via the `logging` module. No parser text, column name, cell
+  value, path, or stack trace ever reaches the client.
+- **Ingestion provenance** (`kalos/portal/validate.py`): a new typed `column_provenance` returns a
+  per-column status (`kept_feature`, `target`, `dropped_id`, `dropped_output`, `dropped_constant`,
+  `dropped_sparse`, `dropped_all_blank`) plus a non-numeric `coerced_cells` count, surfaced as a
+  new `provenance` field on the analyze result. This fixes the silent-column-drop problem: clients
+  now see exactly what was used and what was dropped and why. Duplicate column labels are
+  de-duplicated (`X`, `X.1`) so both stay visible.
+- **Privacy**: raw column names and cell values never appear in logs or client error messages.
+  Feature/target names are NOT force-anonymized (the owner UI legitimately shows drivers like
+  "Methanol"); instead `/api/run` gains an opt-in `anonymize: bool = False` form field that
+  pseudonymizes identifier-type columns only (stable, irreversible hash via `data/anonymizer`).
+- **Reproducibility + audit**: the analyze path seeds `torch.manual_seed` + `np.random.seed`, so
+  the same upload yields identical proposals, and the result now carries `seed`, `timestamp`
+  (unix int), and `engine_version` (from `kalos.__version__`).
+- **Bounds-sanity** (`kalos/core/surrogate.py` `sanitize_bounds`, applied in `Surrogate.fit` and
+  `core/optimize.propose`): non-finite bounds are repaired and zero-width (constant-feature)
+  intervals are widened, and every proposed coordinate is clamped into the observed
+  `[min, max]` box. This closes the historical out-of-range blow-up (a constant `Culture_Volume`
+  proposing ~= 33,000,000) at its root: a degenerate normalization box no longer NaN-poisons the
+  GP fit, and no proposal can escape the observed range. Locked with a regression test.
+- +14 tests (`tests/test_hardening.py`): oversized/wrong-magic-bytes/too-many-columns rejections,
+  provenance on a messy sheet (units-in-cells, %-strings, a duplicate column, a constant column),
+  error-hygiene (malformed bytes -> generic 400, no stack trace/path in the body), bounds-sanity,
+  and seed reproducibility. 32 passing, 1 skipped (the ESM-2 test stays behind its flag).
+
 ## 2026-07-02
 
 ### Added — conformal band + honest reliability in the analyze output
