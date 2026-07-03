@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import re
 import time
@@ -19,19 +20,46 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
 
+from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.evaluation import grouped_cv_report
 from kalos.core.splits import row_hash_groups
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
 from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
+from kalos.data.anonymizer import _hash
+from kalos.portal.validate import column_provenance, provenance_dicts
+
+log = logging.getLogger("kalos.portal")
 
 app = FastAPI(title="Kalos Engine API")
+
+# --- upload safety limits ---------------------------------------------------- #
+# This engine ingests untrusted run sheets from external clients, so the raw
+# upload and its parsed shape are capped to bound memory and blunt zip-bomb
+# expansion. Sizes are configurable via env; the CSV/xlsx caps are constants.
+_MAX_UPLOAD_MB = float(os.environ.get("KALOS_MAX_UPLOAD_MB", "25"))
+MAX_UPLOAD_BYTES = int(_MAX_UPLOAD_MB * 1024 * 1024)
+MAX_CSV_ROWS = 100_000       # rows read from a CSV/TSV upload
+MAX_COLUMNS = 512            # columns allowed in any upload (CSV or xlsx)
+MAX_XLSX_CELLS = 2_000_000   # rows * cols ceiling for a parsed xlsx (zip-bomb guard)
+_ZIP_MAGIC = b"PK\x03\x04"   # xlsx/xls-as-zip start-of-file marker
+
+# Generic, non-leaking messages. We never echo the parser error, a column name,
+# or a cell value back to an unauthenticated caller.
+_ERR_PARSE = "Could not parse the uploaded file. Check it is a CSV or Excel run-sheet."
+_ERR_TOO_LARGE = "The uploaded file is too large."
+_ERR_TOO_MANY_COLUMNS = "The uploaded file has too many columns."
+
+
+class UploadRejected(ValueError):
+    """A client upload failed a safety guard. Carries a generic, safe message."""
 
 # Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
 app.add_middleware(
@@ -228,12 +256,57 @@ def _numeric_cols(df: pd.DataFrame) -> list:
     return out
 
 
-def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
+# Deterministic seed for the analyze path. The same upload -> the same GP fit and
+# the same proposed batch, which matters for client reproducibility and audit.
+ANALYZE_SEED = 1234
+
+
+def _seed_everything(seed: int = ANALYZE_SEED) -> None:
+    """Seed torch + numpy so one upload yields one deterministic set of proposals."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+
+def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Suffix duplicate column labels (`X`, `X.1`, ...) so every column is a Series.
+
+    A run sheet with a repeated header would otherwise make `df[label]` return a
+    2-D frame and break the analysis. pandas already does this on CSV read; we do
+    it here too so a directly-built frame (or an xlsx with duplicate headers) is
+    handled identically, and the duplicate stays visible in the provenance report.
+    """
+    if not df.columns.duplicated().any():
+        return df
+    seen: dict[str, int] = {}
+    new_cols: list[str] = []
+    for col in df.columns:
+        key = str(col)
+        if key in seen:
+            seen[key] += 1
+            new_cols.append(f"{key}.{seen[key]}")
+        else:
+            seen[key] = 0
+            new_cols.append(key)
+    out = df.copy()
+    out.columns = new_cols
+    return out
+
+
+def _analyze(
+    df: pd.DataFrame, target: str | None = None, *, anonymize: bool = False
+) -> dict:
     """Run the engine on an arbitrary run sheet: pick the target (the value to
     maximize), use the process INPUTS as features (other measured outputs are
     excluded to avoid leakage), then honest grouped-CV, signed drivers, and a
-    proposed next batch."""
-    df = df.dropna(axis=1, how="all")
+    proposed next batch.
+
+    Deterministic: seeds torch + numpy up front so the same sheet gives the same
+    proposals. Returns a per-column `provenance` report (what was kept/dropped and
+    why) plus `seed`, `timestamp`, and `engine_version` for audit. When
+    `anonymize` is True, identifier-type column names are replaced with stable
+    pseudonyms in the response (the owner UI keeps real names when False)."""
+    _seed_everything()
+    df = _dedupe_columns(df.dropna(axis=1, how="all"))
     num = _numeric_cols(df)
     if not num:
         raise ValueError("no numeric columns found")
@@ -309,7 +382,21 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
     show_idx = [feats.index(f) for f in show]
     p_mean, p_std = s.posterior(batch)
 
-    return {
+    # per-column provenance: what was kept as a feature, used as the target, or
+    # dropped (id / other output / constant / sparse), so the client is never left
+    # guessing about a silently dropped column. Mirrors the selection logic above.
+    provenance = provenance_dicts(
+        column_provenance(
+            df,
+            target=str(target),
+            features=[str(c) for c in feats],
+            numeric_cols=[str(c) for c in num],
+            id_hint=_ID_HINT,
+            outcome_hint=_OUTCOME_HINT,
+        )
+    )
+
+    result = {
         "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
         "targets": [str(c) for c in candidate_targets], "features": [str(c) for c in feats],
         "cv_spearman": None if rho != rho else round(rho, 3),
@@ -322,23 +409,101 @@ def _analyze(df: pd.DataFrame, target: str | None = None) -> dict:
         "proposal_features": show,
         "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
+        "provenance": provenance,
+        "seed": ANALYZE_SEED,
+        "timestamp": int(time.time()),
+        "engine_version": ENGINE_VERSION,
     }
+    if anonymize:
+        result = _anonymize_result(result)
+    return result
+
+
+def _anonymize_result(result: dict) -> dict:
+    """Replace identifier-type column names in the response with stable pseudonyms.
+
+    Only identifier-like columns (matched by `_ID_HINT`) are renamed; process
+    features and the target keep their real names because the authenticated owner
+    UI legitimately shows them (a driver like "Methanol"). The mapping is stable
+    (same name -> same pseudonym) via the anonymizer's irreversible hash, so an
+    anonymized report is still internally consistent across fields.
+    """
+    def alias(name: str) -> str:
+        return f"col_{_hash(name)[:8]}" if _ID_HINT.match(str(name).strip()) else name
+
+    out = dict(result)
+    if out.get("group_col"):
+        out["group_col"] = alias(out["group_col"])
+    out["provenance"] = [
+        {**row, "name": alias(row["name"])} for row in out.get("provenance", [])
+    ]
+    return out
+
+
+def _parse_upload(raw: bytes) -> pd.DataFrame:
+    """Turn raw upload bytes into a bounded dataframe, or raise `UploadRejected`.
+
+    Guards, in order:
+      1. byte-size cap (default 25 MB, env `KALOS_MAX_UPLOAD_MB`);
+      2. filetype sniff by MAGIC BYTES, not extension: a zip header (`PK\\x03\\x04`)
+         is treated as xlsx/xls, anything else as UTF-8 text/CSV;
+      3. shape caps: CSV/TSV rows and a column ceiling, and an xlsx cell-count
+         (rows * cols) ceiling to blunt zip-bomb expansion.
+    All rejection messages are generic (no parser text, column, or cell echoed).
+    """
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise UploadRejected(_ERR_TOO_LARGE)
+
+    if raw[:4] == _ZIP_MAGIC:
+        # xlsx/xls: read once, then enforce the parsed cell-count ceiling. A zip
+        # header on a corrupt or non-xlsx zip (BadZipFile, openpyxl's
+        # InvalidFileException, ValueError) is a client error, not a server one.
+        try:
+            df = pd.read_excel(io.BytesIO(raw))
+        except Exception as exc:  # noqa: BLE001 - normalized to a generic 400 below
+            log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
+            raise UploadRejected(_ERR_PARSE) from exc
+        rows, cols = df.shape
+        if cols > MAX_COLUMNS:
+            raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
+        if rows * cols > MAX_XLSX_CELLS:
+            raise UploadRejected(_ERR_TOO_LARGE)
+        return df
+
+    # Otherwise treat as text/CSV. A binary blob that is neither a zip nor valid
+    # tabular text will not yield usable numeric columns and is rejected downstream
+    # with the same generic parse message.
+    text = raw.decode("utf-8", errors="replace")
+    if text.strip() == "":
+        raise UploadRejected(_ERR_PARSE)
+    head = text[:4000]
+    sep = "\t" if head.count("\t") > head.count(",") else ","
+    # cap columns first (cheap, from the header) before reading the full body
+    ncols = pd.read_csv(io.StringIO(text), sep=sep, nrows=0).shape[1]
+    if ncols > MAX_COLUMNS:
+        raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
+    return pd.read_csv(io.StringIO(text), sep=sep, nrows=MAX_CSV_ROWS)
 
 
 @app.post("/api/run")
-async def run_uploaded(file: UploadFile = File(...), target: str = Form(default="")) -> JSONResponse:
+async def run_uploaded(
+    file: UploadFile = File(...),
+    target: str = Form(default=""),
+    anonymize: bool = Form(default=False),
+) -> JSONResponse:
     raw = await file.read()
-    name = (file.filename or "").lower()
     try:
-        if name.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(io.BytesIO(raw))
-        else:
-            text = raw.decode("utf-8", errors="replace")
-            head = text[:4000]
-            sep = "\t" if (name.endswith(".tsv") or head.count("\t") > head.count(",")) else ","
-            df = pd.read_csv(io.StringIO(text), sep=sep)
-        result = _analyze(df, target or None)
+        df = _parse_upload(raw)
+        result = _analyze(df, target or None, anonymize=anonymize)
         _save_latest(result, file.filename or "uploaded dataset")
         return JSONResponse(result)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    except UploadRejected as rej:
+        # A guard tripped: the message is already generic and safe to return.
+        log.warning("upload rejected: %s", rej)
+        return JSONResponse({"error": str(rej)}, status_code=400)
+    except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError, UnicodeError):
+        # Log the full traceback server-side for debugging; return a generic
+        # message so no parser detail, column name, cell value, or stack trace
+        # ever reaches the (unauthenticated) client.
+        log.exception("failed to parse or analyze an uploaded file")
+        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
