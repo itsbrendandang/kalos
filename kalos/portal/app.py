@@ -327,10 +327,26 @@ def _analyze(
     y_all = pd.to_numeric(df[target], errors="coerce")
     keep = y_all.notna()
     X_raw = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce")   # NaN preserved (for grouping)
-    X = X_raw.fillna(0.0).to_numpy(float)                                # zero-filled (for the GP)
+    X_zf = X_raw.fillna(0.0)                                             # zero-filled (for the GP + box)
     y = y_all[keep].to_numpy(float)
     if len(y) < 6:
         raise ValueError(f"need at least 6 rows with a numeric {target!r}; got {len(y)}")
+
+    # The design box is built from the target-present (fitted) rows, so the honest
+    # varying-feature check must be recomputed on THOSE rows, not the full column. A
+    # feature that varies over the whole sheet but is constant on the fitted rows
+    # would otherwise collapse its bound to zero width silently. Drop such features
+    # and record them so provenance flags them instead of misleading the client.
+    fitted_range = X_zf.max(axis=0) - X_zf.min(axis=0)
+    constant_on_fitted = [c for c in feats if float(fitted_range[c]) <= 1e-9]
+    if constant_on_fitted:
+        feats = [c for c in feats if c not in set(constant_on_fitted)]
+        if len(feats) < 1:
+            raise ValueError("no varying process-input columns on the target-present rows")
+        X_raw = X_raw.drop(columns=constant_on_fitted)
+        X_zf = X_zf.drop(columns=constant_on_fitted)
+
+    X = X_zf.to_numpy(float)
     bounds = np.vstack([X.min(0), X.max(0)])
 
     gcol = next((c for c in df.columns if _GROUP_HINT.search(str(c))), None)
@@ -393,6 +409,7 @@ def _analyze(
             numeric_cols=[str(c) for c in num],
             id_hint=_ID_HINT,
             outcome_hint=_OUTCOME_HINT,
+            constant_on_fitted_rows=[str(c) for c in constant_on_fitted],
         )
     )
 
@@ -440,6 +457,35 @@ def _anonymize_result(result: dict) -> dict:
     return out
 
 
+def _reject_oversized_xlsx(raw: bytes) -> None:
+    """Reject an xlsx whose declared dimensions exceed the cell / column caps,
+    BEFORE `pd.read_excel` materializes the frame (the zip-bomb guard).
+
+    Opens the workbook read-only with openpyxl and reads each sheet's declared
+    dimension (`max_row * max_column`) without loading cell values. If any sheet's
+    declared cell count exceeds `MAX_XLSX_CELLS` (or its column count exceeds
+    `MAX_COLUMNS`), raise `UploadRejected` so the caller never allocates the full
+    frame. A corrupt or unreadable zip raises `UploadRejected` too (client error).
+    """
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
+    except Exception as exc:  # noqa: BLE001 - corrupt/non-xlsx zip -> generic 400
+        log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
+        raise UploadRejected(_ERR_PARSE) from exc
+    try:
+        for ws in wb.worksheets:
+            cols = ws.max_column or 0
+            rows = ws.max_row or 0
+            if cols > MAX_COLUMNS:
+                raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
+            if rows * cols > MAX_XLSX_CELLS:
+                raise UploadRejected(_ERR_TOO_LARGE)
+    finally:
+        wb.close()
+
+
 def _parse_upload(raw: bytes) -> pd.DataFrame:
     """Turn raw upload bytes into a bounded dataframe, or raise `UploadRejected`.
 
@@ -455,15 +501,21 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
         raise UploadRejected(_ERR_TOO_LARGE)
 
     if raw[:4] == _ZIP_MAGIC:
-        # xlsx/xls: read once, then enforce the parsed cell-count ceiling. A zip
-        # header on a corrupt or non-xlsx zip (BadZipFile, openpyxl's
+        # xlsx/xls: enforce the cell-count ceiling BEFORE pd.read_excel fully
+        # materializes the frame, so a zip-bomb whose DECLARED sheet dimensions are
+        # enormous is rejected without the memory spike of building the DataFrame.
+        # A zip header on a corrupt or non-xlsx zip (BadZipFile, openpyxl's
         # InvalidFileException, ValueError) is a client error, not a server one.
+        _reject_oversized_xlsx(raw)
         try:
             df = pd.read_excel(io.BytesIO(raw))
         except Exception as exc:  # noqa: BLE001 - normalized to a generic 400 below
             log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
             raise UploadRejected(_ERR_PARSE) from exc
         rows, cols = df.shape
+        # Belt-and-suspenders: re-check the materialized shape. The pre-read guard
+        # uses the sheet's declared dimensions; this catches a mismatch and the
+        # column ceiling on the actual parsed frame.
         if cols > MAX_COLUMNS:
             raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
         if rows * cols > MAX_XLSX_CELLS:
@@ -482,7 +534,13 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
     ncols = pd.read_csv(io.StringIO(text), sep=sep, nrows=0).shape[1]
     if ncols > MAX_COLUMNS:
         raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-    return pd.read_csv(io.StringIO(text), sep=sep, nrows=MAX_CSV_ROWS)
+    df = pd.read_csv(io.StringIO(text), sep=sep)
+    # Fail closed on the row cap rather than silently truncating to the first
+    # MAX_CSV_ROWS rows: silent data loss would contradict the safe-errors
+    # contract, so an over-cap CSV is rejected like the xlsx cell-cap guard.
+    if len(df) > MAX_CSV_ROWS:
+        raise UploadRejected(_ERR_TOO_LARGE)
+    return df
 
 
 @app.post("/api/run")
@@ -505,5 +563,14 @@ async def run_uploaded(
         # Log the full traceback server-side for debugging; return a generic
         # message so no parser detail, column name, cell value, or stack trace
         # ever reaches the (unauthenticated) client.
+        log.exception("failed to parse or analyze an uploaded file")
+        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
+    except Exception:  # noqa: BLE001 - normalized to a generic 400 below
+        # Catch-all so a fit-time failure that is NOT a plain ValueError still
+        # returns the {error} JSON envelope the frontend parses, never FastAPI's
+        # default text/plain HTTP 500. This covers torch.linalg.LinAlgError from a
+        # GP fit and an AssertionError from the leakage guard, among others. As
+        # above, the full traceback is logged server-side and only the generic
+        # message reaches the (unauthenticated) client.
         log.exception("failed to parse or analyze an uploaded file")
         return JSONResponse({"error": _ERR_PARSE}, status_code=400)

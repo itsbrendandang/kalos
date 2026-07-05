@@ -3,10 +3,13 @@ reproducibility, and bounds-sanity for the client-facing /api/run path."""
 from __future__ import annotations
 
 import io
+import re
+import zipfile
 
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -14,7 +17,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 from kalos.core.optimize import propose  # noqa: E402
 from kalos.core.surrogate import Surrogate, sanitize_bounds  # noqa: E402
 from kalos.portal import app as portal  # noqa: E402
-from kalos.portal.app import MAX_COLUMNS, MAX_UPLOAD_BYTES, app  # noqa: E402
+from kalos.portal.app import (  # noqa: E402
+    MAX_COLUMNS,
+    MAX_CSV_ROWS,
+    MAX_UPLOAD_BYTES,
+    MAX_XLSX_CELLS,
+    app,
+)
 
 client = TestClient(app)
 
@@ -245,3 +254,148 @@ def test_sanitize_bounds_handles_nonfinite_and_degenerate():
     assert (upper >= lower).all()
     # the constant dimension (5, 5) is widened to a non-zero, valid interval
     assert upper[1] > lower[1]
+
+
+# --- error hygiene: fit-time failures never escape the JSON envelope --------- #
+
+def test_fit_linalg_error_returns_generic_400_not_500(monkeypatch):
+    # A torch.linalg.LinAlgError from the GP fit (or an AssertionError from the
+    # leakage guard) is NOT a plain ValueError, so before the catch-all it escaped
+    # to FastAPI's default text/plain HTTP 500 and broke the {error} JSON contract.
+    def _boom(self, *args, **kwargs):
+        raise torch.linalg.LinAlgError("singular matrix")
+
+    monkeypatch.setattr(Surrogate, "fit", _boom)
+    resp = _post(_csv_bytes(_good_sheet()))
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "error" in body
+    assert body["error"] == (
+        "Could not parse the uploaded file. Check it is a CSV or Excel run-sheet."
+    )
+    # no stack trace, exception text, or file-system path leaks to the client
+    assert "Traceback" not in resp.text
+    assert "singular matrix" not in resp.text
+    assert "/Users/" not in resp.text and "kalos/portal" not in resp.text
+
+
+# --- zip-bomb: xlsx cell cap enforced BEFORE full materialization ------------ #
+
+def _xlsx_with_declared_dims(ref: str) -> bytes:
+    """A valid tiny xlsx whose sheet <dimension> tag is rewritten to `ref`, so the
+    DECLARED shape is huge while the real content is a few cells (a zip-bomb shape).
+    """
+    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    zin = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+    names = zin.namelist()
+    sheet = next(n for n in names if n.startswith("xl/worksheets/sheet"))
+    xml = re.sub(
+        r'<dimension ref="[^"]*"/>', f'<dimension ref="{ref}"/>', zin.read(sheet).decode()
+    )
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            zout.writestr(n, xml.encode() if n == sheet else zin.read(n))
+    return out.getvalue()
+
+
+def test_oversized_xlsx_rejected_before_materialization(monkeypatch):
+    # An xlsx whose DECLARED cell count exceeds MAX_XLSX_CELLS must be rejected with
+    # 400 WITHOUT pd.read_excel ever materializing the full frame. "SF" is column
+    # 500 (within the 512-column cap), so this trips the CELL cap, not the column
+    # cap: 500 * 1048576 cells >> MAX_XLSX_CELLS.
+    assert 500 * 1_048_576 > MAX_XLSX_CELLS and 500 <= MAX_COLUMNS
+
+    called = {"read_excel": False}
+    real_read_excel = pd.read_excel
+
+    def _tracking_read_excel(*args, **kwargs):
+        called["read_excel"] = True
+        return real_read_excel(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_excel", _tracking_read_excel)
+    monkeypatch.setattr(portal.pd, "read_excel", _tracking_read_excel)
+
+    resp = _post(_xlsx_with_declared_dims("A1:SF1048576"), filename="bomb.xlsx")
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "The uploaded file is too large."
+    # the guard rejected on declared dimensions, before materializing the frame
+    assert called["read_excel"] is False
+
+
+def test_honest_small_xlsx_still_accepted():
+    # A normally-sized xlsx (declared dims within caps) is still read and analyzed.
+    df = _good_sheet()
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    resp = _post(buf.getvalue(), filename="runs.xlsx")
+    assert resp.status_code == 200
+    assert resp.json()["target"] == "lipase_titer"
+
+
+# --- CSV row cap fails closed (no silent truncation) ------------------------- #
+
+def test_oversized_csv_rows_rejected_400():
+    # A narrow CSV with more than MAX_CSV_ROWS data rows must be REJECTED (400),
+    # not silently truncated to the first MAX_CSV_ROWS rows.
+    n = MAX_CSV_ROWS + 25
+    header = "Methanol,pH,lipase_titer\n"
+    row = "1.0,6.0,3.0\n"
+    content = (header + row * n).encode("utf-8")
+    resp = _post(content)
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "The uploaded file is too large."
+
+
+def test_csv_at_row_cap_still_accepted():
+    # Exactly MAX_CSV_ROWS data rows is within the cap and analyzed normally.
+    rng = np.random.default_rng(0)
+    n = 40  # small, well under the cap; asserts the reject is not overzealous
+    df = pd.DataFrame({
+        "Methanol": rng.uniform(0, 4, n).round(3),
+        "pH": rng.uniform(5, 7, n).round(2),
+        "lipase_titer": rng.uniform(1, 6, n).round(3),
+    })
+    resp = _post(_csv_bytes(df))
+    assert resp.status_code == 200
+
+
+# --- constant-on-fitted-rows feature is flagged, not silently pinned --------- #
+
+def test_feature_constant_on_target_rows_is_flagged_not_pinned():
+    # Methanol VARIES across the whole sheet, but on the rows where lipase_titer is
+    # present it is constant. Its design box would collapse to zero width. The
+    # feature must be dropped and flagged in provenance, not silently kept with a
+    # zero-width bound.
+    rng = np.random.default_rng(5)
+    n = 40
+    ph = rng.uniform(5, 7, n)
+    methanol = rng.uniform(0, 4, n)
+    titer = np.full(n, np.nan)
+    # target present only on the first 20 rows; pin methanol constant THERE
+    present = 20
+    methanol[:present] = 2.0  # constant on target-present rows
+    titer[:present] = (1.5 * ph[:present] + rng.normal(0, 0.2, present)).round(3)
+    df = pd.DataFrame({
+        "Methanol": methanol.round(3),
+        "pH": ph.round(2),
+        "lipase_titer": titer,
+    })
+    out = portal._analyze(df)
+    # Methanol must NOT be a kept feature (its fitted-row box is zero-width)
+    assert "Methanol" not in out["features"]
+    assert "pH" in out["features"]
+    statuses = {r["name"]: r["status"] for r in out["provenance"]}
+    assert statuses["Methanol"] == "dropped_constant_on_fitted_rows"
+    # every proposed pH coordinate stays inside the observed (varying) box. The box
+    # is built from the dataframe's kept-row (rounded) pH values, so derive it from
+    # the frame, not the raw array. proposal `vals` are indexed by
+    # `proposal_features` order, not `features`.
+    kept_ph = df.loc[df["lipase_titer"].notna(), "pH"]
+    box_lo, box_hi = float(kept_ph.min()), float(kept_ph.max())
+    assert "pH" in out["proposal_features"]
+    ph_idx = out["proposal_features"].index("pH")
+    for prop in out["proposals"]:
+        assert box_lo - 1e-6 <= prop["vals"][ph_idx] <= box_hi + 1e-6
