@@ -98,6 +98,26 @@ def test_multiobjective_proposes_and_pareto():
     assert py.shape[1] == 2 and len(py) >= 1
 
 
+def test_multiobjective_degenerate_feature_never_proposes_out_of_range():
+    # Regression for the Culture_Volume ~= 33,000,000 blow-up on the multi-objective
+    # path: a constant feature (lower == upper) must not NaN-poison the fit or let a
+    # proposal escape the observed range, mirroring the single-objective guard.
+    rng = np.random.default_rng(2)
+    n = 16
+    methanol = rng.uniform(0, 4, n)
+    culture_volume = np.full(n, 1000.0)  # constant column -> zero-width bound
+    X = np.column_stack([methanol, culture_volume])
+    Y = np.stack([1.5 * methanol, -((methanol - 2.0) ** 2)], axis=-1)
+    bounds = np.vstack([X.min(0), X.max(0)])
+    s = MultiObjectiveSurrogate().fit(X, Y, bounds=bounds)
+    nxt = propose_multiobjective(s, bounds, q=3)
+    assert np.isfinite(nxt).all()  # no NaN blow-up from the degenerate normalization box
+    # the constant feature (col 1) stays pinned at ~1000, never explodes
+    assert np.all(np.abs(nxt[:, 1] - 1000.0) <= 1e-3)
+    assert np.all(nxt[:, 0] >= methanol.min() - 1e-6)
+    assert np.all(nxt[:, 0] <= methanol.max() + 1e-6)
+
+
 @pytest.mark.skipif(
     not os.environ.get("KALOS_TEST_ESM"),
     reason="set KALOS_TEST_ESM=1 to run the ESM-2 model download + embed test",

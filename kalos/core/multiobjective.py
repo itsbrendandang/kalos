@@ -26,7 +26,7 @@ from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.multi_objective.pareto import is_non_dominated
 from gpytorch.mlls import SumMarginalLogLikelihood
 
-from .surrogate import DEVICE, DTYPE
+from .surrogate import DEVICE, DTYPE, sanitize_bounds
 
 
 class MultiObjectiveSurrogate:
@@ -47,11 +47,15 @@ class MultiObjectiveSurrogate:
         Xt = torch.as_tensor(Xa, dtype=DTYPE, device=DEVICE)
         Yt = torch.as_tensor(Ya, dtype=DTYPE, device=DEVICE)
         d = Xt.shape[-1]
-        norm = (
-            Normalize(d=d, bounds=torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE))
-            if bounds is not None
-            else Normalize(d=d)
-        )
+        if bounds is not None:
+            # sanitize_bounds widens zero-width (constant-feature) dims and repairs
+            # non-finite bounds so Normalize never divides by a zero-width range and
+            # NaN-poisons the fit. Mirrors the single-objective Surrogate.fit guard.
+            lower, upper = sanitize_bounds(bounds)
+            box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
+            norm = Normalize(d=d, bounds=box)
+        else:
+            norm = Normalize(d=d)
         models = [
             SingleTaskGP(Xt, Yt[:, i : i + 1], input_transform=norm, outcome_transform=Standardize(m=1))
             for i in range(Yt.shape[-1])
@@ -86,9 +90,22 @@ def propose_multiobjective(
     raw_samples: int = 128,
     mc_samples: int = 128,
 ) -> np.ndarray:
-    """Return q proposed points (q x d) that best expand the Pareto front."""
+    """Return q proposed points (q x d) that best expand the Pareto front.
+
+    Every returned coordinate is clamped into `[lower, upper]` per feature so a
+    proposal can never fall outside the observed design box. This mirrors the
+    single-objective `core.optimize.propose` guard against the historical
+    out-of-range blow-up (a constant `Culture_Volume` proposing ~= 33,000,000)
+    for a degenerate or near-constant feature. See `sanitize_bounds`.
+    """
     assert surrogate.model is not None and surrogate._X is not None, "fit the surrogate first"
-    b = torch.as_tensor(np.asarray(bounds, float), dtype=DTYPE, device=DEVICE)
+    lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so optimize_acqf sees a valid box
+    b = torch.stack(
+        [
+            torch.as_tensor(lower, dtype=DTYPE, device=DEVICE),
+            torch.as_tensor(upper, dtype=DTYPE, device=DEVICE),
+        ]
+    )
     rp = surrogate.default_ref_point() if ref_point is None else np.asarray(ref_point, float)
     rp = torch.as_tensor(rp, dtype=DTYPE, device=DEVICE)
     acq = qLogNoisyExpectedHypervolumeImprovement(
@@ -101,7 +118,11 @@ def propose_multiobjective(
     candidates, _ = optimize_acqf(
         acq_function=acq, bounds=b, q=q, num_restarts=num_restarts, raw_samples=raw_samples
     )
-    return candidates.detach().cpu().numpy()
+    out = candidates.detach().cpu().numpy()
+    # Belt-and-suspenders: clamp each coordinate back into the observed box. The
+    # optimizer respects the bounds it is given, but a NaN/degenerate corner or a
+    # numerical overshoot must never surface as an absurd out-of-range recipe.
+    return np.clip(out, lower, upper)
 
 
 __all__ = ["MultiObjectiveSurrogate", "propose_multiobjective"]
