@@ -2,6 +2,43 @@
 
 Newest first.
 
+## 2026-07-05
+
+### Fixed - Wave A1.1: review fixes for the upload + optimization path
+Follow-up fixes to Wave A1 from a code review of the FastAPI Bayesian-optimization engine.
+No architecture change; the `/api/run` and `/api/latest` response contract is preserved and only
+extended (a new `dropped_constant_on_fitted_rows` provenance status).
+
+- **Multi-objective bounds-sanity** (`kalos/core/multiobjective.py`): the multi-objective path now
+  mirrors the single-objective degenerate-bounds guard.
+  `MultiObjectiveSurrogate.fit` sanitizes bounds (via `sanitize_bounds`) before building the
+  `Normalize` box, and `propose_multiobjective` sanitizes before `optimize_acqf` and clips returned
+  proposals into the observed box.
+  This closes the constant-feature (e.g. fixed `Culture_Volume`) NaN / out-of-range blow-up class
+  on qLogNEHVI proposals, the same ~33,000,000 regression already fixed on the single-objective side.
+- **Error hygiene: fit-time failures stay in the JSON envelope** (`kalos/portal/app.py`, `/api/run`):
+  a catch-all `except Exception` was added after the narrow parser catch.
+  A `torch.linalg.LinAlgError` from a GP fit or an `AssertionError` from the leakage guard is not a
+  plain `ValueError`, so it previously escaped to FastAPI's default text/plain HTTP 500 and broke the
+  `{error}` JSON contract the frontend parses.
+  It now returns the same generic 400 envelope; the full traceback is logged server-side and no
+  parser text, exception message, or stack trace reaches the client.
+- **Zip-bomb: xlsx cell cap enforced before materialization** (`kalos/portal/app.py`,
+  `_reject_oversized_xlsx`): the xlsx cell-count ceiling now runs on the workbook's declared
+  dimensions (opened read-only with openpyxl) BEFORE `pd.read_excel` materializes the frame, so a
+  zip-bomb is rejected without the memory spike.
+  The post-read shape check is kept as a belt-and-suspenders re-check.
+- **CSV row cap fails closed** (`kalos/portal/app.py`, `_parse_upload`): an over-cap CSV is now
+  REJECTED with a 400 (`MAX_CSV_ROWS`), matching the xlsx cell-cap behavior, instead of silently
+  truncating to the first 100k rows.
+  Silent data loss contradicted the safe-errors contract.
+- **Honest constant-on-fitted-rows check** (`kalos/portal/app.py` `_analyze`,
+  `kalos/portal/validate.py`): the varying-feature filter is recomputed on the target-present rows
+  the GP actually fits, not the full column.
+  A feature that varies over the whole sheet but is constant on the fitted rows would collapse its
+  design box to zero width; it is now dropped and flagged in provenance as
+  `dropped_constant_on_fitted_rows`, never silently pinned.
+
 ## 2026-07-02 (later)
 
 ### Added - Wave A1: safety + product-readiness hardening for the upload path
