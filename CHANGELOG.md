@@ -27,6 +27,11 @@ composable with the existing GP.
   are unchanged. +6 tests (`tests/test_feasibility.py`, `tests/test_pool.py`) including a
   zero-inflated synthetic pool comparison.
 
+### Update - Honest benchmark result (`BENCHMARK.md`)
+Feasibility is highly learnable on the real media DoE (grouped-CV AUC 0.891), but gating EI
+with it does not rescue BO (`bo_feas` matches plain `bo`; `bo_feas_clean` still loses to
+random, 0.046 vs 0.082). The lever remains replicates / signal-to-noise, not the classifier.
+
 ## 2026-07-05
 
 ### Added - Closed-loop benchmark (`kalos/bench/`, `BENCHMARK.md`)
