@@ -110,6 +110,42 @@ The feasibility classifier is correct and worth keeping (it now feeds the `feasi
 The remaining lever is the data: **replicates and higher signal-to-noise** so the producer-titer surface is learnable at all.
 The product must not claim BO superiority on data in this regime, and the next real work is noise/replicate modeling, not a better acquisition function or classifier.
 
+## Update: the real lever is assay noise, and BO wins on the reproducible objective
+
+We followed the noise/replicate thread and it resolved the whole story.
+
+**The data is heavily replicated, and it is noise-dominated.**
+The 96-row combined media DoE is only **27 distinct recipes** (some measured up to 14 times).
+A variance decomposition on those replicates puts the intraclass correlation (the fraction of titer variance that is real between-recipe signal) at **ICC ~= 0.26**: roughly **three quarters of the titer variance is assay noise**.
+The estimated assay-noise standard deviation (~0.0079) is actually larger than the between-recipe signal standard deviation (~0.0047).
+Feasibility is mostly a stable property (only 3 of 27 recipes give mixed producer/non-producer results across replicates), which is why the classifier's AUC is high while gating still does not help - feasibility was never the bottleneck.
+
+**The apparent high titers are noise spikes, not recipes.**
+The best *reproducible* recipe (replicate-averaged) is only **0.0197**, while the best single *measurement* is **0.1105** - about 5.6x higher.
+The single-measurement "best-found" metric therefore pays out for lucky noise draws.
+That is why undirected random search "won" the earlier benchmark: it chases noise blindly and occasionally hits a spike, while BO correctly refuses to over-chase a noisy incumbent and so scores worse on a metric that rewards luck.
+
+**On the objective that actually matters, BO wins.**
+Re-running the pool retrospective on the replicate-averaged recipe objective (27 recipes, 40 seeds) - the reproducible titer a client would actually ship:
+
+| picks | bo | bo_feas_clean | random |
+| --- | --- | --- | --- |
+| 5 | 0.0158 | 0.0159 | 0.0153 |
+| 8 | 0.0179 | 0.0181 | 0.0163 |
+| 11 | 0.0190 | 0.0190 | 0.0173 |
+| 14 | **0.0197** | **0.0197** | 0.0182 |
+| 22 | 0.0197 | 0.0197 | 0.0195 |
+
+Speed (area under the best-found curve, normalized): **BO 0.861, bo_feas_clean 0.864, random 0.816**.
+BO leads at every early checkpoint and reaches the best recipe roughly 5-6 experiments sooner.
+The endpoints tie only because the pool is tiny (27 recipes with a generous budget, so random eventually finds the max too); the speed advantage is the real, honest result.
+
+**Conclusion.**
+"BO loses to random" was an artifact of scoring single noisy measurements.
+On the reproducible objective - replicate-averaged titer, with the measured noise floor fed to the surrogate - BO does exactly what it promises: it finds the best recipe in fewer experiments.
+The two concrete product changes that follow: optimize and benchmark on **replicate-averaged titer** (never single measurements, which reward noise), and report/feed the **assay noise floor** (ICC ~0.26, sigma ~0.008) so the model stops chasing spikes and clients know the honest reproducibility ceiling.
+The highest-leverage laboratory action remains reducing assay noise and collecting replicates.
+
 ## Caveats
 
 - The synthetic surfaces measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on real data.
