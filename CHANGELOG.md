@@ -4,6 +4,19 @@ Newest first.
 
 ## 2026-07-05
 
+### Fixed - unify the anonymization scrub lists
+`kalos/ingest/feed.py` kept its own second copy of the identity-scrub rules, which had drifted from
+the canonical lists in `kalos/data/anonymizer.py`: the feed copy was missing the `subject` and `mrn`
+drop-substrings and only hashed `campaign_id` / `campaign`, so `lot`, `batch_id`, `experiment`, and
+`batch` columns in an uploaded run sheet passed through un-hashed on the live ingestion path
+(`FileDataFeed.read` -> `anonymize_frame`, reached from `propose_next_batch`).
+
+- `anonymize_frame` now imports `DROP_EXACT`, `DROP_SUBSTR`, `HASH_EXACT`, `HASH_SUBSTR` from
+  `kalos.data.anonymizer` (single source of truth) and checks both the exact and substring hash sets,
+  matching `Anonymizer.anonymize_meta`.
+- `anonymize_frame`'s `salt` now defaults to `None` and resolves via `default_salt()`, so it honors
+  `KALOS_ANON_SALT` instead of silently hardcoding the dev salt literal.
+
 ### Changed - Wave A1.2: production hardening
 Go-live hardening from a memory / data-volume / BoTorch review. Response contract preserved.
 
