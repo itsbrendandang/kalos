@@ -4,6 +4,15 @@ Newest first.
 
 ## 2026-07-05
 
+### Added - Closed-loop benchmark (`kalos/bench/`, `BENCHMARK.md`)
+An honest answer to "does the optimizer beat a space-filling design?". `python -m kalos.bench`
+races the BO loop against Latin Hypercube and random on synthetic surfaces with known optima,
+sweeping observation noise. Finding: BO dominates when the signal is clean (reaches LHS's
+end-value ~11-14 experiments sooner, near-zero regret) but its edge shrinks to marginal-or-nil
+at 15% measurement noise - which is why the real, noisy media data shows only a weak ~0.37-0.52
+signal. The lever is data quality (replicates, signal-to-noise), not the algorithm. Full write-up
+and reproduction steps in `BENCHMARK.md`; +4 tests.
+
 ### Fixed - unify the anonymization scrub lists
 `kalos/ingest/feed.py` kept its own second copy of the identity-scrub rules, which had drifted from
 the canonical lists in `kalos/data/anonymizer.py`: the feed copy was missing the `subject` and `mrn`
