@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from kalos.core.feasibility import FeasibilityClassifier, feasible_labels
 from kalos.core.surrogate import FitError, Surrogate
 
 _norm_cdf = norm.cdf
@@ -86,20 +87,40 @@ def run_pool_one(
     for _ in range(budget):
         if not remaining:
             break
-        if strategy == "bo":
+        if strategy in ("bo", "bo_feas", "bo_feas_clean"):
             try:
                 # Proper pool-based BO: score every remaining candidate by analytic
                 # Expected Improvement from the surrogate posterior and pick the
                 # argmax. This gives the model its fair shot (no propose-then-snap
                 # handicap) and is the standard way to run BO on a fixed pool.
-                s = Surrogate().fit(Xn[evaluated], y[evaluated], bounds=bounds)
+                evaluated_arr = np.asarray(evaluated)
+                if strategy == "bo_feas_clean":
+                    # Fit the GP only on feasible (producer, y > 0) evaluated points,
+                    # so the surrogate never has to fit the zero-inflated spike. Falls
+                    # back to fitting on all evaluated points when too few feasible
+                    # points have been observed yet (same behavior as "bo").
+                    feas_mask = y[evaluated_arr] > 0
+                    if int(feas_mask.sum()) >= 3:
+                        gp_idx = evaluated_arr[feas_mask]
+                    else:
+                        gp_idx = evaluated_arr
+                else:
+                    gp_idx = evaluated_arr
+                s = Surrogate().fit(Xn[gp_idx], y[gp_idx], bounds=bounds)
                 rem = np.array(sorted(remaining))
                 mu, sd = s.posterior(Xn[rem])
                 mu = np.asarray(mu, float).reshape(-1)
                 sd = np.maximum(np.asarray(sd, float).reshape(-1), 1e-9)
-                best_y = float(y[evaluated].max())
+                best_y = float(y[gp_idx].max())
                 z = (mu - best_y) / sd
                 ei = (mu - best_y) * _norm_cdf(z) + sd * _norm_pdf(z)
+                if strategy in ("bo_feas", "bo_feas_clean"):
+                    # Gate EI by predicted P(feasible), trained on ALL evaluated
+                    # points' labels (the classifier's whole job is telling feasible
+                    # from infeasible, regardless of which points the GP itself used).
+                    fc = FeasibilityClassifier().fit(Xn[evaluated_arr], feasible_labels(y[evaluated_arr]))
+                    p_feasible = fc.predict_proba(Xn[rem])
+                    ei = ei * p_feasible
                 pick = int(rem[int(np.argmax(ei))])
             except FitError:
                 pick = int(rng.choice(sorted(remaining)))
