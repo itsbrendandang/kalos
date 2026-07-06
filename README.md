@@ -113,6 +113,9 @@ to use the platform locally.
 - ~~Feasibility classifier + gated acquisition.~~ **Done** (`core/feasibility.py`,
   `bo_feas` / `bo_feas_clean` strategies in `bench/pool.py`). Calibration (ECE/Brier)
   for the promotion gates is still pending.
+- ~~Replicate-aware aggregation + assay noise-floor estimation + optional
+  fixed-noise GP.~~ **Done** (`core/replicates.py`, `Surrogate.fit(..., noise=...)`,
+  `pool_from_frame(..., aggregate=True)`) — the SNR lever from `BENCHMARK.md`.
 - Larger ESM-2 / full NVIDIA BioNeMo backend behind the same embedder interface.
 
 No proprietary data lives in this repo; the demos use synthetic data and public

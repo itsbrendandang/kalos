@@ -21,6 +21,7 @@ import pandas as pd
 from scipy.stats import norm
 
 from kalos.core.feasibility import FeasibilityClassifier, feasible_labels
+from kalos.core.replicates import aggregate_replicates
 from kalos.core.surrogate import FitError, Surrogate
 
 _norm_cdf = norm.cdf
@@ -32,12 +33,21 @@ _OUTPUT_HINT = re.compile(r"titer|titre|yield|conc|purity|size|kda|expression|od
 _ID_HINT = re.compile(r"^(sample|well|plate|position|revvity|experiment|medium|strain|name|.*plate.*)$", re.I)
 
 
-def pool_from_frame(df: pd.DataFrame, target: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def pool_from_frame(
+    df: pd.DataFrame, target: str, *, aggregate: bool = False
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Return (X, y, feature_names): process-input features and the target titer.
 
     Features are numeric, varying columns that are not the target, not another
     measured output, and not an identifier. Missing feature cells are zero-filled
     (as the engine does); rows without a numeric target are dropped.
+
+    `aggregate=True` collapses replicate rows (identical feature vectors, see
+    `kalos.core.replicates.aggregate_replicates`) down to one row per distinct
+    recipe with the mean target, giving a reproducible per-recipe objective
+    instead of one row per (noisy) assay read. `feats` is unaffected either
+    way; only `X` and `y` are reduced. Default `False` keeps one row per input
+    row, the current behavior.
     """
     y_all = pd.to_numeric(df[target], errors="coerce")
     keep = y_all.notna()
@@ -52,6 +62,8 @@ def pool_from_frame(df: pd.DataFrame, target: str) -> Tuple[np.ndarray, np.ndarr
         raise ValueError("no varying numeric process-input features found")
     X = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(float)
     y = y_all[keep].to_numpy(float)
+    if aggregate:
+        X, y, _, _ = aggregate_replicates(X, y)
     return X, y, feats
 
 
@@ -62,12 +74,19 @@ def _normalize(X: np.ndarray) -> np.ndarray:
 
 
 def run_pool_one(
-    X: np.ndarray, y: np.ndarray, strategy: str, *, n_init: int, budget: int, seed: int
+    X: np.ndarray, y: np.ndarray, strategy: str, *, n_init: int, budget: int, seed: int,
+    noise: float | None = None,
 ) -> np.ndarray:
     """One retrospective trial; return best-titer-found after each pick.
 
     BO fits on the revealed (noisy, real) titers, proposes a point in the
     normalized design box, and snaps to the nearest not-yet-run pool candidate.
+
+    `noise`, when given, is passed through to every `Surrogate.fit(...)` call
+    in the BO branches as a fixed observation-noise variance (see
+    `kalos.core.surrogate.Surrogate.fit`), e.g. an assay noise floor from
+    `kalos.core.replicates.estimate_noise_floor`. Default `None` infers noise
+    as before and leaves the bo/random trajectories unchanged.
     """
     import torch
 
@@ -106,7 +125,7 @@ def run_pool_one(
                         gp_idx = evaluated_arr
                 else:
                     gp_idx = evaluated_arr
-                s = Surrogate().fit(Xn[gp_idx], y[gp_idx], bounds=bounds)
+                s = Surrogate().fit(Xn[gp_idx], y[gp_idx], bounds=bounds, noise=noise)
                 rem = np.array(sorted(remaining))
                 mu, sd = s.posterior(Xn[rem])
                 mu = np.asarray(mu, float).reshape(-1)
@@ -137,12 +156,21 @@ def run_pool_one(
 def run_pool(
     X: np.ndarray, y: np.ndarray, *, strategies: Iterable[str] = ("bo", "random"),
     n_init: int = 8, budget: int = 40, seeds: Iterable[int] = range(20),
+    noise: float | None = None,
 ) -> Dict[str, dict]:
+    """Run each strategy's retrospective trial across `seeds`.
+
+    `noise`, when given, is forwarded to `run_pool_one` as a fixed
+    observation-noise variance for the BO strategies. Default `None` leaves
+    bo/random behavior unchanged.
+    """
     seeds = list(seeds)
     out: Dict[str, dict] = {}
     L = None
     for strat in strategies:
-        trajs = [run_pool_one(X, y, strat, n_init=n_init, budget=budget, seed=s) for s in seeds]
+        trajs = [
+            run_pool_one(X, y, strat, n_init=n_init, budget=budget, seed=s, noise=noise) for s in seeds
+        ]
         L = min(len(t) for t in trajs)
         arr = np.vstack([t[:L] for t in trajs])
         out[strat] = {"mean": arr.mean(0), "std": arr.std(0), "final": arr[:, -1]}
