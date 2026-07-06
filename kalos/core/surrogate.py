@@ -112,10 +112,23 @@ class Surrogate:
         self._y: np.ndarray | None = None
         self._X: torch.Tensor | None = None
 
-    def fit(self, X, y, bounds) -> "Surrogate":
+    def fit(self, X, y, bounds, *, noise=None) -> "Surrogate":
         """Fit on (X, y). `bounds` (2 x d) ties input normalization to the fixed
         design box rather than the training-data envelope; it is required so a
-        caller can never fall into the training-envelope normalization footgun."""
+        caller can never fall into the training-envelope normalization footgun.
+
+        `noise` optionally fixes the observation noise variance instead of
+        inferring it from the data:
+          - `None` (default): infer noise as before (unchanged behavior).
+          - a scalar: the same noise variance sigma^2, in the target's original
+            units, applied to every training point.
+          - an array of length `n`: a per-point noise variance sigma^2_i, in
+            the target's original units.
+        This is for a known assay noise floor (e.g. from `estimate_noise_floor`
+        on replicated recipes), so the GP stops re-inferring noise it already
+        has an external estimate for and stops chasing single-replicate noise
+        spikes as if they were signal.
+        """
         Xa = np.asarray(X, float)
         ya = np.asarray(y, float).reshape(-1)
         if Xa.ndim != 2 or Xa.shape[0] == 0:
@@ -130,11 +143,27 @@ class Surrogate:
         lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so Normalize is finite
         box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
         normalize = Normalize(d=d, bounds=box)
-        # No explicit likelihood is passed, so SingleTaskGP uses BoTorch's default
-        # noise model: a GaussianLikelihood with a LogNormalPrior(-4, 1) on the
-        # noise and a positive floor. That default is the right noise prior for the
-        # small-sample regime, so we deliberately do not override it here.
-        self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
+        if noise is None:
+            # No explicit likelihood is passed, so SingleTaskGP uses BoTorch's
+            # default noise model: a GaussianLikelihood with a
+            # LogNormalPrior(-4, 1) on the noise and a positive floor. That
+            # default is the right noise prior for the small-sample regime, so
+            # we deliberately do not override it here.
+            self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
+        else:
+            # Fixed observation noise: pass train_Yvar (n x 1, original y-units)
+            # alongside outcome_transform=Standardize. BoTorch scales Yvar
+            # through the Standardize transform internally, and SingleTaskGP
+            # automatically selects a FixedNoiseGaussianLikelihood whenever
+            # train_Yvar is given, so no explicit likelihood override is
+            # needed here either.
+            noise_arr = np.broadcast_to(np.asarray(noise, float), (Xa.shape[0],)).astype(float)
+            if not np.isfinite(noise_arr).all() or (noise_arr < 0).any():
+                raise ValueError("noise must be finite and non-negative")
+            yvar = torch.as_tensor(noise_arr, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
+            self.model = SingleTaskGP(
+                Xt, yt, train_Yvar=yvar, input_transform=normalize, outcome_transform=Standardize(m=1)
+            )
         mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         _fit_mll_with_retry(mll)
         self._y = ya

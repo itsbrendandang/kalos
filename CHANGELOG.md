@@ -4,6 +4,36 @@ Newest first.
 
 ## 2026-07-06
 
+### Added - Replicate-aware aggregation + assay noise floor + fixed-noise GP (`kalos/core/replicates.py`)
+`BENCHMARK.md`'s SNR write-up found the real media DoE is heavily replicated (96 rows over 27
+distinct recipes, up to 14 reps per recipe) with an ICC of ~0.26 - roughly 74% of titer variance
+is assay noise, not recipe-to-recipe signal. This adds the tooling to act on that: aggregate
+replicates into a reproducible per-recipe objective, estimate the assay noise floor from the
+replicate spread, and optionally hand that noise estimate to the GP directly instead of making it
+re-infer noise from a handful of points.
+
+- `kalos/core/replicates.py` (new): `aggregate_replicates(X, y)` groups rows by identical
+  rounded feature vectors and returns `(X_unique, y_mean, y_var, n_reps)` in deterministic
+  first-occurrence order. `estimate_noise_floor(X, y)` pools the within-group sample variance
+  over replicated groups into a single assay noise variance (`nan` if nothing is replicated).
+  `noise_report(X, y)` adds `n_rows` / `n_recipes` / `n_replicated` / `signal_var` / `icc` on top,
+  for a one-call summary of how much of the variance is real signal.
+- `kalos/core/surrogate.py`: `Surrogate.fit(X, y, bounds, *, noise=None)` gains an optional fixed
+  observation-noise variance (`None` default, a scalar, or a per-point array, all in the target's
+  original units). When given, the GP is built with `train_Yvar` alongside
+  `outcome_transform=Standardize` - BoTorch scales `Yvar` through the standardization internally
+  and `SingleTaskGP` auto-selects a `FixedNoiseGaussianLikelihood`, so no extra likelihood
+  plumbing was needed. Confirmed working on the installed BoTorch 0.18.1 / GPyTorch 1.15.2 before
+  wiring it in. `noise=None` is byte-for-byte the previous inferred-noise behavior.
+- `kalos/bench/pool.py`: `run_pool_one` / `run_pool` take a `noise` parameter, forwarded to every
+  `Surrogate.fit(...)` call in the BO branches (default `None`, bo/random unchanged).
+  `pool_from_frame(df, target, *, aggregate=False)` can collapse replicate rows to per-recipe
+  means before returning `(X, y, feats)`; `feats` is unaffected, default `False` is unchanged.
+- +10 tests (`tests/test_replicates.py`): known-duplicate aggregation, rounding-based near-duplicate
+  merging, noise-floor recovery against an injected variance, ICC ballpark on synthetic
+  signal/noise, fixed-noise `Surrogate.fit` (scalar and per-point array) end to end, `run_pool`
+  with fixed noise producing a finite monotone trajectory, and `pool_from_frame(..., aggregate=True)`.
+
 ### Added - Feasibility classifier + gated acquisition (`kalos/core/feasibility.py`)
 BENCHMARK.md's finding was that BO loses to random on the real media DoE because titer is
 zero-inflated (~21% non-producers) and the GP over-exploits a noisy incumbent on a spiky
