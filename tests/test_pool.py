@@ -35,3 +35,19 @@ def test_pool_bo_beats_random_on_a_clean_pool():
     y = 10.0 * np.exp(-3.0 * ((X - center) ** 2).sum(1)) + rng.normal(0, 0.05, 80)
     res = run_pool(X, y, n_init=8, budget=22, seeds=range(5))
     assert res["bo"]["mean"][-1] > res["random"]["mean"][-1]
+
+
+def test_pool_feasibility_gated_strategies_trajectories_are_well_formed():
+    # Shape/monotonicity/finiteness check for the two feasibility-gated
+    # strategies, mirroring the same properties expected of "bo" and "random".
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, size=(80, 6))
+    center = np.full(6, 0.55)
+    y = 10.0 * np.exp(-3.0 * ((X - center) ** 2).sum(1)) + rng.normal(0, 0.05, 80)
+    res = run_pool(X, y, strategies=("bo_feas", "bo_feas_clean"), n_init=8, budget=22, seeds=range(5))
+    expected_len = res["_meta"]["steps"]
+    for strat in ("bo_feas", "bo_feas_clean"):
+        mean_traj = res[strat]["mean"]
+        assert len(mean_traj) == expected_len
+        assert np.all(np.isfinite(mean_traj))
+        assert np.all(np.diff(mean_traj) >= -1e-12)

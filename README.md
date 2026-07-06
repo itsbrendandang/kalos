@@ -110,7 +110,9 @@ to use the platform locally.
 - Mixed continuous/categorical inputs (carbon source, medium) via Ax or BoTorch.
 - The push-feed ingestion loop (platform streams runs in; brain proposes the next
   batch; anonymized on read).
-- Feasibility classifier + calibration so the promotion gates have AUC/ECE/Brier.
+- ~~Feasibility classifier + gated acquisition.~~ **Done** (`core/feasibility.py`,
+  `bo_feas` / `bo_feas_clean` strategies in `bench/pool.py`). Calibration (ECE/Brier)
+  for the promotion gates is still pending.
 - Larger ESM-2 / full NVIDIA BioNeMo backend behind the same embedder interface.
 
 No proprietary data lives in this repo; the demos use synthetic data and public

@@ -76,8 +76,43 @@ It is the data: the real titers are tiny and zero-inflated - **21% of runs are n
 The lever is not a better acquisition function, it is the data: a **feasibility classifier** to model the zero-inflation (the non-producers), and **replicates / higher signal-to-noise** so the surface is learnable at all.
 This validates the roadmap - feasibility labels and noise/replicates are the real work, not model tuning - and it means the product must not claim BO superiority on data in this regime.
 
+## Update: we built the feasibility classifier and tested the hypothesis
+
+The section above proposed two levers: a feasibility classifier for the zero-inflation, and replicates / higher signal-to-noise.
+We built the first one (`kalos/core/feasibility.py`: a calibrated, cold-start-safe producer/non-producer classifier) and gated the pool-based acquisition with it (`bo_feas` gates EI by predicted P(feasible); `bo_feas_clean` also fits the GP on producer-only points).
+Then we tested it on the same real dataset, with leakage-safe features (9 media + pH inputs; the measured outputs `Size`, `Conc.`, `% Purity` are excluded), 30 seeds.
+
+Two things came back, and together they are decisive.
+
+**Feasibility is highly learnable here.**
+Grouped-CV AUC for producer vs non-producer is **0.891**.
+The classifier is excellent at telling a producing recipe from a non-producer.
+
+**But gating on it does not rescue BO.**
+
+| strategy | final best-found (mean) | win-rate vs random | speed (AUC of best-found curve) |
+| --- | --- | --- | --- |
+| bo | 0.031 | 10% | 0.236 |
+| bo_feas | 0.031 | 10% | 0.236 |
+| bo_feas_clean | 0.046 | 20% | 0.247 |
+| random | **0.082** | - | **0.439** |
+
+`bo_feas` is identical to plain `bo`, and `bo_feas_clean` improves only marginally and still loses to random by roughly 2x.
+
+**Why an AUC of 0.89 does not help: the bottleneck is not feasibility.**
+The GP already avoids the zeros on its own, which is exactly why gating changes nothing (`bo_feas` equals `bo`): its posterior mean over a zero-inflated response already down-weights the non-producers.
+What the GP cannot do is rank the producers, because among producing recipes the titer signal is too weak relative to the measurement noise to tell a 0.03 recipe from a 0.11 one.
+Random exploration stumbles onto the high-titer rows faster than Expected Improvement, which over-exploits a noisy incumbent.
+Perfect feasibility discrimination cannot fix an unlearnable ranking signal.
+
+**Conclusion.**
+The feasibility classifier is correct and worth keeping (it now feeds the `feasibility_auc` promotion gate with a real number, and `bo_feas_clean` is a small honest improvement), but it is **not** the lever for the real-data loss.
+The remaining lever is the data: **replicates and higher signal-to-noise** so the producer-titer surface is learnable at all.
+The product must not claim BO superiority on data in this regime, and the next real work is noise/replicate modeling, not a better acquisition function or classifier.
+
 ## Caveats
 
 - The synthetic surfaces measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on real data.
 - The real-data pool benchmark uses client data that is NOT committed; `kalos/bench/pool.py` takes a DataFrame, so the code stays reproducible and data-free. Point it at a run sheet to reproduce the numbers above.
+- The real-data numbers in the update section are reproducible from the private `bioqore-data` store (referenced via the `BIOQORE_DATA` env var); no client data is committed to this repo.
 - Noise (synthetic) is expressed as a fraction of each surface's output scale, so it is comparable across surfaces with different units.

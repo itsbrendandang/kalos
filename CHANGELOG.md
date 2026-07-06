@@ -2,6 +2,36 @@
 
 Newest first.
 
+## 2026-07-06
+
+### Added - Feasibility classifier + gated acquisition (`kalos/core/feasibility.py`)
+BENCHMARK.md's finding was that BO loses to random on the real media DoE because titer is
+zero-inflated (~21% non-producers) and the GP over-exploits a noisy incumbent on a spiky
+feasible/infeasible surface. Rather than change the acquisition function, feasibility (producer
+vs non-producer) is now modeled as a separate binary classifier that gates EI, so the fix is
+composable with the existing GP.
+
+- `FeasibilityClassifier`: `StandardScaler` + `LogisticRegression(class_weight="balanced")` on
+  binary labels. Cold-start safe: fewer than 2 classes or fewer than 3 minority-class examples in
+  `fit` skips sklearn entirely and `predict_proba` returns all-ones (no gating, defers to EI) -
+  this is what keeps the pool loop from crashing on sklearn's single-class fit error before enough
+  non-producers have been observed.
+- `feasible_labels(y, threshold=0.0)`: feasible iff `y > threshold` (strict).
+- `feasibility_cv_auc(...)`: pooled out-of-fold CV-AUC for the feasibility classifier, using
+  `StratifiedGroupKFold` when `groups` is given and `StratifiedKFold` otherwise; reduces
+  `n_splits` to the minority class count and returns `nan` (never raises) when a stratified split
+  or a well-defined AUC isn't possible.
+- `kalos/bench/pool.py`: two new pool strategies, `bo_feas` (GP fit on all evaluated points, EI
+  gated by predicted P(feasible)) and `bo_feas_clean` (GP fit only on feasible evaluated points,
+  falling back to all points below 3 feasible examples, EI gated the same way). `bo` and `random`
+  are unchanged. +6 tests (`tests/test_feasibility.py`, `tests/test_pool.py`) including a
+  zero-inflated synthetic pool comparison.
+
+### Update - Honest benchmark result (`BENCHMARK.md`)
+Feasibility is highly learnable on the real media DoE (grouped-CV AUC 0.891), but gating EI
+with it does not rescue BO (`bo_feas` matches plain `bo`; `bo_feas_clean` still loses to
+random, 0.046 vs 0.082). The lever remains replicates / signal-to-noise, not the classifier.
+
 ## 2026-07-05
 
 ### Added - Closed-loop benchmark (`kalos/bench/`, `BENCHMARK.md`)
