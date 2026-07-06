@@ -14,29 +14,33 @@ from typing import List, Tuple
 
 import pandas as pd
 
-from kalos.data.anonymizer import _hash
+from kalos.data.anonymizer import (
+    DROP_EXACT,
+    DROP_SUBSTR,
+    HASH_EXACT,
+    HASH_SUBSTR,
+    _hash,
+    default_salt,
+)
 
-# Conservative identity scrubbing on the column level (the Anonymizer handles
-# record meta; this handles a wide run sheet). Exact names + a few safe substrings.
-_DROP_EXACT = {
-    "client_id", "client", "customer", "customer_id", "name", "operator",
-    "patient", "patient_id", "sample_id", "sampleid", "strain", "strain_id",
-    "donor", "subject", "email", "phone", "mrn", "run_by",
-}
-_DROP_SUBSTR = ("client", "strain", "operator", "patient", "donor", "email", "phone")
-_HASH_EXACT = {"campaign_id", "campaign"}
+# Column-level identity scrubbing (the Anonymizer handles record meta; this handles
+# a wide run sheet). The scrub rules come from the canonical lists in
+# kalos.data.anonymizer, so this path and anonymize_meta stay in sync instead of
+# drifting from a second copy.
 
 
-def anonymize_frame(df: pd.DataFrame, salt: str = "kalos") -> Tuple[pd.DataFrame, List[str]]:
-    """Drop identity columns, hash campaign ids. Returns (clean_df, dropped_cols)."""
+def anonymize_frame(df: pd.DataFrame, salt: str | None = None) -> Tuple[pd.DataFrame, List[str]]:
+    """Drop identity columns, hash grouping ids. Returns (clean_df, dropped_cols)."""
+    if salt is None:
+        salt = default_salt()
     dropped: List[str] = []
     out = df.copy()
     for c in list(out.columns):
         lc = str(c).strip().lower()
-        if lc in _DROP_EXACT or any(tok in lc for tok in _DROP_SUBSTR):
+        if lc in DROP_EXACT or any(tok in lc for tok in DROP_SUBSTR):
             out = out.drop(columns=[c])
             dropped.append(str(c))
-        elif lc in _HASH_EXACT:
+        elif lc in HASH_EXACT or any(tok in lc for tok in HASH_SUBSTR):
             out[c] = out[c].map(lambda v: _hash(v, salt))
     return out, sorted(dropped)
 
