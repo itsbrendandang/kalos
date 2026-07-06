@@ -59,15 +59,23 @@ The portal accepts an uploaded CSV / TSV / Excel run sheet and returns the analy
 batch). Because the sheet comes from an external client, the upload path is guarded:
 
 - **Size + shape caps.** A raw-byte cap (default 25 MB, override with `KALOS_MAX_UPLOAD_MB`), a
-  512-column ceiling, a 100k-row CSV cap, and a 2M-cell xlsx cap (a zip-bomb guard). Filetype is
-  sniffed by magic bytes (`PK\x03\x04` -> Excel, else text/CSV), not by extension.
+  512-column ceiling, a 100k-row CSV cap, and a 2M-cell xlsx cap (a zip-bomb guard). Every cap
+  fails closed: an over-cap upload is REJECTED with a 400, never silently truncated. The xlsx
+  cell cap is enforced from the workbook's declared dimensions BEFORE the frame is materialized,
+  so a zip-bomb is rejected without the memory spike. Filetype is sniffed by magic bytes
+  (`PK\x03\x04` -> Excel, else text/CSV), not by extension.
 - **Safe errors.** A bad upload returns a generic HTTP 400 ("Could not parse the uploaded file.
-  Check it is a CSV or Excel run-sheet."). Parser details, column names, cell values, paths, and
-  stack traces are logged server-side and never returned to the caller.
+  Check it is a CSV or Excel run-sheet."). This holds even when the failure is a GP fit error
+  (`torch.linalg.LinAlgError`) or a leakage-guard assertion, not just a parser error: a catch-all
+  normalizes any such failure to the same `{error}` JSON envelope. Parser details, column names,
+  cell values, paths, and stack traces are logged server-side and never returned to the caller.
 - **Provenance.** The response includes a `provenance` list: for every column, its status
-  (`kept_feature`, `target`, `dropped_id`, `dropped_output`, `dropped_constant`, `dropped_sparse`,
-  `dropped_all_blank`) and how many cells had to be coerced from non-numeric text (units like
-  "34.6 C"). No more silent column drops.
+  (`kept_feature`, `target`, `dropped_id`, `dropped_output`, `dropped_constant`,
+  `dropped_constant_on_fitted_rows`, `dropped_sparse`, `dropped_all_blank`) and how many cells had
+  to be coerced from non-numeric text (units like "34.6 C"). A feature that varies over the full
+  sheet but is constant on the target-present rows the GP actually fits is dropped and flagged
+  (`dropped_constant_on_fitted_rows`), never silently pinned to a zero-width bound. No more silent
+  column drops.
 - **Reproducibility.** The analyze path is seeded, so the same upload yields identical proposals;
   the response carries `seed`, `timestamp`, and `engine_version`.
 - **Opt-in anonymization.** Pass the form field `anonymize=true` to pseudonymize identifier-type

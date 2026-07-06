@@ -16,7 +16,7 @@ per-dataset manifest. This is how "all the data" gets organized.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -37,7 +37,9 @@ class RunRecord:
 
 
 class BarcodeRegistry:
-    def __init__(self, salt: str = "kalos") -> None:
+    def __init__(self, salt: str | None = None) -> None:
+        # salt=None -> the Anonymizer reads KALOS_ANON_SALT (with a dev fallback
+        # + warning). Pass an explicit salt only to pin it for a test/tool.
         self.anon = Anonymizer(salt=salt)
         self.runs: Dict[str, RunRecord] = {}
         self.datasets: Dict[str, dict] = {}

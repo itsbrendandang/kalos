@@ -1,15 +1,18 @@
 """Acquisition + proposal: pick the next experiments with BoTorch.
 
-Single-objective: q-batch Log Expected Improvement (qLogEI), the current BoTorch
-default for noisy EI. Proposals are optimized inside the design bounds with
-multi-start L-BFGS (`optimize_acqf`). Multi-objective (qNEHVI) is a documented
-next step.
+Single-objective: q-batch Log Noisy Expected Improvement (qLogNEI). Titer / yield
+are noisy measurements, so the NOISY variant is the right choice: it integrates
+improvement over the posterior at the observed baseline points (`X_baseline`)
+rather than trusting a single noiseless incumbent (`best_f`), which the plain
+qLogEI does. This mirrors the multi-objective path, which already uses the noisy
+qLogNEHVI. Proposals are optimized inside the design bounds with multi-start
+L-BFGS (`optimize_acqf`).
 """
 from __future__ import annotations
 
 import numpy as np
 import torch
-from botorch.acquisition.logei import qLogExpectedImprovement
+from botorch.acquisition.logei import qLogNoisyExpectedImprovement
 from botorch.optim import optimize_acqf
 
 from .surrogate import DEVICE, DTYPE, Surrogate, sanitize_bounds
@@ -22,7 +25,7 @@ def propose(
     num_restarts: int = 10,
     raw_samples: int = 256,
 ) -> np.ndarray:
-    """Return `q` proposed points (shape q x d) maximizing constrained-free qLogEI.
+    """Return `q` proposed points (shape q x d) maximizing constrained-free qLogNEI.
 
     bounds: array-like of shape (2, d) = [lower_row, upper_row].
 
@@ -30,9 +33,9 @@ def propose(
     proposal can never fall outside the observed design box. This guards against
     the historical out-of-range blow-up (e.g. a `Culture_Volume ~= 33,000,000`
     proposal) that the acquisition optimizer could produce for a degenerate or
-    near-constant feature. See `_sanitize_bounds` for the degenerate handling.
+    near-constant feature. See `sanitize_bounds` for the degenerate handling.
     """
-    assert surrogate.model is not None, "fit the surrogate first"
+    assert surrogate.model is not None and surrogate._X is not None, "fit the surrogate first"
     lower, upper = sanitize_bounds(bounds)
     b = torch.stack(
         [
@@ -40,7 +43,12 @@ def propose(
             torch.as_tensor(upper, dtype=DTYPE, device=DEVICE),
         ]
     )
-    acq = qLogExpectedImprovement(surrogate.model, best_f=surrogate.best_f)
+    # Noisy EI over the observed baseline (titer/yield are noisy), pruning baseline
+    # points that cannot be optimal so the acquisition stays cheap. X_baseline is
+    # the raw training design; the model applies its input transform internally.
+    acq = qLogNoisyExpectedImprovement(
+        surrogate.model, X_baseline=surrogate._X, prune_baseline=True
+    )
     candidates, _ = optimize_acqf(
         acq_function=acq,
         bounds=b,

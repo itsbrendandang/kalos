@@ -12,16 +12,66 @@ CPU). The deep-learning protein embedder runs on MPS separately.
 """
 from __future__ import annotations
 
+import gpytorch
 import numpy as np
 import torch
+from botorch.exceptions import ModelFittingError
 from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
 from botorch.models.transforms.input import Normalize
 from botorch.models.transforms.outcome import Standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.utils.errors import NotPSDError
 
 DTYPE = torch.double
 DEVICE = torch.device("cpu")
+
+# Escalating Cholesky jitter for the fit-retry ladder. A near-duplicate or
+# otherwise ill-conditioned design makes the kernel matrix numerically
+# non-positive-definite, so the first Cholesky can fail (LinAlgError / NotPSDError
+# / ModelFittingError). We retry with progressively larger jitter before giving
+# up, so a numerically-hard-but-valid dataset still fits instead of 500-ing.
+_FIT_JITTERS: tuple[float, ...] = (1e-4, 1e-3, 1e-2)
+
+
+class FitError(RuntimeError):
+    """The GP could not be fit even after escalating the Cholesky jitter.
+
+    Raised when every retry in the jitter ladder fails on a numerical error
+    (`torch.linalg.LinAlgError`, GPyTorch `NotPSDError`, or a botorch
+    `ModelFittingError`). Carries an honest, caller-safe message; the portal maps
+    it to a distinct 400 so an ill-conditioned file is not confused with a parse
+    failure.
+    """
+
+
+# Numerical fit failures we retry with more jitter. A LinAlgError from the
+# Cholesky, GPyTorch's NotPSDError, and botorch's ModelFittingError all mean the
+# same thing here: the kernel matrix was not positive-definite at this jitter.
+_FIT_NUMERICAL_ERRORS = (torch.linalg.LinAlgError, NotPSDError, ModelFittingError)
+
+
+def _fit_mll_with_retry(mll) -> None:
+    """Fit `mll` in place, retrying on a numerical failure with escalating jitter.
+
+    Tries `fit_gpytorch_mll` under each jitter in `_FIT_JITTERS`; the first
+    success wins. If every attempt raises a numerical error, raise `FitError` with
+    an honest message. Any non-numerical exception propagates unchanged. Works for
+    both the single-objective `ExactMarginalLogLikelihood` and the multi-objective
+    `SumMarginalLogLikelihood`.
+    """
+    last: Exception | None = None
+    for jitter in _FIT_JITTERS:
+        try:
+            with gpytorch.settings.cholesky_jitter(jitter):
+                fit_gpytorch_mll(mll)
+            return
+        except _FIT_NUMERICAL_ERRORS as exc:
+            last = exc
+    raise FitError(
+        "the model could not be fit on this data - likely near-duplicate or "
+        "ill-conditioned rows"
+    ) from last
 
 
 def sanitize_bounds(bounds) -> tuple[np.ndarray, np.ndarray]:
@@ -60,10 +110,12 @@ class Surrogate:
     def __init__(self) -> None:
         self.model: SingleTaskGP | None = None
         self._y: np.ndarray | None = None
+        self._X: torch.Tensor | None = None
 
-    def fit(self, X, y, bounds=None) -> "Surrogate":
-        """Fit on (X, y). Pass `bounds` (2 x d) to tie input normalization to the
-        fixed design box rather than the training data envelope."""
+    def fit(self, X, y, bounds) -> "Surrogate":
+        """Fit on (X, y). `bounds` (2 x d) ties input normalization to the fixed
+        design box rather than the training-data envelope; it is required so a
+        caller can never fall into the training-envelope normalization footgun."""
         Xa = np.asarray(X, float)
         ya = np.asarray(y, float).reshape(-1)
         if Xa.ndim != 2 or Xa.shape[0] == 0:
@@ -75,16 +127,21 @@ class Surrogate:
         Xt = torch.as_tensor(Xa, dtype=DTYPE, device=DEVICE)
         yt = torch.as_tensor(ya, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
         d = Xt.shape[-1]
-        if bounds is not None:
-            lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so Normalize is finite
-            box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
-            normalize = Normalize(d=d, bounds=box)
-        else:
-            normalize = Normalize(d=d)
+        lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so Normalize is finite
+        box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
+        normalize = Normalize(d=d, bounds=box)
+        # No explicit likelihood is passed, so SingleTaskGP uses BoTorch's default
+        # noise model: a GaussianLikelihood with a LogNormalPrior(-4, 1) on the
+        # noise and a positive floor. That default is the right noise prior for the
+        # small-sample regime, so we deliberately do not override it here.
         self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
         mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
-        fit_gpytorch_mll(mll)
+        _fit_mll_with_retry(mll)
         self._y = ya
+        # Keep the raw (untransformed) training inputs so the noisy-EI acquisition
+        # can use them as X_baseline; the model applies its input transform to them
+        # internally at acquisition time.
+        self._X = Xt
         return self
 
     def posterior(self, X):

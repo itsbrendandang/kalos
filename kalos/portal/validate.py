@@ -26,6 +26,7 @@ ColumnStatus = Literal[
     "dropped_id",
     "dropped_output",
     "dropped_constant",
+    "dropped_constant_on_fitted_rows",
     "dropped_sparse",
     "dropped_all_blank",
 ]
@@ -69,6 +70,7 @@ def column_provenance(
     numeric_cols: list[str],
     id_hint: Pattern[str],
     outcome_hint: Pattern[str],
+    constant_on_fitted_rows: list[str] | None = None,
 ) -> list[ColumnProvenance]:
     """Build a per-column provenance report mirroring `_analyze`'s selection.
 
@@ -79,13 +81,18 @@ def column_provenance(
       - `numeric_cols`: columns that passed the >=80% numeric-parse test.
       - `id_hint` / `outcome_hint`: the compiled regexes `_analyze` uses to drop
         identifier-like and output-like columns.
+      - `constant_on_fitted_rows`: columns that vary over the full sheet but are
+        constant on the target-present rows the GP actually fits, so their design
+        box would collapse to zero width. `_analyze` drops these; they are flagged
+        here (not silently pinned) so the client is not misled about that column.
 
     Status precedence per column:
-      target -> kept_feature -> dropped_all_blank -> dropped_id ->
-      dropped_output -> dropped_constant -> dropped_sparse.
+      target -> kept_feature -> dropped_all_blank -> dropped_constant_on_fitted_rows
+      -> dropped_id -> dropped_output -> dropped_constant -> dropped_sparse.
     """
     feat_set = set(features)
     num_set = set(numeric_cols)
+    constant_fitted = set(constant_on_fitted_rows or [])
     report: list[ColumnProvenance] = []
     for col in df.columns:
         name = str(col)
@@ -95,6 +102,8 @@ def column_provenance(
             status = "target"
         elif col in feat_set:
             status = "kept_feature"
+        elif name in constant_fitted:
+            status = "dropped_constant_on_fitted_rows"
         elif non_null == 0:
             status = "dropped_all_blank"
         elif id_hint.match(name.strip()):
