@@ -4,6 +4,25 @@ Newest first.
 
 ## 2026-07-05
 
+### Changed - Wave A1.2: production hardening
+Go-live hardening from a memory / data-volume / BoTorch review. Response contract preserved.
+
+- **Concurrency** (`kalos/portal/app.py`): the CPU-bound `/api/run` body (parse + GP fit + save)
+  now runs via `run_in_threadpool` instead of blocking the single event loop, so concurrent
+  uploads no longer hang the whole service. Added `torch.set_num_threads` (`KALOS_TORCH_THREADS`)
+  to avoid CPU oversubscription, and a `threading.Lock` around the `_LATEST` read-modify-write.
+- **GP-training-row cap** (`kalos/portal/app.py`): a `MAX_FIT_ROWS` guard (`KALOS_MAX_FIT_ROWS`,
+  default 2000) rejects oversized fits before building the O(n^2) exact-GP kernel, separately from
+  the raw-upload row cap. Rejects rather than silently subsamples.
+- **Anonymization salt** (`kalos/data/anonymizer.py`): the salt now reads from `KALOS_ANON_SALT`
+  and warns loudly on the dev fallback, so barcodes are not a fixed, dictionary-attackable pseudonym.
+- **BoTorch robustness** (`kalos/core/surrogate.py`, `optimize.py`): `fit_gpytorch_mll` is retried
+  with escalating Cholesky jitter and raises a distinct `FitError` on persistent failure, mapped to
+  its own honest 400 (not the generic parse message). The single-objective acquisition moved from
+  `qLogExpectedImprovement` to `qLogNoisyExpectedImprovement` (titer is noisy; matches the
+  multi-objective side). `bounds` is now a required argument on the surrogate fits.
+- Tests: `tests/test_production_hardening.py` covers the row cap, the env salt, and the FitError 400.
+
 ### Fixed - Wave A1.1: review fixes for the upload + optimization path
 Follow-up fixes to Wave A1 from a code review of the FastAPI Bayesian-optimization engine.
 No architecture change; the `/api/run` and `/api/latest` response contract is preserved and only

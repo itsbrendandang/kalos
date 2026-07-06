@@ -22,7 +22,7 @@ def test_surrogate_fits_signal():
     rng = np.random.default_rng(0)
     X = rng.uniform(0, 1, (24, 3))
     y = X @ np.array([1.0, -0.5, 0.2])
-    s = Surrogate().fit(X, y)
+    s = Surrogate().fit(X, y, bounds=np.array([[0, 0, 0], [1, 1, 1]], float))
     mean, std = s.posterior(X)
     assert mean.shape == (24,) and (std > 0).all()
     assert np.corrcoef(mean, y)[0, 1] > 0.8
@@ -32,7 +32,7 @@ def test_propose_returns_points_within_bounds():
     rng = np.random.default_rng(1)
     X = rng.uniform(0, 1, (12, 2))
     y = -((X[:, 0] - 0.7) ** 2) - (X[:, 1] - 0.3) ** 2
-    s = Surrogate().fit(X, y)
+    s = Surrogate().fit(X, y, bounds=np.array([[0, 0], [1, 1]], float))
     nxt = propose(s, np.array([[0, 0], [1, 1]], float), q=3)
     assert nxt.shape == (3, 2)
     assert (nxt >= 0).all() and (nxt <= 1).all()
@@ -63,12 +63,14 @@ def test_grouped_cv_recovers_signal():
 
 def test_fit_rejects_bad_input():
     s = Surrogate()
+    b3 = np.array([[0, 0, 0], [1, 1, 1]], float)
+    b2 = np.array([[0, 0], [1, 1]], float)
     with pytest.raises(ValueError):
-        s.fit(np.empty((0, 3)), np.array([]))  # empty
+        s.fit(np.empty((0, 3)), np.array([]), bounds=b3)  # empty
     with pytest.raises(ValueError):
-        s.fit([[1.0, np.nan]], [1.0])  # NaN in X
+        s.fit([[1.0, np.nan]], [1.0], bounds=b2)  # NaN in X
     with pytest.raises(ValueError):
-        s.fit([[1.0, 2.0], [3.0, 4.0]], [1.0, np.nan])  # NaN in y
+        s.fit([[1.0, 2.0], [3.0, 4.0]], [1.0, np.nan], bounds=b2)  # NaN in y
 
 
 def test_propose_before_fit_raises():

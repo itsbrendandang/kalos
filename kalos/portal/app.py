@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
+from starlette.concurrency import run_in_threadpool
 
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
@@ -32,11 +34,19 @@ from kalos.core.evaluation import grouped_cv_report
 from kalos.core.splits import row_hash_groups
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
 from kalos.core.optimize import propose
-from kalos.core.surrogate import DEVICE, DTYPE, Surrogate
+from kalos.core.surrogate import DEVICE, DTYPE, FitError, Surrogate
 from kalos.data.anonymizer import _hash
 from kalos.portal.validate import column_provenance, provenance_dicts
 
 log = logging.getLogger("kalos.portal")
+
+# --- CPU thread budget ------------------------------------------------------- #
+# The upload handler offloads its CPU-bound body (pandas parse + ~7 GP fits +
+# optimize_acqf) to a worker thread so concurrent uploads do not serialize on the
+# event loop. Cap the torch intra-op thread count so several concurrent fits do
+# not oversubscribe the CPU and thrash. Override with KALOS_TORCH_THREADS.
+_TORCH_THREADS = int(os.environ.get("KALOS_TORCH_THREADS", str(min(4, os.cpu_count() or 1))))
+torch.set_num_threads(max(1, _TORCH_THREADS))
 
 app = FastAPI(title="Kalos Engine API")
 
@@ -51,11 +61,30 @@ MAX_COLUMNS = 512            # columns allowed in any upload (CSV or xlsx)
 MAX_XLSX_CELLS = 2_000_000   # rows * cols ceiling for a parsed xlsx (zip-bomb guard)
 _ZIP_MAGIC = b"PK\x03\x04"   # xlsx/xls-as-zip start-of-file marker
 
+# Separate, tighter cap on the rows the SURROGATE is actually fit on. A
+# SingleTaskGP is O(n^2) in memory and O(n^3) in time, so a raw upload that is
+# within MAX_CSV_ROWS can still be far too large for an exact GP. The optimizer
+# targets the small-sample bioprocess regime (N <= a couple thousand), so we
+# reject an over-cap fit set rather than silently subsampling (which would be
+# invisible, non-deterministic data loss). Override with KALOS_MAX_FIT_ROWS.
+MAX_FIT_ROWS = int(os.environ.get("KALOS_MAX_FIT_ROWS", "2000"))
+
 # Generic, non-leaking messages. We never echo the parser error, a column name,
 # or a cell value back to an unauthenticated caller.
 _ERR_PARSE = "Could not parse the uploaded file. Check it is a CSV or Excel run-sheet."
 _ERR_TOO_LARGE = "The uploaded file is too large."
 _ERR_TOO_MANY_COLUMNS = "The uploaded file has too many columns."
+_ERR_TOO_MANY_FIT_ROWS = (
+    "The dataset is too large for the surrogate; the optimizer targets the "
+    f"small-sample regime, N<={MAX_FIT_ROWS}."
+)
+# A numerically-hard-but-valid file (near-duplicate or ill-conditioned rows) that
+# defeats even the jittered fit retry gets its OWN message, so it is not confused
+# with the generic parse failure.
+_ERR_FIT = (
+    "The model could not be fit on this data - likely near-duplicate or "
+    "ill-conditioned rows."
+)
 
 
 class UploadRejected(ValueError):
@@ -125,28 +154,35 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
 _STATE_DIR = Path(os.environ.get("KALOS_STATE_DIR", Path.home() / ".kalos"))
 _LATEST_PATH = _STATE_DIR / "latest_analysis.json"
 _LATEST: dict | None = None
+# `_analyze` now runs in a worker thread (see `run_uploaded`), so `_save_latest`
+# and `_load_latest` touch the `_LATEST` global and the state file from multiple
+# threads concurrently. This lock serializes the read-modify-write + file write
+# so two overlapping uploads cannot interleave a half-written global or file.
+_LATEST_LOCK = threading.Lock()
 
 
 def _load_latest() -> dict | None:
     global _LATEST
-    if _LATEST is None and _LATEST_PATH.exists():
-        try:
-            _LATEST = json.loads(_LATEST_PATH.read_text())
-        except (OSError, ValueError):  # a corrupt cache must not break the API
-            _LATEST = None
-    return _LATEST
+    with _LATEST_LOCK:
+        if _LATEST is None and _LATEST_PATH.exists():
+            try:
+                _LATEST = json.loads(_LATEST_PATH.read_text())
+            except (OSError, ValueError):  # a corrupt cache must not break the API
+                _LATEST = None
+        return _LATEST
 
 
 def _save_latest(result: dict, dataset: str) -> None:
     global _LATEST
-    _LATEST = {**result, "dataset": dataset, "updated": time.time()}
-    try:
-        _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _LATEST_PATH.write_text(json.dumps(_LATEST))
-    except (OSError, TypeError, ValueError):
-        # Disk persistence is best-effort; in-memory still serves this run and a
-        # serialization hiccup must never fail the upload.
-        pass
+    with _LATEST_LOCK:
+        _LATEST = {**result, "dataset": dataset, "updated": time.time()}
+        try:
+            _STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _LATEST_PATH.write_text(json.dumps(_LATEST))
+        except (OSError, TypeError, ValueError):
+            # Disk persistence is best-effort; in-memory still serves this run and a
+            # serialization hiccup must never fail the upload.
+            pass
 
 
 @app.get("/api/latest")
@@ -331,6 +367,11 @@ def _analyze(
     y = y_all[keep].to_numpy(float)
     if len(y) < 6:
         raise ValueError(f"need at least 6 rows with a numeric {target!r}; got {len(y)}")
+    # Cap the rows the O(n^2) exact GP is fit on, separately from the raw-upload
+    # cap. Reject rather than subsample: silent subsampling would be invisible,
+    # non-deterministic data loss and contradict the reproducibility contract.
+    if len(y) > MAX_FIT_ROWS:
+        raise UploadRejected(_ERR_TOO_MANY_FIT_ROWS)
 
     # The design box is built from the target-present (fitted) rows, so the honest
     # varying-feature check must be recomputed on THOSE rows, not the full column. A
@@ -543,6 +584,22 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
     return df
 
 
+def _run_uploaded_sync(raw: bytes, target: str | None, anonymize: bool, filename: str) -> dict:
+    """The CPU-bound body of an upload: parse -> analyze -> persist -> result.
+
+    This is the heavy, blocking work (pandas parse, ~7 GP fits, optimize_acqf) and
+    runs in a worker thread (see `run_uploaded`), NOT on the asyncio event loop, so
+    concurrent uploads do not serialize and GET /api/latest never hangs behind a
+    fit. It raises `UploadRejected` / `ValueError` / `FitError` / parser errors;
+    the async wrapper maps each to the right 400 envelope. Kept fully synchronous
+    so it is trivially unit-testable in isolation.
+    """
+    df = _parse_upload(raw)
+    result = _analyze(df, target, anonymize=anonymize)
+    _save_latest(result, filename)
+    return result
+
+
 @app.post("/api/run")
 async def run_uploaded(
     file: UploadFile = File(...),
@@ -550,15 +607,25 @@ async def run_uploaded(
     anonymize: bool = Form(default=False),
 ) -> JSONResponse:
     raw = await file.read()
+    filename = file.filename or "uploaded dataset"
     try:
-        df = _parse_upload(raw)
-        result = _analyze(df, target or None, anonymize=anonymize)
-        _save_latest(result, file.filename or "uploaded dataset")
+        # Offload the CPU-bound parse + fit + save to a worker thread so this
+        # single-worker service does not block the event loop (and every other
+        # request, including GET /api/latest) while a GP fit runs.
+        result = await run_in_threadpool(
+            _run_uploaded_sync, raw, target or None, anonymize, filename
+        )
         return JSONResponse(result)
     except UploadRejected as rej:
         # A guard tripped: the message is already generic and safe to return.
         log.warning("upload rejected: %s", rej)
         return JSONResponse({"error": str(rej)}, status_code=400)
+    except FitError:
+        # A numerically-hard-but-valid file that defeated the jittered fit retry.
+        # Give it a DISTINCT message so it does not masquerade as a parse failure;
+        # the exception text itself is already generic, but we do not echo it.
+        log.warning("upload rejected: model could not be fit (ill-conditioned rows)")
+        return JSONResponse({"error": _ERR_FIT}, status_code=400)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError, UnicodeError):
         # Log the full traceback server-side for debugging; return a generic
         # message so no parser detail, column name, cell value, or stack trace
