@@ -47,8 +47,37 @@ The highest-leverage moves to make BO beat a scientist's own LHS on real data ar
 
 Positioning follows from this: sell the rigor and the honest decision layer, and be explicit that the loop's value grows with replicate discipline - do not oversell "our AI optimizes your process" on a single noisy campaign.
 
+## On the real media data (pool-based retrospective)
+
+The synthetic sweep says BO helps when the signal is clean and stops helping as noise rises.
+So the honest test is the real one.
+On the actual combined media DoE (96 runs, target `Lipase_g.L`, via `kalos/bench/pool.py`): does BO pick the best recipes from the pool in fewer experiments than random selection?
+
+`run_pool` starts from a seeded random subset, then each strategy picks the next real experiment to "run", revealing its measured (already noisy) titer.
+BO scores every remaining candidate by Expected Improvement from the surrogate and picks the best; random picks any untested one.
+
+Result, mean over 20 seeds (pool max titer 0.111):
+
+| after n picks | BO best-found | random best-found |
+| --- | --- | --- |
+| init + 10 | 0.029 | 0.034 |
+| init + 20 | 0.031 | 0.054 |
+| init + 47 | 0.035 | 0.077 |
+
+**On this dataset, BO does worse than random.**
+It ends at 0.035 vs random's 0.077, and beats random in only 7 of 20 seeds.
+A client would have found higher-titer media faster by randomly trying untested recipes than by following the model.
+
+This is not the harness cheating.
+The identical harness on a clean synthetic pool of the same size shows BO winning (BO 6.33 vs random 5.60).
+It is the data: the real titers are tiny and zero-inflated - **21% of runs are non-producers (titer near 0)**, max only 0.111 - so the GP fits a spiky feasible/infeasible surface poorly and over-exploits a noisy incumbent, while random keeps exploring and stumbles onto the good rows.
+
+**Bluntly:** the core promise ("BO finds better recipes in fewer experiments") is real on clean signal but is NOT yet supported on this real dataset.
+The lever is not a better acquisition function, it is the data: a **feasibility classifier** to model the zero-inflation (the non-producers), and **replicates / higher signal-to-noise** so the surface is learnable at all.
+This validates the roadmap - feasibility labels and noise/replicates are the real work, not model tuning - and it means the product must not claim BO superiority on data in this regime.
+
 ## Caveats
 
-- These are synthetic surfaces, so they measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on any real dataset.
-- A pool-based retrospective benchmark on committed real data is a natural follow-up once a client dataset is checked into the repo under an appropriate data agreement.
-- Noise is expressed as a fraction of each surface's output scale, so it is comparable across surfaces with different units.
+- The synthetic surfaces measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on real data.
+- The real-data pool benchmark uses client data that is NOT committed; `kalos/bench/pool.py` takes a DataFrame, so the code stays reproducible and data-free. Point it at a run sheet to reproduce the numbers above.
+- Noise (synthetic) is expressed as a fraction of each surface's output scale, so it is comparable across surfaces with different units.
