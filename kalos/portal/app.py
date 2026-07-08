@@ -26,6 +26,8 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from starlette.concurrency import run_in_threadpool
 
 from kalos import __version__ as ENGINE_VERSION
@@ -145,6 +147,88 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
                        else [round(float(batch[i][j]), 3) for j in cols])
         rows.append(row)
     return rows
+
+
+def _compute_embedding(X: np.ndarray, y: np.ndarray, seed: int) -> dict | None:
+    """A 2D embedding of the observed runs (client-facing scatter, colored by
+    target), so a dashboard can show where uploaded runs sit relative to each
+    other in feature space, not just the driver table.
+
+    Features are z-scored first (`StandardScaler`), then UMAP is tried; if
+    umap-learn is not installed or fitting it fails for any reason, this falls
+    back to PCA (always available via scikit-learn). `method` records whichever
+    ACTUALLY ran, never hardcoded, so a "umap" label is never shown for a PCA
+    projection. Seeded with the same `seed` as the rest of `_analyze` for
+    reproducibility. Only computed with enough runs/features to be a meaningful
+    2D layout (n >= 5, d >= 2); returns None otherwise so the caller omits the
+    key rather than shipping a degenerate embedding."""
+    n, d = X.shape
+    if n < 5 or d < 2:
+        return None
+    Xs = StandardScaler().fit_transform(X)
+    coords = None
+    method = "pca"
+    try:
+        import umap
+
+        reducer = umap.UMAP(n_components=2, n_neighbors=min(15, n - 1), random_state=seed)
+        coords = reducer.fit_transform(Xs)
+        method = "umap"
+    except Exception:  # noqa: BLE001 - any umap unavailable/runtime failure falls back to PCA
+        coords = None
+    if coords is None:
+        coords = PCA(n_components=2, random_state=seed).fit_transform(Xs)
+        method = "pca"
+    points = [
+        [round(float(coords[i, 0]), 4), round(float(coords[i, 1]), 4), round(float(y[i]), 4)]
+        for i in range(n)
+    ]
+    return {"method": method, "points": points}
+
+
+def _feature_correlation(feat_frame: pd.DataFrame, y: np.ndarray, feats: list, target: str) -> dict | None:
+    """Spearman correlation among the kept features and the target - the same rho
+    measure the drivers use, so the heatmap is consistent with the driver table.
+    Symmetric matrix, features first then the target. None if too few features."""
+    if len(feats) < 2:
+        return None
+    frame = feat_frame.copy()
+    frame[target] = y
+    labels = [*feats, target]
+    corr = frame.corr(method="spearman").reindex(index=labels, columns=labels)
+    matrix = [[0.0 if v != v else round(float(v), 3) for v in row] for row in corr.to_numpy()]
+    return {"labels": [str(c) for c in labels], "matrix": matrix}
+
+
+def _response_surface(s, X: np.ndarray, y: np.ndarray, feats: list, drv: list, grid: int = 24) -> dict | None:
+    """GP-predicted target across the two strongest drivers, other inputs held at
+    their median. A MODEL prediction (surrogate posterior mean) surfaced so the UI
+    can show the predicted landscape - the UI labels it a prediction, not a
+    measurement. `runs` are the observed rows projected onto the two axes for
+    overlay. None if fewer than two drivers/features or the grid prediction fails."""
+    if len(feats) < 2 or len(drv) < 2:
+        return None
+    try:
+        xi, yi = feats.index(drv[0][0]), feats.index(drv[1][0])
+        x_vals = np.linspace(X[:, xi].min(), X[:, xi].max(), grid)
+        y_vals = np.linspace(X[:, yi].min(), X[:, yi].max(), grid)
+        gx, gy = np.meshgrid(x_vals, y_vals)
+        pts = np.tile(np.median(X, axis=0), (grid * grid, 1))
+        pts[:, xi], pts[:, yi] = gx.ravel(), gy.ravel()
+        z = np.asarray(s.posterior(pts)[0], float).reshape(grid, grid)
+    except Exception:  # noqa: BLE001 - a degenerate surface just omits the optional field
+        return None
+    return {
+        "x_feature": str(drv[0][0]),
+        "y_feature": str(drv[1][0]),
+        "x_vals": [round(float(v), 4) for v in x_vals],
+        "y_vals": [round(float(v), 4) for v in y_vals],
+        "z": [[round(float(v), 4) for v in row] for row in z],
+        "runs": [
+            [round(float(X[i, xi]), 4), round(float(X[i, yi]), 4), round(float(y[i]), 4)]
+            for i in range(X.shape[0])
+        ],
+    }
 
 
 # --- persistence of the most-recently analyzed real dataset ------------------ #
@@ -389,6 +473,7 @@ def _analyze(
 
     X = X_zf.to_numpy(float)
     bounds = np.vstack([X.min(0), X.max(0)])
+    embedding = _compute_embedding(X, y, ANALYZE_SEED)
 
     gcol = next((c for c in df.columns if _GROUP_HINT.search(str(c))), None)
     if gcol:
@@ -438,6 +523,8 @@ def _analyze(
     show = [d[0] for d in drv[:4]]
     show_idx = [feats.index(f) for f in show]
     p_mean, p_std = s.posterior(batch)
+    correlation = _feature_correlation(X_zf, y, feats, str(target))
+    surface = _response_surface(s, X, y, feats, drv)
 
     # per-column provenance: what was kept as a feature, used as the target, or
     # dropped (id / other output / constant / sparse), so the client is never left
@@ -472,6 +559,12 @@ def _analyze(
         "timestamp": int(time.time()),
         "engine_version": ENGINE_VERSION,
     }
+    if embedding is not None:
+        result["embedding"] = embedding
+    if correlation is not None:
+        result["correlation"] = correlation
+    if surface is not None:
+        result["response_surface"] = surface
     if anonymize:
         result = _anonymize_result(result)
     return result

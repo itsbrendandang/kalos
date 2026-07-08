@@ -217,6 +217,23 @@ def test_response_contract_fields_preserved():
     assert {"provenance", "seed", "timestamp", "engine_version"}.issubset(out.keys())
 
 
+# --- run embedding (2D projection for the client-facing scatter) ------------- #
+
+def test_embedding_present_and_schema_honest():
+    # >= 5 runs, >= 2 features -> the embedding key must be present, with a
+    # truthful method label (umap if it actually ran, pca if it fell back) and
+    # one [x, y, target] point per run, aligned to n.
+    df = _good_sheet(n=20, seed=2)
+    out = portal._analyze(df)
+    assert "embedding" in out
+    emb = out["embedding"]
+    assert emb["method"] in {"umap", "pca"}
+    assert len(emb["points"]) == out["n"] == 20
+    for point in emb["points"]:
+        assert len(point) == 3
+        assert all(isinstance(v, (int, float)) for v in point)
+
+
 # --- bounds-sanity ----------------------------------------------------------- #
 
 def test_propose_clamps_into_observed_box():
