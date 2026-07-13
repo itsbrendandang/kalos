@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 2026-07-13
+
+### Added - Run embedding, feature correlation, and predicted response surface in the portal (`kalos/portal/app.py`)
+`_analyze` now surfaces three optional, client-facing views alongside the driver table. Each is
+None-guarded, so a degenerate dataset omits the field rather than shipping a broken one:
+
+- `_compute_embedding`: a 2D scatter of the observed runs colored by target. Features are z-scored,
+  UMAP is tried, and it falls back to PCA when umap-learn is unavailable or fitting fails. The
+  `method` label always reflects what actually ran - never a hardcoded "umap" over a PCA projection.
+  Emitted only with enough runs/features to be meaningful (n >= 5, d >= 2).
+- `_feature_correlation`: a symmetric Spearman matrix over the kept features and the target, using
+  the same rho the drivers use, so the heatmap stays consistent with the driver table.
+- `_response_surface`: the GP-predicted target across the two strongest drivers (other inputs held
+  at their median), plus the observed runs projected onto those axes. Labeled a prediction, not a
+  measurement.
+
+Tests (`tests/test_hardening.py`) cover all three output fields: embedding schema + honest method
+label, square correlation matrix, and response-surface grid/overlay consistency.
+
 ## 2026-07-06
 
 ### Added - Replicate-aware aggregation + assay noise floor + fixed-noise GP (`kalos/core/replicates.py`)
