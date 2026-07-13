@@ -2,6 +2,20 @@
 
 Newest first.
 
+## 2026-07-13
+
+### Fixed - Re-arm the xlsx zip-bomb regression test (`tests/test_hardening.py`, #14)
+`_xlsx_with_declared_dims` rewrote the sheet `<dimension>` tag with the pattern
+`<dimension ref="[^"]*"/>`, but openpyxl >= 3.1 writes `<dimension ref="A1:B4" />` (note the space
+before `/>`). The substitution silently no-oped, so `test_oversized_xlsx_rejected_before_materialization`
+uploaded a harmless 3-row sheet instead of a declared-dimension zip-bomb. The assertion failed, and
+worse, the test could no longer catch a real regression of the upload guard.
+
+The `_reject_oversized_xlsx` guard itself is correct: on a genuinely crafted bomb, openpyxl read-only
+reports the declared `1048576 x 500` dimensions and the cell-cap rejection fires as intended (verified
+directly). Fix is test-only: match any self-closing `<dimension/>` tag and `assert` exactly one
+substitution, so a future openpyxl format change fails loudly instead of silently defanging the test.
+
 ## 2026-07-06
 
 ### Added - Replicate-aware aggregation + assay noise floor + fixed-noise GP (`kalos/core/replicates.py`)

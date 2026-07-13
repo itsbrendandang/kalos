@@ -291,9 +291,15 @@ def _xlsx_with_declared_dims(ref: str) -> bytes:
     zin = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
     names = zin.namelist()
     sheet = next(n for n in names if n.startswith("xl/worksheets/sheet"))
-    xml = re.sub(
-        r'<dimension ref="[^"]*"/>', f'<dimension ref="{ref}"/>', zin.read(sheet).decode()
+    # Match ANY self-closing <dimension .../> tag regardless of attribute spacing.
+    # openpyxl >= 3.1 writes `<dimension ref="A1:B4" />` (note the space before />),
+    # which the old `<dimension ref="..."/>` pattern silently missed - leaving the
+    # declared dimension untouched and defanging this zip-bomb into a 3-row sheet.
+    # subn + the assert make a future format change fail loudly instead of silently.
+    xml, n_sub = re.subn(
+        r"<dimension\b[^>]*/>", f'<dimension ref="{ref}"/>', zin.read(sheet).decode()
     )
+    assert n_sub == 1, f"expected exactly one <dimension/> tag to rewrite, got {n_sub}"
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
         for n in names:
