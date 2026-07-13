@@ -234,6 +234,34 @@ def test_embedding_present_and_schema_honest():
         assert all(isinstance(v, (int, float)) for v in point)
 
 
+def test_feature_correlation_present_and_square():
+    # >= 2 features -> the correlation key is present: a square Spearman matrix
+    # over [features..., target], labels aligned to the matrix, values in [-1, 1].
+    df = _good_sheet(n=20, seed=3)
+    out = portal._analyze(df)
+    assert "correlation" in out
+    corr = out["correlation"]
+    labels, matrix = corr["labels"], corr["matrix"]
+    assert len(labels) >= 3  # 2 features + target
+    assert len(matrix) == len(labels)
+    assert all(len(row) == len(labels) for row in matrix)
+    assert all(-1.0 <= v <= 1.0 for row in matrix for v in row)
+
+
+def test_response_surface_schema_when_present():
+    # With >= 2 drivers the GP-predicted response surface is surfaced; when
+    # present, its grid and per-run overlay must be internally consistent.
+    df = _good_sheet(n=20, seed=4)
+    out = portal._analyze(df)
+    if "response_surface" not in out:
+        pytest.skip("response surface omitted (degenerate grid) - optional field")
+    surf = out["response_surface"]
+    assert {"x_feature", "y_feature", "x_vals", "y_vals", "z", "runs"} <= surf.keys()
+    assert len(surf["z"]) == len(surf["y_vals"])
+    assert all(len(row) == len(surf["x_vals"]) for row in surf["z"])
+    assert len(surf["runs"]) == out["n"]
+
+
 # --- bounds-sanity ----------------------------------------------------------- #
 
 def test_propose_clamps_into_observed_box():
