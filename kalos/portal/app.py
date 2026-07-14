@@ -10,6 +10,7 @@ Needs the portal extra:  pip install -e ".[portal]"
 """
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -18,13 +19,15 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 from scipy.stats import spearmanr
 from starlette.concurrency import run_in_threadpool
 
@@ -37,6 +40,11 @@ from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, FitError, Surrogate
 from kalos.data.anonymizer import _hash
 from kalos.portal.validate import column_provenance, provenance_dicts
+from kalos.store import ExperimentNotFound, IllegalTransition, SqliteStore, Status
+
+# `kalos.runner` imports `_analyze`/`UploadRejected` FROM this module, so the
+# adapter/singleton imports below are deferred (inside the endpoint functions
+# that need them) to avoid a circular import at module load time.
 
 log = logging.getLogger("kalos.portal")
 
@@ -641,3 +649,163 @@ async def run_uploaded(
         # message reaches the (unauthenticated) client.
         log.exception("failed to parse or analyze an uploaded file")
         return JSONResponse({"error": _ERR_PARSE}, status_code=400)
+
+
+# --- M2.2: /api/experiments - thin wrappers over the store + Singleton runner  #
+# (docs/M2_INTEGRATION.md, "Portal API additions"). Every endpoint above this
+# point is unchanged; everything below is additive.
+
+# Module-level singleton store + injectable lock path, resolved lazily through
+# FastAPI dependencies so tests can override both via `app.dependency_overrides`
+# and never touch the real `~/.kalos/experiments.db` or `~/.kalos/runner.lock`.
+_STORE: SqliteStore | None = None
+_RUNNER_LOCK_PATH: str | Path | None = None
+
+
+def get_store() -> SqliteStore:
+    """The module-level `SqliteStore` at the default `~/.kalos/experiments.db`.
+
+    Tests MUST override this via `app.dependency_overrides[get_store]` to
+    point at a `tmp_path` store.
+    """
+    global _STORE
+    if _STORE is None:
+        _STORE = SqliteStore()
+    return _STORE
+
+
+def get_lock_path() -> str | Path | None:
+    """The Singleton runner lock path. `None` defers to the runner's own
+    default (`~/.kalos/runner.lock`); tests override this via
+    `app.dependency_overrides[get_lock_path]` to point at a `tmp_path` lock.
+    """
+    return _RUNNER_LOCK_PATH
+
+
+class _PatchStatusBody(BaseModel):
+    """Body for `PATCH /api/experiments/{id}`. Mirrors the `set_status` shape
+    `HttpBackendAdapter` already sends (`kalos/runner/adapter.py`)."""
+
+    status: str
+    force: bool = False
+    error: str | None = None
+
+
+@app.get("/api/experiments")
+def list_experiments(store: SqliteStore = Depends(get_store)) -> list[dict[str, Any]]:
+    """`{id, name, status, updated_at}` for every experiment, oldest first."""
+    return [
+        {"id": e.id, "name": e.name, "status": e.status.value, "updated_at": e.updated_at}
+        for e in store.list()
+    ]
+
+
+@app.post("/api/experiments")
+async def create_experiment(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    target: str = Form(default=""),
+    outcomes: str = Form(default=""),
+    anonymize: bool = Form(default=False),
+    store: SqliteStore = Depends(get_store),
+) -> JSONResponse:
+    """Create an experiment (DRAFT) from an uploaded run sheet.
+
+    Reuses `_parse_upload` - the exact CSV/xlsx parsing path `/api/run` already
+    uses - to turn the upload into a DataFrame, then stores it as the
+    `{columns, rows}` payload the Experiment contract documents. `target`,
+    `outcomes` (comma-separated column names), and `anonymize` become `config`,
+    matching `/api/run`'s multipart Form style.
+    """
+    raw = await file.read()
+    try:
+        df = await run_in_threadpool(_parse_upload, raw)
+    except UploadRejected as rej:
+        log.warning("experiment create rejected: %s", rej)
+        return JSONResponse({"error": str(rej)}, status_code=400)
+    except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError, UnicodeError):
+        log.exception("failed to parse an uploaded run sheet for experiment create")
+        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
+    except Exception:  # noqa: BLE001 - normalized to a generic 400, same as /api/run
+        log.exception("failed to parse an uploaded run sheet for experiment create")
+        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
+
+    config: dict[str, Any] = {"target": target or None, "anonymize": anonymize}
+    if outcomes.strip():
+        config["outcomes"] = [c.strip() for c in outcomes.split(",") if c.strip()]
+    payload = {"columns": [str(c) for c in df.columns], "rows": df.to_dict(orient="records")}
+    exp = store.create(name, payload, config)
+    return JSONResponse(exp.to_dict(), status_code=201)
+
+
+@app.get("/api/experiments/{exp_id}")
+def get_experiment(exp_id: str, store: SqliteStore = Depends(get_store)) -> dict[str, Any]:
+    """The full experiment, including `result`. 404 if it does not exist."""
+    try:
+        return store.get(exp_id).to_dict()
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+
+
+@app.patch("/api/experiments/{exp_id}")
+def patch_experiment_status(
+    exp_id: str, body: _PatchStatusBody, store: SqliteStore = Depends(get_store)
+) -> dict[str, Any]:
+    """Set an experiment's status - this is how the front end flips the READY
+    flag. An illegal transition (e.g. DRAFT -> DONE) is a 409, not a crash."""
+    try:
+        new_status = Status(body.status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"unknown status {body.status!r}")
+    try:
+        exp = store.set_status(exp_id, new_status, force=body.force, error=body.error)
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+    except IllegalTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return exp.to_dict()
+
+
+@app.post("/api/experiments/{exp_id}/run")
+def run_experiment(
+    exp_id: str,
+    force: bool = False,
+    store: SqliteStore = Depends(get_store),
+    lock_path: str | Path | None = Depends(get_lock_path),
+) -> dict[str, Any]:
+    """Run one experiment now (`singleton.run_one`). The run always completes:
+    a zero-variance target (or any other analysis failure) lands the
+    experiment on FAILED with the actionable message at HTTP 200 - the run
+    itself did not error, the experiment did.
+    """
+    from kalos.runner.adapter import LocalStoreAdapter  # deferred: see import note above
+    from kalos.runner.singleton import run_one
+
+    adapter = LocalStoreAdapter(store)
+    try:
+        run_one(adapter, exp_id, force=force, lock_path=lock_path)
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+    except (ValueError, RuntimeError) as exc:
+        # Already DONE without force, or the Singleton lock is held elsewhere.
+        raise HTTPException(status_code=409, detail=str(exc))
+    return store.get(exp_id).to_dict()
+
+
+@app.post("/api/experiments/run-ready")
+def run_all_ready(
+    store: SqliteStore = Depends(get_store),
+    lock_path: str | Path | None = Depends(get_lock_path),
+) -> list[dict[str, Any]]:
+    """Run every READY experiment now (`singleton.run_ready`) and return a
+    per-experiment summary.
+
+    Synchronous by design for M2 (single-tenant local, deterministic) -
+    see docs/M2_INTEGRATION.md, "Keep the run endpoints synchronous for M2".
+    """
+    from kalos.runner.adapter import LocalStoreAdapter  # deferred: see import note above
+    from kalos.runner.singleton import run_ready
+
+    adapter = LocalStoreAdapter(store)
+    results = run_ready(adapter, lock_path=lock_path)
+    return [dataclasses.asdict(r) for r in results]
