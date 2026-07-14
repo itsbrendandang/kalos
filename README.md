@@ -23,17 +23,20 @@ kalos/
     conformal.py       split-conformal prediction intervals (distribution-free)
     gates.py           fail-closed promotion gates
   data/
-    anonymizer.py      strip identity, hash grouping keys, mint stable barcodes
-    barcode_registry.py  the organized home for all run data (barcode -> run, queryable, persistable)
-  ingest/
-    feed.py            push DataFeed + ProposalSink, anonymized on read
-    runner.py          decoupled closed loop: read feed -> fit -> propose -> sink
+    anonymizer.py      strip identity, hash grouping keys
+    barcode_registry.py  legacy run registry (not part of the Experiment pipeline)
+  store/
+    models.py          Experiment record + Status lifecycle (DRAFT -> READY -> PROCESSING -> DONE|FAILED)
+    sqlite_store.py    SQLite experiment store (~/.kalos/experiments.db)
+  runner/
+    singleton.py       Voyager Singleton: pull READY experiments -> run BO -> push result
+    adapter.py         BackendAdapter seam (local store today, http portal later)
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
   portal/
-    app.py             FastAPI app: live-engine views + the "run your own data" upload path
+    app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
-examples/            demos + run_on_media_data.py + organize_data.py (folder -> barcode registry)
+examples/            demos + run_on_media_data.py + organize_data.py (legacy barcode-registry demo)
 tests/               pytest
 ```
 
@@ -41,16 +44,18 @@ A lot of the honest-evaluation and data machinery was carried over from a prior
 lean engine (`voyager-brain-rebuild`): the leakage-controlled splits, the
 bootstrap-Spearman drivers, the data anonymization, and the push-feed ingestion.
 
-## Data registry (barcodes)
+## Experiment store and the Voyager loop
 
-All run data is organized through a barcode registry: every dataset gets a
-`KAL-DS-*` barcode and every run a stable, content-derived `KAL-*` barcode, with
-client/strain identity stripped and grouping keys hashed on the way in. Look a
-run up by barcode, filter by dataset, or export a training table.
+Run data flows through the Experiment store. A run sheet is uploaded as an
+Experiment (`POST /api/experiments`), flagged `READY`, and the Singleton runner
+pulls it, runs the BO engine, and writes the result back
+(`DRAFT -> READY -> PROCESSING -> DONE|FAILED`). The store is SQLite at
+`~/.kalos/experiments.db`. See `docs/M2_INTEGRATION.md` for the full contract.
 
-```bash
-python examples/organize_data.py <data_dir> registry.json   # folder of CSV/TSV -> one registry
-```
+Client/strain identity can be stripped and grouping keys hashed on upload via the
+anonymizer. A separate legacy barcode registry
+(`kalos/data/barcode_registry.py`, `examples/organize_data.py`) predates this
+pipeline and is not part of it.
 
 ## Uploading a run sheet (`POST /api/run`)
 
