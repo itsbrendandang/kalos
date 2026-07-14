@@ -42,6 +42,33 @@ def _zero_variance_sheet(n: int = 20) -> pd.DataFrame:
     })
 
 
+def _missing_cell_sheet(n: int = 40, seed: int = 1) -> pd.DataFrame:
+    """A valid, fittable sheet with genuine missing cells (NaN) in a feature
+    column - reproduces the create-response NaN serialization bug."""
+    df = _good_sheet(n, seed)
+    df.loc[df.index[:5], "pH"] = np.nan
+    return df
+
+
+def test_missing_cells_survive_the_full_loop(client):
+    """Regression + round-trip: a sheet with genuine missing cells (float NaN)
+    must (a) create at 201 with NaN coerced to JSON null - Starlette's
+    JSONResponse encodes with allow_nan=False, so an un-sanitized NaN 500s the
+    create response - and (b) run to DONE, since None round-trips back to NaN
+    when the Singleton rebuilds the DataFrame."""
+    r = _create(client, _missing_cell_sheet())
+    assert r.status_code == 201, r.text
+    exp = r.json()
+    rows = exp["payload"]["rows"]
+    assert rows[0]["pH"] is None                       # NaN -> JSON null
+    assert any(row["pH"] is not None for row in rows)  # real values preserved
+    eid = exp["id"]
+    assert client.patch(f"/api/experiments/{eid}", json={"status": "READY"}).status_code == 200
+    run = client.post(f"/api/experiments/{eid}/run")
+    assert run.status_code == 200, run.text
+    assert run.json()["status"] == "DONE"
+
+
 def _csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 

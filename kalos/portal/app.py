@@ -700,6 +700,24 @@ def list_experiments(store: SqliteStore = Depends(get_store)) -> list[dict[str, 
     ]
 
 
+def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """DataFrame rows as JSON-safe dicts: NaN/NaT/inf -> None.
+
+    Missing cells arrive from pandas as float NaN; Starlette's JSONResponse
+    encodes with allow_nan=False, so an un-sanitized NaN 500s the response.
+    Coerce every non-finite float and NaT to JSON null, so both the stored
+    payload and the HTTP response are valid JSON. None round-trips back to NaN
+    when `_payload_to_frame` rebuilds the DataFrame for the Singleton.
+    """
+    safe = df.astype(object).where(pd.notna(df), None)
+    records: list[dict[str, Any]] = safe.to_dict(orient="records")
+    for row in records:
+        for key, val in row.items():
+            if isinstance(val, float) and not np.isfinite(val):
+                row[key] = None
+    return records
+
+
 @app.post("/api/experiments")
 async def create_experiment(
     file: UploadFile = File(...),
@@ -733,7 +751,7 @@ async def create_experiment(
     config: dict[str, Any] = {"target": target or None, "anonymize": anonymize}
     if outcomes.strip():
         config["outcomes"] = [c.strip() for c in outcomes.split(",") if c.strip()]
-    payload = {"columns": [str(c) for c in df.columns], "rows": df.to_dict(orient="records")}
+    payload = {"columns": [str(c) for c in df.columns], "rows": _json_safe_records(df)}
     exp = store.create(name, payload, config)
     return JSONResponse(exp.to_dict(), status_code=201)
 
