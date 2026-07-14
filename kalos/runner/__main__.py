@@ -13,12 +13,15 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import sys
 import time
 from typing import Sequence
 
 from kalos.runner.adapter import get_adapter
 from kalos.runner.singleton import RunResult, run_one, run_ready
+
+log = logging.getLogger("kalos.runner")
 
 
 def _print_results(results: Sequence[RunResult]) -> None:
@@ -52,8 +55,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # --watch N
     try:
         while True:
-            results = run_ready(adapter)
-            _print_results(results)
+            # A batch failure (e.g. the backend is briefly unreachable) must
+            # not kill the daemon - log it and keep polling on the next tick,
+            # rather than letting the exception escape the loop.
+            try:
+                results = run_ready(adapter)
+                _print_results(results)
+            except Exception:  # noqa: BLE001 - the watch loop must survive a bad poll
+                log.exception("run_ready failed during --watch poll; will retry")
             time.sleep(args.watch)
     except KeyboardInterrupt:
         return 0

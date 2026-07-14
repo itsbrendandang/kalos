@@ -692,11 +692,24 @@ class _PatchStatusBody(BaseModel):
 
 
 @app.get("/api/experiments")
-def list_experiments(store: SqliteStore = Depends(get_store)) -> list[dict[str, Any]]:
-    """`{id, name, status, updated_at}` for every experiment, oldest first."""
+def list_experiments(
+    status: str | None = None, store: SqliteStore = Depends(get_store)
+) -> list[dict[str, Any]]:
+    """`{id, name, status, updated_at}` for every experiment, oldest first.
+
+    Optional `?status=` filters to one status (e.g. `READY`, the filter
+    `HttpBackendAdapter.list_ready` sends, `kalos/runner/adapter.py`);
+    omitted, the default and unchanged behavior, returns every experiment.
+    """
+    status_filter: Status | None = None
+    if status is not None:
+        try:
+            status_filter = Status(status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"unknown status {status!r}")
     return [
         {"id": e.id, "name": e.name, "status": e.status.value, "updated_at": e.updated_at}
-        for e in store.list()
+        for e in store.list(status=status_filter)
     ]
 
 
@@ -770,13 +783,77 @@ def patch_experiment_status(
     exp_id: str, body: _PatchStatusBody, store: SqliteStore = Depends(get_store)
 ) -> dict[str, Any]:
     """Set an experiment's status - this is how the front end flips the READY
-    flag. An illegal transition (e.g. DRAFT -> DONE) is a 409, not a crash."""
+    flag.
+
+    A CLIENT-FACING ALLOWLIST, enforced here (not just `legal_transition`):
+    the only status a client may PATCH to is `READY` - allowed from `DRAFT`
+    and `FAILED` (retry), and from `DONE` only with `force=true` (re-queue).
+    Any target of `PROCESSING`/`DONE`/`FAILED` is rejected with a 409 before
+    it ever reaches the store, because those are set by the runner
+    (`kalos/runner/singleton.py`), not by a client request - without this, a
+    client could walk an experiment DRAFT -> READY -> PROCESSING -> DONE via
+    PATCH alone, reaching DONE with an empty `result`. A request whose
+    experiment is currently `PROCESSING` is rejected too, even when the
+    target is `READY` - that edge is legal at the store layer ONLY for the
+    Singleton's own orphan recovery (`reclaim_stale`), never for a client.
+    An illegal transition that survives the allowlist (e.g. `DONE -> READY`
+    without `force`) is still a 409, not a crash.
+    """
     try:
         new_status = Status(body.status)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown status {body.status!r}")
+
+    if new_status != Status.READY:
+        raise HTTPException(
+            status_code=409,
+            detail=f"status {new_status.value!r} is set by the runner, not directly settable",
+        )
+
+    try:
+        current = store.get(exp_id)
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+
+    if current.status == Status.PROCESSING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"experiment {exp_id!r} is currently PROCESSING; status is set by "
+                "the runner, not directly settable"
+            ),
+        )
+
     try:
         exp = store.set_status(exp_id, new_status, force=body.force, error=body.error)
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+    except IllegalTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return exp.to_dict()
+
+
+class _PushResultBody(BaseModel):
+    """Body for `POST /api/experiments/{id}/result` - the result-push
+    endpoint `HttpBackendAdapter.push_result` targets (see
+    `kalos/runner/adapter.py`)."""
+
+    result: dict[str, Any]
+    provenance: dict[str, Any]
+
+
+@app.post("/api/experiments/{exp_id}/result")
+def push_experiment_result(
+    exp_id: str, body: _PushResultBody, store: SqliteStore = Depends(get_store)
+) -> dict[str, Any]:
+    """Ingest a processed result + provenance and mark the experiment DONE
+    (`SqliteStore.save_result`) - only legal from `PROCESSING`. This is the
+    push endpoint the Singleton's `HttpBackendAdapter` targets; the LOCAL
+    Singleton path (`LocalStoreAdapter`, the M2 default) calls
+    `store.save_result` directly and never goes through this HTTP endpoint.
+    """
+    try:
+        exp = store.save_result(exp_id, body.result, body.provenance)
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
     except IllegalTransition as exc:

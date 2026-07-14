@@ -10,7 +10,9 @@ this store backs - there is never more than one writer at a time by design.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -49,6 +51,34 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _json_sanitize(value: Any) -> Any:
+    """Recursively replace non-finite floats (NaN/+inf/-inf) with `None`.
+
+    `json.dumps` defaults to `allow_nan=True`, which happily writes the
+    literal tokens `NaN`/`Infinity`/`-Infinity` into a TEXT column - those are
+    NOT valid JSON (no `json.loads` implementation, strict or otherwise,
+    accepts them per the spec), so a downstream reader doing plain
+    `json.loads` on the stored text breaks. Applied recursively over
+    dict/list/tuple so a NaN buried anywhere in `payload`/`config`/`result`/
+    `provenance` - e.g. `result["reliability"]["ci95"] == [nan, nan]` - is
+    caught, not just a top-level float.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    return value
+
+
+def _dumps(value: Any) -> str:
+    """`json.dumps` over a `_json_sanitize`d copy - the ONE place every JSON
+    column write goes through, so `experiments.db` always holds strict,
+    valid JSON independent of whatever the API layer already sanitized."""
+    return json.dumps(_json_sanitize(value))
+
+
 def _row_to_experiment(row: sqlite3.Row) -> Experiment:
     return Experiment(
         id=row["id"],
@@ -70,8 +100,9 @@ class SqliteStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else DEFAULT_DB_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(_SCHEMA)
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                conn.execute(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30.0)
@@ -93,36 +124,39 @@ class SqliteStore:
             config=dict(config),
             payload=dict(payload),
         )
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO experiments "
-                "(id, name, status, created_at, updated_at, config, payload, result, provenance, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    exp.id, exp.name, exp.status.value, exp.created_at, exp.updated_at,
-                    json.dumps(exp.config), json.dumps(exp.payload), None, None, None,
-                ),
-            )
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO experiments "
+                    "(id, name, status, created_at, updated_at, config, payload, result, provenance, error) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        exp.id, exp.name, exp.status.value, exp.created_at, exp.updated_at,
+                        _dumps(exp.config), _dumps(exp.payload), None, None, None,
+                    ),
+                )
         return exp
 
     def get(self, exp_id: str) -> Experiment:
         """Fetch one experiment. Raises `ExperimentNotFound` if it does not exist."""
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
         if row is None:
             raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
         return _row_to_experiment(row)
 
     def list(self, status: Status | None = None) -> list[Experiment]:
         """List experiments, optionally filtered to one status, oldest first."""
-        with self._connect() as conn:
-            if status is None:
-                rows = conn.execute("SELECT * FROM experiments ORDER BY created_at").fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM experiments WHERE status = ? ORDER BY created_at",
-                    (status.value,),
-                ).fetchall()
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                if status is None:
+                    rows = conn.execute("SELECT * FROM experiments ORDER BY created_at").fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM experiments WHERE status = ? ORDER BY created_at",
+                        (status.value,),
+                    ).fetchall()
         return [_row_to_experiment(r) for r in rows]
 
     # --- lifecycle mutations ---------------------------------------------- #
@@ -137,35 +171,36 @@ class SqliteStore:
         the prior `result` / `provenance` / `error` (a fresh re-run). `error`
         is stored alongside a transition to `FAILED` (ignored otherwise).
         """
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
-            if row is None:
-                raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
-            current = Status(row["status"])
-            if not legal_transition(current, status, force=force):
-                raise IllegalTransition(
-                    f"illegal status transition for {exp_id!r}: "
-                    f"{current.value} -> {status.value} (force={force})"
-                )
-            now = _now_iso()
-            reset_result = force and current == Status.DONE and status == Status.READY
-            if reset_result:
-                conn.execute(
-                    "UPDATE experiments SET status = ?, updated_at = ?, "
-                    "result = NULL, provenance = NULL, error = NULL WHERE id = ?",
-                    (status.value, now, exp_id),
-                )
-            elif status == Status.FAILED:
-                conn.execute(
-                    "UPDATE experiments SET status = ?, updated_at = ?, error = ? WHERE id = ?",
-                    (status.value, now, error, exp_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE experiments SET status = ?, updated_at = ? WHERE id = ?",
-                    (status.value, now, exp_id),
-                )
-            row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                if row is None:
+                    raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
+                current = Status(row["status"])
+                if not legal_transition(current, status, force=force):
+                    raise IllegalTransition(
+                        f"illegal status transition for {exp_id!r}: "
+                        f"{current.value} -> {status.value} (force={force})"
+                    )
+                now = _now_iso()
+                reset_result = force and current == Status.DONE and status == Status.READY
+                if reset_result:
+                    conn.execute(
+                        "UPDATE experiments SET status = ?, updated_at = ?, "
+                        "result = NULL, provenance = NULL, error = NULL WHERE id = ?",
+                        (status.value, now, exp_id),
+                    )
+                elif status == Status.FAILED:
+                    conn.execute(
+                        "UPDATE experiments SET status = ?, updated_at = ?, error = ? WHERE id = ?",
+                        (status.value, now, error, exp_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE experiments SET status = ?, updated_at = ? WHERE id = ?",
+                        (status.value, now, exp_id),
+                    )
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
         return _row_to_experiment(row)
 
     def save_result(self, exp_id: str, result: dict[str, Any], provenance: dict[str, Any]) -> Experiment:
@@ -175,21 +210,22 @@ class SqliteStore:
         `IllegalTransition` otherwise, so a stray push cannot silently
         clobber a `DRAFT`/`READY`/`FAILED` experiment's result.
         """
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
-            if row is None:
-                raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
-            current = Status(row["status"])
-            if not legal_transition(current, Status.DONE):
-                raise IllegalTransition(
-                    f"cannot save a result for {exp_id!r} from status {current.value} "
-                    f"(must be {Status.PROCESSING.value})"
+        with contextlib.closing(self._connect()) as conn:
+            with conn:
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                if row is None:
+                    raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
+                current = Status(row["status"])
+                if not legal_transition(current, Status.DONE):
+                    raise IllegalTransition(
+                        f"cannot save a result for {exp_id!r} from status {current.value} "
+                        f"(must be {Status.PROCESSING.value})"
+                    )
+                now = _now_iso()
+                conn.execute(
+                    "UPDATE experiments SET status = ?, updated_at = ?, result = ?, provenance = ?, error = NULL "
+                    "WHERE id = ?",
+                    (Status.DONE.value, now, _dumps(result), _dumps(provenance), exp_id),
                 )
-            now = _now_iso()
-            conn.execute(
-                "UPDATE experiments SET status = ?, updated_at = ?, result = ?, provenance = ?, error = NULL "
-                "WHERE id = ?",
-                (Status.DONE.value, now, json.dumps(result), json.dumps(provenance), exp_id),
-            )
-            row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
         return _row_to_experiment(row)

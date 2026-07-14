@@ -2,6 +2,10 @@
 criterion 1: create -> DRAFT, flip to READY)."""
 from __future__ import annotations
 
+import json
+import math
+import sqlite3
+
 import pytest
 
 from kalos.store import ExperimentNotFound, IllegalTransition, SqliteStore, Status, legal_transition
@@ -26,9 +30,14 @@ from kalos.store import ExperimentNotFound, IllegalTransition, SqliteStore, Stat
         (Status.FAILED, Status.PROCESSING, False, False),
         (Status.DONE, Status.READY, False, False),   # only legal WITH force
         (Status.DONE, Status.READY, True, True),
-        (Status.DONE, Status.PROCESSING, True, False),  # force only covers DONE->READY
+        (Status.DONE, Status.PROCESSING, True, False),  # force only covers ->READY
         (Status.DRAFT, Status.DRAFT, False, False),   # same-status is never a transition
         (Status.DONE, Status.DONE, True, False),
+        # FIX 4: PROCESSING -> READY is ALSO force-gated, orphan-recovery-only
+        # (kalos.runner.singleton.reclaim_stale) - never reachable via the
+        # client-facing PATCH endpoint, which rejects it regardless of force.
+        (Status.PROCESSING, Status.READY, False, False),
+        (Status.PROCESSING, Status.READY, True, True),
     ],
 )
 def test_legal_transition_truth_table(old, new, force, expected):
@@ -144,3 +153,102 @@ def test_to_dict_from_dict_round_trip(tmp_path):
 
     rebuilt = Experiment.from_dict(d)
     assert rebuilt == exp
+
+
+# --- FIX 3 (HIGH): NaN in the analysis RESULT must not become invalid JSON -- #
+# `_analyze`'s `cv_ci95`/`reliability.ci95` is `[nan, nan]` when Spearman is
+# valid but there are fewer than 3 replicate groups. Before this fix,
+# `save_result` wrote it with plain `json.dumps` (`allow_nan=True`), which
+# happily writes the literal (INVALID JSON) token `NaN` into the TEXT column.
+
+def test_save_result_with_nan_persists_as_strict_valid_json(tmp_path):
+    db_path = tmp_path / "experiments.db"
+    store = SqliteStore(db_path)
+    exp = store.create("run 1", _payload(), _config())
+    store.set_status(exp.id, Status.READY)
+    store.set_status(exp.id, Status.PROCESSING)
+
+    result = {
+        "cv_spearman": 0.42,
+        "cv_ci95": [float("nan"), float("nan")],
+        "reliability": {"spearman": 0.42, "ci95": [float("nan"), float("nan")]},
+    }
+    provenance = {"seed": 1, "noise_floor": {"icc": float("nan"), "sigma": float("inf")}}
+    store.save_result(exp.id, result, provenance)
+
+    # Read the RAW stored text directly from the DB, bypassing the store's own
+    # (already-lenient) `json.loads` on the way back out, and parse it with
+    # the strict stdlib default (`parse_constant` rejects NaN/Infinity/-Infinity
+    # tokens outright) - this is the actual bug: plain `json.dumps(allow_nan=True)`
+    # writes a token that is not valid JSON at all.
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT result, provenance FROM experiments WHERE id = ?", (exp.id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    raw_result, raw_provenance = row
+
+    def _reject_non_finite(_):
+        raise ValueError("non-finite token in stored JSON")
+
+    parsed_result = json.loads(raw_result, parse_constant=_reject_non_finite)
+    parsed_provenance = json.loads(raw_provenance, parse_constant=_reject_non_finite)
+    assert parsed_result["cv_ci95"] == [None, None]
+    assert parsed_result["reliability"]["ci95"] == [None, None]
+    assert parsed_provenance["noise_floor"]["icc"] is None
+    assert parsed_provenance["noise_floor"]["sigma"] is None
+
+    # GET-shaped to_dict() round-trips cleanly - no NaN survives into the
+    # Experiment either (None, not a NaN float you cannot compare/serialize).
+    done = store.get(exp.id)
+    d = done.to_dict()
+    assert d["result"]["cv_ci95"] == [None, None]
+    assert d["result"]["reliability"]["ci95"] == [None, None]
+    assert d["provenance"]["noise_floor"]["icc"] is None
+    assert d["provenance"]["noise_floor"]["sigma"] is None
+    # to_dict() itself must be strict-JSON-serializable end to end.
+    reserialized = json.loads(json.dumps(d), parse_constant=_reject_non_finite)
+    assert reserialized == d
+
+
+def test_create_with_nan_in_payload_or_config_persists_as_strict_valid_json(tmp_path):
+    db_path = tmp_path / "experiments.db"
+    store = SqliteStore(db_path)
+    payload = {"columns": ["a"], "rows": [{"a": float("nan")}]}
+    config = {"target": "a", "threshold": float("-inf")}
+    exp = store.create("run 1", payload, config)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload, config FROM experiments WHERE id = ?", (exp.id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    raw_payload, raw_config = row
+
+    def _reject_non_finite(_):
+        raise ValueError("non-finite token in stored JSON")
+
+    parsed_payload = json.loads(raw_payload, parse_constant=_reject_non_finite)
+    parsed_config = json.loads(raw_config, parse_constant=_reject_non_finite)
+    assert parsed_payload["rows"] == [{"a": None}]
+    assert parsed_config["threshold"] is None
+
+
+# --- _json_sanitize unit coverage -------------------------------------------- #
+
+def test_json_sanitize_handles_nested_structures_and_tuples():
+    from kalos.store.sqlite_store import _json_sanitize
+
+    assert _json_sanitize(float("nan")) is None
+    assert _json_sanitize(float("inf")) is None
+    assert _json_sanitize(float("-inf")) is None
+    assert _json_sanitize(1.5) == 1.5
+    assert _json_sanitize([1.0, float("nan"), (2.0, float("inf"))]) == [1.0, None, [2.0, None]]
+    assert _json_sanitize({"a": {"b": float("nan")}, "c": [float("nan")]}) == {
+        "a": {"b": None}, "c": [None],
+    }
+    assert math.isnan(float("nan"))  # sanity: the literal we feed in is really NaN

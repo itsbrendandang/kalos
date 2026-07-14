@@ -26,10 +26,10 @@ class Status(str, Enum):
     FAILED = "FAILED"
 
 
-# Legal forward transitions, keyed by the CURRENT status. `DONE -> READY` is
-# deliberately absent here: it is only legal with `force=True` (a re-run that
-# discards the prior result), so `legal_transition` special-cases it below
-# rather than listing it as an unconditional edge.
+# Legal forward transitions, keyed by the CURRENT status. `DONE -> READY` and
+# `PROCESSING -> READY` are deliberately absent here: both are only legal with
+# `force=True`, so `legal_transition` special-cases them below rather than
+# listing them as unconditional edges.
 _LEGAL_TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.DRAFT: frozenset({Status.READY}),
     Status.READY: frozenset({Status.PROCESSING}),
@@ -47,10 +47,20 @@ def legal_transition(old: Status, new: Status, *, force: bool = False) -> bool:
     (retry); `DONE -> READY` only with `force` (re-run, discards prior
     result). A same-status "transition" is never legal (including under
     `force`) - callers that want idempotent no-ops must check that themselves.
+
+    `PROCESSING -> READY` is ALSO only legal with `force` - it exists purely
+    for orphan recovery (`kalos.runner.singleton.reclaim_stale`): the
+    Singleton lock guarantees single-instance execution, so a runner that
+    just acquired the lock and finds a `PROCESSING` row knows it is an orphan
+    from a run that crashed mid-analysis, never a live one. This is a
+    store-level legality only - the client-facing `PATCH
+    /api/experiments/{id}` endpoint (`kalos/portal/app.py`) rejects ANY
+    request whose current status is `PROCESSING` regardless of `force`, so a
+    client can never reach this edge through the API.
     """
     if old == new:
         return False
-    if force and old == Status.DONE and new == Status.READY:
+    if force and new == Status.READY and old in (Status.DONE, Status.PROCESSING):
         return True
     return new in _LEGAL_TRANSITIONS.get(old, frozenset())
 

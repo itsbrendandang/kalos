@@ -11,6 +11,7 @@ crashed runner does not wedge the system.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ from kalos.core.replicates import noise_report
 from kalos.portal.app import UploadRejected, _analyze
 from kalos.runner.adapter import BackendAdapter
 from kalos.store.models import Status
+
+log = logging.getLogger("kalos.runner")
 
 try:
     from kalos import __version__ as _PACKAGE_VERSION
@@ -234,7 +237,19 @@ def _run_one_locked(adapter: BackendAdapter, exp_id: str, *, force: bool = False
         message = str(rej)
     except Exception as exc:  # noqa: BLE001 - any analysis failure must become FAILED, not a crash
         message = str(exc)
-    adapter.set_status(exp_id, Status.FAILED, error=message)
+    # This write can itself raise (e.g. IllegalTransition from a concurrent
+    # mutation, or a transport error on a real HttpBackendAdapter). It must
+    # never propagate: an experiment that failed to record its OWN failure
+    # must not also abort the batch (`run_ready`) or crash the `--watch`
+    # daemon (`kalos/runner/__main__.py`) - it just stays whatever status it
+    # was left in, and this run attempt is still reported as FAILED below.
+    try:
+        adapter.set_status(exp_id, Status.FAILED, error=message)
+    except Exception:  # noqa: BLE001 - see comment above
+        log.exception(
+            "failed to record FAILED status for experiment %s (original error: %s)",
+            exp_id, message,
+        )
     return RunResult(id=exp_id, status="FAILED", error=message)
 
 
@@ -254,6 +269,39 @@ def run_one(
         return _run_one_locked(adapter, exp_id, force=force)
 
 
+def reclaim_stale(adapter: BackendAdapter) -> list[str]:
+    """Orphan recovery: move any `PROCESSING` experiment back to `READY`.
+
+    Called at the start of `run_ready()`, while the Singleton lock is held.
+    The lock guarantees single-instance execution, so any experiment still
+    `PROCESSING` at that moment cannot belong to a live run - if one were
+    live, this runner would not have been able to acquire the lock - so it
+    must be an orphan left behind by a run that crashed mid-analysis. Each
+    orphan is re-queued to `READY` (via the `force`-gated
+    `PROCESSING -> READY` edge in `legal_transition`, recovery-only - see
+    `kalos/store/models.py`) so the same `run_ready()` pass picks it back up.
+
+    Only meaningful for a backend that can enumerate `PROCESSING` experiments
+    (`LocalStoreAdapter.list_processing`); a backend without that method
+    (e.g. `HttpBackendAdapter`, never wired to a live server in M2) is a
+    no-op here. Never raises - a failure to reclaim one experiment is logged
+    and skipped, not allowed to abort the run.
+    """
+    list_processing = getattr(adapter, "list_processing", None)
+    if list_processing is None:
+        return []
+    reclaimed: list[str] = []
+    for exp_id in list_processing():
+        try:
+            adapter.set_status(exp_id, Status.READY, force=True)
+        except Exception:  # noqa: BLE001 - reclaim must never abort run_ready
+            log.exception("failed to reclaim stale PROCESSING experiment %s", exp_id)
+            continue
+        log.warning("reclaimed orphaned PROCESSING experiment %s -> READY", exp_id)
+        reclaimed.append(exp_id)
+    return reclaimed
+
+
 def run_ready(
     adapter: BackendAdapter,
     *,
@@ -263,13 +311,28 @@ def run_ready(
 
     Acquires the Singleton lock once for the whole batch. If the lock is
     already held by another runner, returns `[]` immediately (a no-op, not an
-    error) rather than racing it.
+    error) rather than racing it. Reclaims any orphaned `PROCESSING`
+    experiments (`reclaim_stale`) before listing `READY` ones, so a crash
+    mid-analysis on a prior run does not strand an experiment forever.
+
+    Per-experiment resilient: one experiment raising unexpectedly (not
+    already converted to a `FAILED` `RunResult` by `_run_one_locked`) is
+    caught here, recorded as `FAILED` in the returned summary, and does NOT
+    abort the rest of the batch.
     """
     lock = SingletonLock(lock_path)
     if not lock.acquire():
         return []
     try:
+        reclaim_stale(adapter)
         ids = adapter.list_ready()
-        return [_run_one_locked(adapter, exp_id) for exp_id in ids]
+        results: list[RunResult] = []
+        for exp_id in ids:
+            try:
+                results.append(_run_one_locked(adapter, exp_id))
+            except Exception as exc:  # noqa: BLE001 - one poisoned experiment must not sink the batch
+                log.exception("run_ready: experiment %s raised unexpectedly", exp_id)
+                results.append(RunResult(id=exp_id, status="FAILED", error=str(exc)))
+        return results
     finally:
         lock.release()

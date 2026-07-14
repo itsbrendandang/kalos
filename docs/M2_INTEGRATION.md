@@ -60,7 +60,9 @@ This is the stable interface. Both the local store and any future HTTP backend s
 ```
 
 Status lifecycle (only these transitions are legal):
-`DRAFT -> READY -> PROCESSING -> (DONE | FAILED)`; `FAILED -> READY` (retry); `DONE -> READY` only with `force` (re-run, discards prior `result`).
+`DRAFT -> READY -> PROCESSING -> (DONE | FAILED)`; `FAILED -> READY` (retry); `DONE -> READY` only with `force` (re-run, discards prior `result`); `PROCESSING -> READY` only with `force`, and only ever issued by the Singleton's own orphan recovery (`reclaim_stale`) - never reachable by a client (the `PATCH /api/experiments/{id}` endpoint rejects any request against a `PROCESSING` experiment outright, regardless of `force`).
+
+`PATCH /api/experiments/{id}` additionally enforces a narrower CLIENT allowlist on top of the transitions above: the only status a client may set is `READY` (from `DRAFT`/`FAILED` freely, from `DONE` only with `force`). A client can never PATCH an experiment directly to `PROCESSING`, `DONE`, or `FAILED` - those are set by the runner.
 
 ## The seam: `BackendAdapter`
 
@@ -84,7 +86,8 @@ Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_
 `kalos/runner/singleton.py`:
 - Single-instance guard: a PID/lock file at `~/.kalos/runner.lock` so two runners cannot process the same experiment (the plan says "Singleton"). Stale-lock detection on start.
 - `run_one(exp_id, *, force=False)`: DRAFT/READY -> PROCESSING -> run `kalos.portal._analyze` on the payload -> push result -> DONE. On any `UploadRejected` or exception: FAILED with the message. `force` allows re-running a DONE experiment (discards prior result first).
-- `run_ready()`: `list_ready()` then `run_one` for each; returns a per-experiment summary. Idempotent - skips anything already PROCESSING.
+- `run_ready()`: reclaims any stale `PROCESSING` experiments back to `READY` first (`reclaim_stale`, orphan recovery - see below), then `list_ready()` then `run_one` for each; returns a per-experiment summary. Per-experiment resilient: one experiment raising unexpectedly is recorded as `FAILED` in the summary, not allowed to abort the batch.
+- Orphan recovery: the Singleton lock guarantees single-instance execution, so any experiment still `PROCESSING` when a runner acquires the lock cannot belong to a live run - it is an orphan from a run that crashed mid-analysis. `reclaim_stale` re-queues each one to `READY` (a `force`-gated, recovery-only `PROCESSING -> READY` edge in `legal_transition`) so the same `run_ready()` pass picks it back up. This edge is NOT reachable through the client-facing `PATCH /api/experiments/{id}` endpoint, which rejects any request whose current status is `PROCESSING` regardless of `force`.
 - Reuses the existing engine (`_analyze`, replicate aggregation, noise floor) verbatim - M2 adds orchestration, not new science.
 
 CLI: `python -m kalos.runner --once` (process all READY and exit), `--watch N` (poll every N s), `--id exp_x [--force]` (one experiment).
@@ -95,12 +98,13 @@ Thin wrappers over store + runner; every existing endpoint stays unchanged.
 
 | Method + path | Does |
 | --- | --- |
-| `GET /api/experiments` | list `{id, name, status, updated_at}` |
+| `GET /api/experiments` | list `{id, name, status, updated_at}`; optional `?status=` filters to one status (omitted = all) |
 | `POST /api/experiments` | create from an uploaded run sheet -> DRAFT |
 | `GET /api/experiments/{id}` | full experiment incl. `result` |
-| `PATCH /api/experiments/{id}` | set status (this is how the front end flips the READY flag) |
+| `PATCH /api/experiments/{id}` | set status - client allowlist: only `READY` is settable (from `DRAFT`/`FAILED` freely, from `DONE` only with `force`); any other target, or any request while the experiment is `PROCESSING`, is a 409 |
 | `POST /api/experiments/{id}/run` | run one now (`?force=true` to replace output) |
 | `POST /api/experiments/run-ready` | run all READY now |
+| `POST /api/experiments/{id}/result` | ingest `{result, provenance}` and mark DONE (only legal from `PROCESSING`) - the push endpoint `HttpBackendAdapter.push_result` targets |
 
 ## kalos-web (Polaris front end)
 

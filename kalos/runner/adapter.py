@@ -63,6 +63,15 @@ class LocalStoreAdapter:
     def list_ready(self) -> list[str]:
         return [exp.id for exp in self._store.list(status=Status.READY)]
 
+    def list_processing(self) -> list[str]:
+        """Ids of `PROCESSING` experiments - used by
+        `kalos.runner.singleton.reclaim_stale` for orphan recovery. Not part
+        of the `BackendAdapter` Protocol (only this default, store-backed
+        adapter can enumerate by arbitrary status); `reclaim_stale` degrades
+        to a no-op for a backend that lacks this method, e.g.
+        `HttpBackendAdapter` (never wired to a live server in M2)."""
+        return [exp.id for exp in self._store.list(status=Status.PROCESSING)]
+
     def fetch(self, exp_id: str) -> Experiment:
         return self._store.get(exp_id)
 
@@ -95,7 +104,8 @@ def _urllib_transport(method: str, url: str, json_body: dict[str, Any] | None) -
 class HttpBackendAdapter:
     """Typed, contract-tested stub for a future portal backend.
 
-    Maps the four `BackendAdapter` methods onto REST calls:
+    Maps the four `BackendAdapter` methods onto REST calls, and every one of
+    them targets a REAL portal endpoint (`kalos/portal/app.py`):
       - `list_ready`   -> `GET  {base_url}/api/experiments?status=READY`
       - `fetch`        -> `GET  {base_url}/api/experiments/{id}`
       - `set_status`   -> `PATCH {base_url}/api/experiments/{id}` body `{"status", "force", "error"}`
@@ -103,11 +113,17 @@ class HttpBackendAdapter:
 
     The first three mirror the portal API table in `docs/M2_INTEGRATION.md`
     verbatim (`GET /api/experiments`, `GET /api/experiments/{id}`,
-    `PATCH /api/experiments/{id}`). `push_result` has no listed counterpart
-    there (the documented endpoints describe the front end driving a
-    server-side run); since M2's Singleton always runs `_analyze` locally and
-    pushes the result back, this stub adds one endpoint for that push. It is
-    not wired to a live server in M2 - only contract-tested against a mock.
+    `PATCH /api/experiments/{id}`) - `GET /api/experiments` genuinely honors
+    the `status` query param (filters; omitted = all, unchanged default).
+    `push_result` has no listed counterpart in that table (the documented
+    endpoints describe the front end driving a server-side run); since M2's
+    Singleton always runs `_analyze` locally and pushes the result back, the
+    portal exposes `POST /api/experiments/{id}/result` for exactly this push
+    (ingests via `SqliteStore.save_result`, legal only from `PROCESSING`).
+    Both endpoints are real and covered by a contract test against the actual
+    FastAPI app via `TestClient`, not just the mock transport below - but this
+    adapter is still not selected by default (`KALOS_BACKEND=local`) and is
+    not pointed at any live server in M2 (see the doc's "Non-goals").
     """
 
     def __init__(
