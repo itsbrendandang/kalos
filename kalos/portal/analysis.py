@@ -5,23 +5,29 @@ so the model never "predicts" titer from another measured output (leakage).
 """
 from __future__ import annotations
 
+import gc
 import re
 import time
 
 import numpy as np
 import pandas as pd
-import torch
 from scipy.stats import spearmanr
 
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
-from kalos.core.evaluation import grouped_cv_report
-from kalos.core.optimize import propose
 from kalos.core.splits import row_hash_groups
-from kalos.core.surrogate import Surrogate
 from kalos.data.anonymizer import _hash
 from kalos.portal.uploads import MAX_FIT_ROWS, UploadRejected, _ERR_TOO_MANY_FIT_ROWS
 from kalos.portal.validate import column_provenance, provenance_dicts
+
+# NOTE: `kalos.core.evaluation` (which imports `kalos.core.surrogate`),
+# `kalos.core.optimize`, and `torch` itself are intentionally NOT imported at
+# module level. This module is imported by `kalos.runner.singleton` (the
+# `--watch` poller) and `kalos.portal.app` (the portal), so a top-level torch
+# import here would tax the idle poller and portal boot with the whole
+# torch/botorch/gpytorch stack (~220 MB) before any analysis ever runs. They
+# are imported lazily inside `_analyze`/`_seed_everything`, the only places
+# that actually need them.
 
 _OUTCOME_HINT = re.compile(r"titer|titre|yield|conc|purity|lipase|biomass|od\d|product|response|output|score|kda|activity|titer", re.I)
 _TARGET_PREF = re.compile(r"titer|titre|lipase|yield", re.I)
@@ -76,6 +82,8 @@ ANALYZE_SEED = 1234
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
     """Seed torch + numpy so one upload yields one deterministic set of proposals."""
+    import torch  # local: deferred, see module-level note above
+
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -118,6 +126,13 @@ def _analyze(
     why) plus `seed`, `timestamp`, and `engine_version` for audit. When
     `anonymize` is True, identifier-type column names are replaced with stable
     pseudonyms in the response (the owner UI keeps real names when False)."""
+    # Deferred: these transitively import torch/botorch/gpytorch (see the
+    # module-level note above). This is the one place in this module that
+    # actually needs them, so this is where the torch tax is paid.
+    from kalos.core.evaluation import grouped_cv_report
+    from kalos.core.optimize import propose
+    from kalos.core.surrogate import Surrogate
+
     _seed_everything()
     df = _dedupe_columns(df.dropna(axis=1, how="all"))
     num = _numeric_cols(df)
@@ -215,6 +230,13 @@ def _analyze(
     show = [d[0] for d in drv[:4]]
     show_idx = [feats.index(f) for f in show]
     p_mean, p_std = s.posterior(batch)
+    # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
+    # back-references that can form reference cycles refcounting alone won't
+    # break) as soon as its last use is done, rather than waiting on `_analyze`
+    # to return. Keeps a long-lived process (the portal, the `--watch` poller)
+    # from accumulating fit memory across repeated analyses.
+    del s
+    gc.collect()
 
     # per-column provenance: what was kept as a feature, used as the target, or
     # dropped (id / other output / constant / sparse), so the client is never left

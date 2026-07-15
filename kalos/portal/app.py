@@ -30,15 +30,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
-from kalos.core.optimize import propose
-from kalos.core.surrogate import DEVICE, DTYPE, FitError, Surrogate
 from kalos.portal.analysis import _analyze, _annotate
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -62,7 +58,20 @@ log = logging.getLogger("kalos.portal")
 # event loop. Cap the torch intra-op thread count so several concurrent fits do
 # not oversubscribe the CPU and thrash. Override with KALOS_TORCH_THREADS.
 _TORCH_THREADS = int(os.environ.get("KALOS_TORCH_THREADS", str(min(4, os.cpu_count() or 1))))
-torch.set_num_threads(max(1, _TORCH_THREADS))
+_torch_threads_configured = False
+
+
+def _ensure_torch_threads() -> None:
+    """Apply `_TORCH_THREADS` on first use. Deferred (not applied at import
+    time) so `import kalos.portal.app` stays torch-free until a fit actually
+    runs; idempotent, so it is cheap to call before every fit path."""
+    global _torch_threads_configured
+    if _torch_threads_configured:
+        return
+    import torch
+
+    torch.set_num_threads(max(1, _TORCH_THREADS))
+    _torch_threads_configured = True
 
 app = FastAPI(title="Kalos Engine API")
 
@@ -153,6 +162,10 @@ def index() -> str:
 
 @app.get("/api/single")
 def run_single(rounds: int = 6, q: int = 2) -> dict:
+    from kalos.core.optimize import propose
+    from kalos.core.surrogate import Surrogate
+
+    _ensure_torch_threads()
     rng = np.random.default_rng(0)
     X = rng.uniform(0, 1, (6, 3))
     y = _titer(X)
@@ -180,6 +193,10 @@ def run_single(rounds: int = 6, q: int = 2) -> dict:
 
 @app.get("/api/multi")
 def run_multi(rounds: int = 5, q: int = 2) -> dict:
+    from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
+    from kalos.core.surrogate import DEVICE, DTYPE
+
+    _ensure_torch_threads()
     rng = np.random.default_rng(0)
     X = rng.uniform(0, 1, (8, 3))
     Y = _objectives(X)
@@ -229,6 +246,7 @@ def _run_uploaded_sync(raw: bytes, target: str | None, anonymize: bool, filename
     the async wrapper maps each to the right 400 envelope. Kept fully synchronous
     so it is trivially unit-testable in isolation.
     """
+    _ensure_torch_threads()
     df = _parse_upload(raw)
     result = _analyze(df, target, anonymize=anonymize)
     _save_latest(result, filename)
@@ -241,6 +259,8 @@ async def run_uploaded(
     target: str = Form(default=""),
     anonymize: bool = Form(default=False),
 ) -> JSONResponse:
+    from kalos.core.surrogate import FitError  # deferred: only needed to match the except below
+
     raw = await file.read()
     filename = file.filename or "uploaded dataset"
     try:
