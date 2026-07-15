@@ -8,7 +8,8 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from kalos import BarcodeRegistry, bootstrap_spearman, rank_drivers, split_conformal
+from kalos import bootstrap_spearman, rank_drivers, split_conformal
+from kalos.data.barcode_registry import BarcodeRegistry
 from kalos.core.splits import row_hash_groups, make_splits, assert_no_group_leakage
 
 

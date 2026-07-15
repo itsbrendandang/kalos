@@ -1,11 +1,11 @@
 """Kalos platform: BoTorch Bayesian optimization for bioprocess development, with
-NVIDIA BioNeMo / ESM-2 protein features and a barcode-organized data registry.
+NVIDIA BioNeMo / ESM-2 protein features, an experiment store + Singleton runner
+(the Voyager integration), and a FastAPI portal.
 """
 from .core.gates import GatesConfig, PromotionResult, check_gates
 from .core.splits import row_hash_groups, make_splits, assert_no_group_leakage
 from .core.drivers import bootstrap_spearman, rank_drivers
 from .core.conformal import split_conformal
-from .data.barcode_registry import BarcodeRegistry
 from .data.anonymizer import Anonymizer
 
 __version__ = "0.1.0"
@@ -27,7 +27,7 @@ __all__ = [
     "GatesConfig", "PromotionResult", "check_gates", "grouped_cv_spearman",
     "row_hash_groups", "make_splits", "assert_no_group_leakage",
     "bootstrap_spearman", "rank_drivers", "split_conformal",
-    "BarcodeRegistry", "Anonymizer",
+    "Anonymizer",
 ]
 
 
