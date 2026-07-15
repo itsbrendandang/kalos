@@ -350,7 +350,26 @@ def test_list_experiments_unknown_status_filter_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_push_result_endpoint_marks_done(client):
+# --- SECURITY FIX: /result is token-gated (KALOS_RUNNER_TOKEN) and off by
+# default. Before this fix, /result accepted an unauthenticated
+# {result, provenance} from anyone and marked a PROCESSING experiment DONE -
+# an attacker could race a fabricated result in ahead of the genuine one.
+# `monkeypatch.setenv`/`delenv` throughout so the real environment is never
+# touched.
+
+_RUNNER_TOKEN = "test-runner-token"
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_push_result_endpoint_disabled_404_when_token_unset(client, monkeypatch):
+    """Token unset (the default) -> the endpoint does not exist, 404 -
+    regardless of the experiment's status. The local M2 loop
+    (`LocalStoreAdapter`) never calls this endpoint, so it stays closed
+    unless an operator opts a remote runner in."""
+    monkeypatch.delenv("KALOS_RUNNER_TOKEN", raising=False)
     resp = _create(client, _good_sheet())
     exp_id = resp.json()["id"]
     store = app.dependency_overrides[get_store]()
@@ -361,6 +380,56 @@ def test_push_result_endpoint_marks_done(client):
         f"/api/experiments/{exp_id}/result",
         json={"result": {"n": 1}, "provenance": {"seed": 1}},
     )
+    assert push.status_code == 404
+    assert store.get(exp_id).status == Status.PROCESSING  # untouched
+
+
+def test_push_result_endpoint_401_when_token_set_and_no_bearer(client, monkeypatch):
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
+    resp = _create(client, _good_sheet())
+    exp_id = resp.json()["id"]
+    store = app.dependency_overrides[get_store]()
+    store.set_status(exp_id, Status.READY)
+    store.set_status(exp_id, Status.PROCESSING)
+
+    push = client.post(
+        f"/api/experiments/{exp_id}/result",
+        json={"result": {"n": 1}, "provenance": {"seed": 1}},
+    )
+    assert push.status_code == 401
+    assert store.get(exp_id).status == Status.PROCESSING  # untouched
+
+
+def test_push_result_endpoint_401_when_token_set_and_bearer_wrong(client, monkeypatch):
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
+    resp = _create(client, _good_sheet())
+    exp_id = resp.json()["id"]
+    store = app.dependency_overrides[get_store]()
+    store.set_status(exp_id, Status.READY)
+    store.set_status(exp_id, Status.PROCESSING)
+
+    push = client.post(
+        f"/api/experiments/{exp_id}/result",
+        json={"result": {"n": 1}, "provenance": {"seed": 1}},
+        headers=_auth("wrong-token"),
+    )
+    assert push.status_code == 401
+    assert store.get(exp_id).status == Status.PROCESSING  # untouched
+
+
+def test_push_result_endpoint_marks_done(client, monkeypatch):
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
+    resp = _create(client, _good_sheet())
+    exp_id = resp.json()["id"]
+    store = app.dependency_overrides[get_store]()
+    store.set_status(exp_id, Status.READY)
+    store.set_status(exp_id, Status.PROCESSING)
+
+    push = client.post(
+        f"/api/experiments/{exp_id}/result",
+        json={"result": {"n": 1}, "provenance": {"seed": 1}},
+        headers=_auth(_RUNNER_TOKEN),
+    )
     assert push.status_code == 200, push.text
     body = push.json()
     assert body["status"] == "DONE"
@@ -368,20 +437,53 @@ def test_push_result_endpoint_marks_done(client):
     assert body["provenance"] == {"seed": 1}
 
 
-def test_push_result_endpoint_illegal_from_draft_returns_409(client):
+def test_push_result_endpoint_rejects_overwrite_of_existing_result_409(client, monkeypatch):
+    """Integrity/idempotency guard: a second push, even authenticated, must
+    never silently overwrite a genuine already-present result."""
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
+    resp = _create(client, _good_sheet())
+    exp_id = resp.json()["id"]
+    store = app.dependency_overrides[get_store]()
+    store.set_status(exp_id, Status.READY)
+    store.set_status(exp_id, Status.PROCESSING)
+
+    first = client.post(
+        f"/api/experiments/{exp_id}/result",
+        json={"result": {"n": 1}, "provenance": {"seed": 1}},
+        headers=_auth(_RUNNER_TOKEN),
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        f"/api/experiments/{exp_id}/result",
+        json={"result": {"n": 999}, "provenance": {"seed": 999}},
+        headers=_auth(_RUNNER_TOKEN),
+    )
+    assert second.status_code == 409
+    assert second.json()["detail"] == "result already present"
+    # the genuine result from the first push is untouched
+    got = client.get(f"/api/experiments/{exp_id}").json()
+    assert got["result"] == {"n": 1}
+
+
+def test_push_result_endpoint_illegal_from_draft_returns_409(client, monkeypatch):
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
     resp = _create(client, _good_sheet())
     exp_id = resp.json()["id"]
     push = client.post(
         f"/api/experiments/{exp_id}/result",
         json={"result": {"n": 1}, "provenance": {"seed": 1}},
+        headers=_auth(_RUNNER_TOKEN),
     )
     assert push.status_code == 409
 
 
-def test_push_result_endpoint_missing_experiment_returns_404(client):
+def test_push_result_endpoint_missing_experiment_returns_404(client, monkeypatch):
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
     push = client.post(
         "/api/experiments/exp_does_not_exist/result",
         json={"result": {"n": 1}, "provenance": {"seed": 1}},
+        headers=_auth(_RUNNER_TOKEN),
     )
     assert push.status_code == 404
 
@@ -391,17 +493,18 @@ def test_push_result_endpoint_missing_experiment_returns_404(client):
 # portal endpoints through TestClient, proving list_ready's status filter and
 # push_result's endpoint are real, not just documented.
 
-def test_http_adapter_against_real_portal_app(client):
+def test_http_adapter_against_real_portal_app(client, monkeypatch):
     from kalos.runner.adapter import HttpBackendAdapter
 
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", _RUNNER_TOKEN)
     store = app.dependency_overrides[get_store]()
 
-    def _transport(method, url, json_body):
-        resp = client.request(method, url, json=json_body)
+    def _transport(method, url, json_body, headers=None):
+        resp = client.request(method, url, json=json_body, headers=headers)
         assert resp.status_code < 400, (method, url, resp.status_code, resp.text)
         return resp.json() if resp.content else None
 
-    adapter = HttpBackendAdapter("http://testserver", transport=_transport)
+    adapter = HttpBackendAdapter("http://testserver", token=_RUNNER_TOKEN, transport=_transport)
 
     ready = _create(client, _good_sheet(seed=1), name="ready one").json()
     draft = _create(client, _good_sheet(seed=2), name="draft one").json()

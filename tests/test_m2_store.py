@@ -140,6 +140,28 @@ def test_set_status_failed_stores_error_message(tmp_path):
     assert failed.error == "no varying process-input columns found"
 
 
+# --- kalos#17 review nit: a retry must not carry forward a stale `error` ---- #
+# A FAILED -> READY retry (and the DONE -> READY force re-run) left the OLD
+# `error` field set, contradicting the contract (`error` is populated on
+# FAILED only). `force_reset_done_to_ready_discards_result` above already
+# covers the force path; this covers the plain FAILED -> READY retry.
+
+def test_failed_to_ready_retry_clears_stale_error(tmp_path):
+    store = SqliteStore(tmp_path / "experiments.db")
+    exp = store.create("run 1", _payload(), _config())
+    store.set_status(exp.id, Status.READY)
+    store.set_status(exp.id, Status.PROCESSING)
+    failed = store.set_status(exp.id, Status.FAILED, error="boom")
+    assert failed.error == "boom"
+
+    retried = store.set_status(exp.id, Status.READY)  # FAILED -> READY, no force needed
+    assert retried.status == Status.READY
+    assert retried.error is None
+
+    reloaded = store.get(exp.id)
+    assert reloaded.error is None
+
+
 def test_to_dict_from_dict_round_trip(tmp_path):
     store = SqliteStore(tmp_path / "experiments.db")
     exp = store.create("run 1", _payload(), _config())

@@ -11,6 +11,7 @@ Needs the portal extra:  pip install -e ".[portal]"
 from __future__ import annotations
 
 import dataclasses
+import hmac
 import io
 import json
 import logging
@@ -24,7 +25,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -842,16 +843,63 @@ class _PushResultBody(BaseModel):
     provenance: dict[str, Any]
 
 
+def _check_runner_token(authorization: str | None) -> None:
+    """Token-gate `/result` (SECURITY - see the module section header below).
+
+    Without this, `/result` accepted an unauthenticated `{result,
+    provenance}` from anyone and marked a `PROCESSING` experiment `DONE`,
+    letting an attacker race a fabricated result in ahead of the genuine one.
+
+    Reads `KALOS_RUNNER_TOKEN` from the environment AT REQUEST TIME (not
+    import time), so tests can monkeypatch/env-override it per-test:
+      - unset -> the endpoint is disabled entirely: 404. The local M2 loop
+        (`LocalStoreAdapter`) never calls this endpoint - it writes to the
+        store directly - so only a remote runner needs it, and it must be
+        opted into explicitly.
+      - set -> the caller must send `Authorization: Bearer <token>` matching
+        EXACTLY (constant-time compare via `hmac.compare_digest`, so a wrong
+        guess cannot be timed byte-by-byte); missing or wrong -> 401.
+    Never logs the token.
+    """
+    token = os.environ.get("KALOS_RUNNER_TOKEN")
+    if not token:
+        raise HTTPException(status_code=404, detail="not found")
+    provided = None
+    if authorization and authorization.startswith("Bearer "):
+        provided = authorization[len("Bearer ") :]
+    if not provided or not hmac.compare_digest(provided, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 @app.post("/api/experiments/{exp_id}/result")
 def push_experiment_result(
-    exp_id: str, body: _PushResultBody, store: SqliteStore = Depends(get_store)
+    exp_id: str,
+    body: _PushResultBody,
+    authorization: str | None = Header(default=None),
+    store: SqliteStore = Depends(get_store),
 ) -> dict[str, Any]:
     """Ingest a processed result + provenance and mark the experiment DONE
     (`SqliteStore.save_result`) - only legal from `PROCESSING`. This is the
     push endpoint the Singleton's `HttpBackendAdapter` targets; the LOCAL
     Singleton path (`LocalStoreAdapter`, the M2 default) calls
     `store.save_result` directly and never goes through this HTTP endpoint.
+
+    Token-gated and off by default - see `_check_runner_token`: unset
+    `KALOS_RUNNER_TOKEN` -> 404, missing/wrong bearer -> 401. Also rejects an
+    experiment that already has a non-null `result` with 409 ("result
+    already present"), independent of the `PROCESSING`-only rule already
+    enforced by `save_result` - an integrity/idempotency guard so a stray or
+    racing push can never silently overwrite a genuine result.
     """
+    _check_runner_token(authorization)
+
+    try:
+        current = store.get(exp_id)
+    except ExperimentNotFound:
+        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
+    if current.result is not None:
+        raise HTTPException(status_code=409, detail="result already present")
+
     try:
         exp = store.save_result(exp_id, body.result, body.provenance)
     except ExperimentNotFound:

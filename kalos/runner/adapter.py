@@ -25,10 +25,14 @@ from typing import Any, Callable, Protocol, runtime_checkable
 from kalos.store.models import Experiment, Status
 from kalos.store.sqlite_store import SqliteStore
 
-# transport(method, url, json_body) -> parsed JSON response (dict or list).
-# Injectable so `HttpBackendAdapter` can be contract-tested with a mock and
-# never performs real network I/O inside this package.
-Transport = Callable[[str, str, dict[str, Any] | None], Any]
+# transport(method, url, json_body, headers) -> parsed JSON response (dict or
+# list). `headers` is `None` for every call except `HttpBackendAdapter.
+# push_result`, which sends `{"Authorization": "Bearer <token>"}` when a token
+# is configured - the portal's `/result` endpoint is token-gated (see
+# `kalos/portal/app.py::push_experiment_result`). Injectable so
+# `HttpBackendAdapter` can be contract-tested with a mock and never performs
+# real network I/O inside this package.
+Transport = Callable[[str, str, dict[str, Any] | None, dict[str, str] | None], Any]
 
 
 @runtime_checkable
@@ -84,7 +88,9 @@ class LocalStoreAdapter:
         self._store.save_result(exp_id, result, provenance)
 
 
-def _urllib_transport(method: str, url: str, json_body: dict[str, Any] | None) -> Any:
+def _urllib_transport(
+    method: str, url: str, json_body: dict[str, Any] | None, headers: dict[str, str] | None = None
+) -> Any:
     """The real (non-test) transport: a plain `urllib` JSON request. Only
     exercised if `HttpBackendAdapter` is actually pointed at a live server,
     which M2 never does - `get_adapter()` only reaches this when a caller
@@ -96,6 +102,8 @@ def _urllib_transport(method: str, url: str, json_body: dict[str, Any] | None) -
     data = json.dumps(json_body).encode("utf-8") if json_body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
     with urllib.request.urlopen(req) as resp:  # noqa: S310 - operator-controlled URL, not user input
         body = resp.read()
     return json.loads(body) if body else None
@@ -124,6 +132,15 @@ class HttpBackendAdapter:
     FastAPI app via `TestClient`, not just the mock transport below - but this
     adapter is still not selected by default (`KALOS_BACKEND=local`) and is
     not pointed at any live server in M2 (see the doc's "Non-goals").
+
+    `/result` is token-gated on the portal side (`kalos/portal/app.py::
+    push_experiment_result`) and disabled (404) unless the portal has
+    `KALOS_RUNNER_TOKEN` set. `push_result` sends the matching credential as
+    `Authorization: Bearer <token>` - `self.token` is populated from
+    `KALOS_RUNNER_TOKEN`, falling back to the already-documented
+    `KALOS_BACKEND_TOKEN`, by `get_adapter()` below. `list_ready`/`fetch`/
+    `set_status` hit endpoints that are not token-gated, so they send no
+    Authorization header.
     """
 
     def __init__(
@@ -137,8 +154,15 @@ class HttpBackendAdapter:
         self.token = token
         self._transport = transport or _urllib_transport
 
-    def _request(self, method: str, path: str, json_body: dict[str, Any] | None = None) -> Any:
-        return self._transport(method, f"{self.base_url}{path}", json_body)
+    def _request(
+        self,
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        return self._transport(method, f"{self.base_url}{path}", json_body, headers)
 
     def list_ready(self) -> list[str]:
         data = self._request("GET", "/api/experiments?status=READY")
@@ -158,14 +182,27 @@ class HttpBackendAdapter:
         )
 
     def push_result(self, exp_id: str, result: dict[str, Any], provenance: dict[str, Any]) -> None:
+        """Push a processed result. Sends `Authorization: Bearer <token>`
+        when `self.token` is set, matching the portal's token-gated `/result`
+        endpoint - a plain, unauthenticated push would 404 (token unset on
+        the portal) or 401 (token set but missing/wrong here)."""
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else None
         self._request(
-            "POST", f"/api/experiments/{exp_id}/result", {"result": result, "provenance": provenance}
+            "POST",
+            f"/api/experiments/{exp_id}/result",
+            {"result": result, "provenance": provenance},
+            headers=headers,
         )
 
 
 def get_adapter() -> BackendAdapter:
     """Select the backend from env: `KALOS_BACKEND=local` (default) or `http`,
-    with `KALOS_BACKEND_URL` (and optionally `KALOS_BACKEND_TOKEN`) for `http`.
+    with `KALOS_BACKEND_URL` for `http`. The token sent as `Authorization:
+    Bearer <token>` on `push_result` (see `HttpBackendAdapter.push_result`)
+    comes from `KALOS_RUNNER_TOKEN` - matching the portal's `/result`
+    token-gate env var (`kalos/portal/app.py::push_experiment_result`) -
+    falling back to the already-documented `KALOS_BACKEND_TOKEN` for
+    backward compatibility.
     """
     backend = os.environ.get("KALOS_BACKEND", "local").strip().lower()
     if backend == "local":
@@ -174,6 +211,6 @@ def get_adapter() -> BackendAdapter:
         base_url = os.environ.get("KALOS_BACKEND_URL")
         if not base_url:
             raise ValueError("KALOS_BACKEND_URL must be set when KALOS_BACKEND=http")
-        token = os.environ.get("KALOS_BACKEND_TOKEN")
+        token = os.environ.get("KALOS_RUNNER_TOKEN") or os.environ.get("KALOS_BACKEND_TOKEN")
         return HttpBackendAdapter(base_url, token=token)
     raise ValueError(f"unknown KALOS_BACKEND: {backend!r} (expected 'local' or 'http')")

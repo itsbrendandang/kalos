@@ -169,7 +169,11 @@ class SqliteStore:
         Raises `IllegalTransition` (with the attempted old/new status in the
         message) if the move is not legal. A forced `DONE -> READY` discards
         the prior `result` / `provenance` / `error` (a fresh re-run). `error`
-        is stored alongside a transition to `FAILED` (ignored otherwise).
+        is stored alongside a transition to `FAILED` (ignored otherwise). Any
+        transition INTO `READY` clears a stale `error` left over from a prior
+        `FAILED` run (`FAILED -> READY` retry) - contract: `error` is
+        populated on `FAILED` only, so a retried experiment must not still
+        carry the old, now-contradictory error message.
         """
         with contextlib.closing(self._connect()) as conn:
             with conn:
@@ -194,6 +198,11 @@ class SqliteStore:
                     conn.execute(
                         "UPDATE experiments SET status = ?, updated_at = ?, error = ? WHERE id = ?",
                         (status.value, now, error, exp_id),
+                    )
+                elif status == Status.READY:
+                    conn.execute(
+                        "UPDATE experiments SET status = ?, updated_at = ?, error = NULL WHERE id = ?",
+                        (status.value, now, exp_id),
                     )
                 else:
                     conn.execute(

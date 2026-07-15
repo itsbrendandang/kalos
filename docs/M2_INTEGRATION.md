@@ -77,9 +77,9 @@ class BackendAdapter(Protocol):
 ```
 
 - `LocalStoreAdapter` (default): backed by the SQLite store. Ships in M2.
-- `HttpBackendAdapter` (documented stub): base-URL + token from config; the four methods map to REST calls on a future portal. Not wired to a live server in M2; it exists so the seam is real, has a typed signature, and has a contract test against a mock.
+- `HttpBackendAdapter` (documented stub): base-URL + token from config; the four methods map to REST calls on a future portal. Not wired to a live server in M2; it exists so the seam is real, has a typed signature, and has a contract test against a mock. `push_result` sends its token as `Authorization: Bearer <token>`, matching the portal's token-gated `/result` endpoint (see "Security note" below); the other three methods hit endpoints that are not token-gated and send no Authorization header.
 
-Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_URL=...`. One factory `get_adapter()`.
+Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_URL=...`, and a token from `KALOS_RUNNER_TOKEN` (falling back to the already-documented `KALOS_BACKEND_TOKEN`). One factory `get_adapter()`.
 
 ## Singleton runner
 
@@ -104,7 +104,7 @@ Thin wrappers over store + runner; every existing endpoint stays unchanged.
 | `PATCH /api/experiments/{id}` | set status - client allowlist: only `READY` is settable (from `DRAFT`/`FAILED` freely, from `DONE` only with `force`); any other target, or any request while the experiment is `PROCESSING`, is a 409 |
 | `POST /api/experiments/{id}/run` | run one now (`?force=true` to replace output) |
 | `POST /api/experiments/run-ready` | run all READY now |
-| `POST /api/experiments/{id}/result` | ingest `{result, provenance}` and mark DONE (only legal from `PROCESSING`) - the push endpoint `HttpBackendAdapter.push_result` targets |
+| `POST /api/experiments/{id}/result` | ingest `{result, provenance}` and mark DONE (only legal from `PROCESSING`, and rejected 409 if a result is already present) - the push endpoint `HttpBackendAdapter.push_result` targets. Token-gated and off by default: 404 unless `KALOS_RUNNER_TOKEN` is set on the portal, then requires a matching `Authorization: Bearer <token>` (401 otherwise) |
 
 ## kalos-web (Polaris front end)
 
@@ -113,8 +113,15 @@ Replace the Voyager surface's client-side localStorage mock **data source** with
 ## Non-goals for M2 (explicit)
 
 - No Data Moat context retrieval / update-on-completion (that is M3).
-- No auth on the portal beyond what exists (single-tenant local).
+- No auth on the portal beyond what exists (single-tenant local), with one exception: `POST /api/experiments/{id}/result` is token-gated (`KALOS_RUNNER_TOKEN`) and off by default (404) - see the endpoints table above and "Security note" below. Every other endpoint is unauthenticated, same as before.
 - `HttpBackendAdapter` is a typed, contract-tested stub, not a live client to the Bioqore portal.
+
+### Security note: `/result` is a privileged write, closed by default
+
+`/result` marks a `PROCESSING` experiment `DONE` from a client-supplied `{result, provenance}` body - unlike `PATCH .../{id}`, it is not restricted to the `READY` flag, so an unauthenticated version of it would let anyone race a fabricated result in ahead of (or instead of) the genuine one.
+The local M2 loop (`LocalStoreAdapter`) never calls this endpoint at all - it writes results to the store directly - so it is disabled (404) unless an operator explicitly sets `KALOS_RUNNER_TOKEN`, which only a remote/HTTP runner (`HttpBackendAdapter`) needs.
+When set, the endpoint requires `Authorization: Bearer <token>` (constant-time compare); missing or wrong is a 401.
+It also refuses to overwrite an experiment that already has a non-null `result` (409), independent of the `PROCESSING`-only rule, so a stray or racing push can never silently clobber a genuine result.
 
 ## Acceptance criteria
 

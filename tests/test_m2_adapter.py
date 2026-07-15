@@ -62,11 +62,11 @@ class _MockTransport:
     """Records every call; returns a scripted response per call."""
 
     def __init__(self, response=None):
-        self.calls: list[tuple[str, str, dict | None]] = []
+        self.calls: list[tuple[str, str, dict | None, dict | None]] = []
         self.response = response
 
-    def __call__(self, method, url, json_body):
-        self.calls.append((method, url, json_body))
+    def __call__(self, method, url, json_body, headers=None):
+        self.calls.append((method, url, json_body, headers))
         return self.response
 
 
@@ -77,7 +77,9 @@ def test_http_adapter_list_ready_issues_get_with_status_filter():
     ids = adapter.list_ready()
 
     assert ids == ["exp_1", "exp_2"]
-    assert transport.calls == [("GET", "https://portal.example.com/api/experiments?status=READY", None)]
+    assert transport.calls == [
+        ("GET", "https://portal.example.com/api/experiments?status=READY", None, None),
+    ]
 
 
 def test_http_adapter_fetch_issues_get_and_parses_experiment():
@@ -93,7 +95,9 @@ def test_http_adapter_fetch_issues_get_and_parses_experiment():
     exp = adapter.fetch("exp_1")
 
     assert exp.id == "exp_1" and exp.status == Status.READY
-    assert transport.calls == [("GET", "https://portal.example.com/api/experiments/exp_1", None)]
+    assert transport.calls == [
+        ("GET", "https://portal.example.com/api/experiments/exp_1", None, None),
+    ]
 
 
 def test_http_adapter_set_status_issues_patch_with_body():
@@ -104,7 +108,7 @@ def test_http_adapter_set_status_issues_patch_with_body():
 
     assert transport.calls == [
         ("PATCH", "https://portal.example.com/api/experiments/exp_1",
-         {"status": "PROCESSING", "force": False, "error": None}),
+         {"status": "PROCESSING", "force": False, "error": None}, None),
     ]
 
 
@@ -116,11 +120,13 @@ def test_http_adapter_set_status_force_and_error_flow_through():
 
     assert transport.calls == [
         ("PATCH", "https://portal.example.com/api/experiments/exp_1",
-         {"status": "FAILED", "force": True, "error": "boom"}),
+         {"status": "FAILED", "force": True, "error": "boom"}, None),
     ]
 
 
 def test_http_adapter_push_result_issues_post_with_result_and_provenance():
+    """No token configured -> no Authorization header sent (matches the
+    portal's default-disabled `/result` - see `test_m2_portal.py`)."""
     transport = _MockTransport()
     adapter = HttpBackendAdapter("https://portal.example.com", transport=transport)
 
@@ -128,7 +134,22 @@ def test_http_adapter_push_result_issues_post_with_result_and_provenance():
 
     assert transport.calls == [
         ("POST", "https://portal.example.com/api/experiments/exp_1/result",
-         {"result": {"n": 1}, "provenance": {"seed": 1}}),
+         {"result": {"n": 1}, "provenance": {"seed": 1}}, None),
+    ]
+
+
+def test_http_adapter_push_result_sends_bearer_token_when_configured():
+    """FIX A: `push_result` sends `Authorization: Bearer <token>` when the
+    adapter has a token, so it can reach the portal's token-gated `/result`
+    endpoint (`kalos/portal/app.py::push_experiment_result`)."""
+    transport = _MockTransport()
+    adapter = HttpBackendAdapter("https://portal.example.com", token="s3cr3t", transport=transport)
+
+    adapter.push_result("exp_1", {"n": 1}, {"seed": 1})
+
+    assert transport.calls == [
+        ("POST", "https://portal.example.com/api/experiments/exp_1/result",
+         {"result": {"n": 1}, "provenance": {"seed": 1}}, {"Authorization": "Bearer s3cr3t"}),
     ]
 
 
@@ -136,7 +157,7 @@ def test_http_adapter_strips_trailing_slash_from_base_url():
     transport = _MockTransport(response=[])
     adapter = HttpBackendAdapter("https://portal.example.com/", transport=transport)
     adapter.list_ready()
-    method, url, _ = transport.calls[0]
+    method, url, _json_body, _headers = transport.calls[0]
     assert url == "https://portal.example.com/api/experiments?status=READY"
 
 
@@ -163,9 +184,26 @@ def test_get_adapter_http_requires_backend_url(monkeypatch):
 def test_get_adapter_http_builds_http_adapter(monkeypatch):
     monkeypatch.setenv("KALOS_BACKEND", "http")
     monkeypatch.setenv("KALOS_BACKEND_URL", "https://portal.example.com")
+    monkeypatch.delenv("KALOS_RUNNER_TOKEN", raising=False)
+    monkeypatch.delenv("KALOS_BACKEND_TOKEN", raising=False)
     adapter = get_adapter()
     assert isinstance(adapter, HttpBackendAdapter)
     assert adapter.base_url == "https://portal.example.com"
+    assert adapter.token is None
+
+
+def test_get_adapter_http_token_prefers_runner_token_over_backend_token(monkeypatch):
+    """FIX A: `get_adapter()` sends `KALOS_RUNNER_TOKEN` (the same env var the
+    portal's `/result` token-gate reads) when set, falling back to the
+    already-documented `KALOS_BACKEND_TOKEN` otherwise."""
+    monkeypatch.setenv("KALOS_BACKEND", "http")
+    monkeypatch.setenv("KALOS_BACKEND_URL", "https://portal.example.com")
+    monkeypatch.setenv("KALOS_RUNNER_TOKEN", "runner-token")
+    monkeypatch.setenv("KALOS_BACKEND_TOKEN", "backend-token")
+    assert get_adapter().token == "runner-token"
+
+    monkeypatch.delenv("KALOS_RUNNER_TOKEN", raising=False)
+    assert get_adapter().token == "backend-token"
 
 
 def test_get_adapter_unknown_backend_raises(monkeypatch):
