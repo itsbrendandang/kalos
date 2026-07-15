@@ -7,45 +7,52 @@ mock: every number comes from an actual BoTorch fit + acquisition.
 
 Run:  python -m kalos.portal   (then open http://127.0.0.1:8050)
 Needs the portal extra:  pip install -e ".[portal]"
+
+This module wires up the FastAPI app, CORS, the `/` HTML route, and the
+legacy `/api/run|latest|single|multi` routes. The rest of the portal lives in
+sibling modules:
+  - `kalos.portal.uploads` - the untrusted-input boundary (`_parse_upload`,
+    `UploadRejected`, the upload size/shape caps).
+  - `kalos.portal.analysis` - the science (`_analyze` and its helpers).
+  - `kalos.portal.serialization` - JSON-safe serialization helpers.
+  - `kalos.portal.experiments` - the M2 `/api/experiments*` surface.
+Names historically imported `from kalos.portal.app import ...` are re-exported
+below so existing call sites and tests keep working unchanged.
 """
 from __future__ import annotations
 
-import dataclasses
-import hmac
-import io
 import json
 import logging
 import os
-import re
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
-from scipy.stats import spearmanr
 from starlette.concurrency import run_in_threadpool
 
-from kalos import __version__ as ENGINE_VERSION
-from kalos.core.conformal import q_from_residuals
-from kalos.core.evaluation import grouped_cv_report
-from kalos.core.splits import row_hash_groups
 from kalos.core.multiobjective import MultiObjectiveSurrogate, propose_multiobjective
 from kalos.core.optimize import propose
 from kalos.core.surrogate import DEVICE, DTYPE, FitError, Surrogate
-from kalos.data.anonymizer import _hash
-from kalos.portal.validate import column_provenance, provenance_dicts
-from kalos.store import ExperimentNotFound, IllegalTransition, SqliteStore, Status
-
-# `kalos.runner` imports `_analyze`/`UploadRejected` FROM this module, so the
-# adapter/singleton imports below are deferred (inside the endpoint functions
-# that need them) to avoid a circular import at module load time.
+from kalos.portal.analysis import _analyze, _annotate
+from kalos.portal.experiments import get_lock_path, get_store
+from kalos.portal.experiments import router as _experiments_router
+from kalos.portal.uploads import (
+    MAX_COLUMNS,
+    MAX_CSV_ROWS,
+    MAX_UPLOAD_BYTES,
+    MAX_XLSX_CELLS,
+    UploadRejected,
+    _ERR_FIT,
+    _ERR_PARSE,
+    _ERR_TOO_MANY_FIT_ROWS,
+    _parse_upload,
+)
 
 log = logging.getLogger("kalos.portal")
 
@@ -58,46 +65,6 @@ _TORCH_THREADS = int(os.environ.get("KALOS_TORCH_THREADS", str(min(4, os.cpu_cou
 torch.set_num_threads(max(1, _TORCH_THREADS))
 
 app = FastAPI(title="Kalos Engine API")
-
-# --- upload safety limits ---------------------------------------------------- #
-# This engine ingests untrusted run sheets from external clients, so the raw
-# upload and its parsed shape are capped to bound memory and blunt zip-bomb
-# expansion. Sizes are configurable via env; the CSV/xlsx caps are constants.
-_MAX_UPLOAD_MB = float(os.environ.get("KALOS_MAX_UPLOAD_MB", "25"))
-MAX_UPLOAD_BYTES = int(_MAX_UPLOAD_MB * 1024 * 1024)
-MAX_CSV_ROWS = 100_000       # rows read from a CSV/TSV upload
-MAX_COLUMNS = 512            # columns allowed in any upload (CSV or xlsx)
-MAX_XLSX_CELLS = 2_000_000   # rows * cols ceiling for a parsed xlsx (zip-bomb guard)
-_ZIP_MAGIC = b"PK\x03\x04"   # xlsx/xls-as-zip start-of-file marker
-
-# Separate, tighter cap on the rows the SURROGATE is actually fit on. A
-# SingleTaskGP is O(n^2) in memory and O(n^3) in time, so a raw upload that is
-# within MAX_CSV_ROWS can still be far too large for an exact GP. The optimizer
-# targets the small-sample bioprocess regime (N <= a couple thousand), so we
-# reject an over-cap fit set rather than silently subsampling (which would be
-# invisible, non-deterministic data loss). Override with KALOS_MAX_FIT_ROWS.
-MAX_FIT_ROWS = int(os.environ.get("KALOS_MAX_FIT_ROWS", "2000"))
-
-# Generic, non-leaking messages. We never echo the parser error, a column name,
-# or a cell value back to an unauthenticated caller.
-_ERR_PARSE = "Could not parse the uploaded file. Check it is a CSV or Excel run-sheet."
-_ERR_TOO_LARGE = "The uploaded file is too large."
-_ERR_TOO_MANY_COLUMNS = "The uploaded file has too many columns."
-_ERR_TOO_MANY_FIT_ROWS = (
-    "The dataset is too large for the surrogate; the optimizer targets the "
-    f"small-sample regime, N<={MAX_FIT_ROWS}."
-)
-# A numerically-hard-but-valid file (near-duplicate or ill-conditioned rows) that
-# defeats even the jittered fit retry gets its OWN message, so it is not confused
-# with the generic parse failure.
-_ERR_FIT = (
-    "The model could not be fit on this data - likely near-duplicate or "
-    "ill-conditioned rows."
-)
-
-
-class UploadRejected(ValueError):
-    """A client upload failed a safety guard. Carries a generic, safe message."""
 
 # Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
 app.add_middleware(
@@ -128,32 +95,6 @@ def _purity(X: np.ndarray) -> np.ndarray:
 def _objectives(X: np.ndarray) -> np.ndarray:
     x = np.atleast_2d(X)
     return np.stack([_titer(x), _purity(x)], axis=-1)
-
-
-def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
-    """Attach predicted value, uncertainty, and an explore/exploit rationale to
-    each proposed experiment. Explore = high model uncertainty (chosen to learn);
-    exploit = high predicted value (chosen to win). Current human-in-the-loop BO
-    research says a recommendation must carry exactly this."""
-    mean = np.asarray(mean, float).reshape(-1)
-    std = np.asarray(std, float).reshape(-1)
-    thr = float(np.quantile(std, 2 / 3)) if len(std) > 2 else float(std.max() if len(std) else 0.0)
-    eps = 0.02 * max(abs(best), 1e-9)
-    rows = []
-    for i in range(len(batch)):
-        m, sd = float(mean[i]), float(std[i])
-        gain = m - best
-        if gain > eps:
-            mode, reason = "exploit", f"predicted high (+{gain:.3g} vs best)"
-        elif sd >= thr:
-            mode, reason = "explore", f"reduce model uncertainty here (±{sd:.3g})"
-        else:
-            mode, reason = "explore", f"diversifies the batch (predicted {m:.3g}, ±{sd:.3g})"
-        row = {"pred": round(m, 3), "std": round(sd, 3), "mode": mode, "reason": reason}
-        row["vals"] = (np.round(batch[i], 3).tolist() if cols is None
-                       else [round(float(batch[i][j]), 3) for j in cols])
-        rows.append(row)
-    return rows
 
 
 # --- persistence of the most-recently analyzed real dataset ------------------ #
@@ -278,321 +219,6 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
     }
 
 
-# --- run the engine on an uploaded data file --------------------------------- #
-# Outcome-like columns are candidate TARGETS and are excluded from input features
-# so the model never "predicts" titer from another measured output (leakage).
-_OUTCOME_HINT = re.compile(r"titer|titre|yield|conc|purity|lipase|biomass|od\d|product|response|output|score|kda|activity|titer", re.I)
-_TARGET_PREF = re.compile(r"titer|titre|lipase|yield", re.I)
-_ID_HINT = re.compile(r"^(id|name|sample.*|well|index|run|experiment|round|date|time|medium|strain|recipe|batch|campaign|group|lot|notes?)$", re.I)
-_GROUP_HINT = re.compile(r"medium|strain|recipe|batch|campaign|group|lot", re.I)
-
-
-def _numeric_cols(df: pd.DataFrame) -> list:
-    # Numeric if >=80% of NON-BLANK cells parse as numbers. Blanks are treated as
-    # "absent" (filled with 0 later), so a sparse component column still counts.
-    out = []
-    for c in df.columns:
-        s = df[c]
-        nonblank = s.notna() & (s.astype(str).str.strip() != "")
-        if nonblank.sum() < 3:
-            continue
-        if pd.to_numeric(s[nonblank], errors="coerce").notna().mean() >= 0.8:
-            out.append(c)
-    return out
-
-
-# Deterministic seed for the analyze path. The same upload -> the same GP fit and
-# the same proposed batch, which matters for client reproducibility and audit.
-ANALYZE_SEED = 1234
-
-
-def _seed_everything(seed: int = ANALYZE_SEED) -> None:
-    """Seed torch + numpy so one upload yields one deterministic set of proposals."""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-
-def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Suffix duplicate column labels (`X`, `X.1`, ...) so every column is a Series.
-
-    A run sheet with a repeated header would otherwise make `df[label]` return a
-    2-D frame and break the analysis. pandas already does this on CSV read; we do
-    it here too so a directly-built frame (or an xlsx with duplicate headers) is
-    handled identically, and the duplicate stays visible in the provenance report.
-    """
-    if not df.columns.duplicated().any():
-        return df
-    seen: dict[str, int] = {}
-    new_cols: list[str] = []
-    for col in df.columns:
-        key = str(col)
-        if key in seen:
-            seen[key] += 1
-            new_cols.append(f"{key}.{seen[key]}")
-        else:
-            seen[key] = 0
-            new_cols.append(key)
-    out = df.copy()
-    out.columns = new_cols
-    return out
-
-
-def _analyze(
-    df: pd.DataFrame, target: str | None = None, *, anonymize: bool = False
-) -> dict:
-    """Run the engine on an arbitrary run sheet: pick the target (the value to
-    maximize), use the process INPUTS as features (other measured outputs are
-    excluded to avoid leakage), then honest grouped-CV, signed drivers, and a
-    proposed next batch.
-
-    Deterministic: seeds torch + numpy up front so the same sheet gives the same
-    proposals. Returns a per-column `provenance` report (what was kept/dropped and
-    why) plus `seed`, `timestamp`, and `engine_version` for audit. When
-    `anonymize` is True, identifier-type column names are replaced with stable
-    pseudonyms in the response (the owner UI keeps real names when False)."""
-    _seed_everything()
-    df = _dedupe_columns(df.dropna(axis=1, how="all"))
-    num = _numeric_cols(df)
-    if not num:
-        raise ValueError("no numeric columns found")
-    outcomes = [c for c in num if _OUTCOME_HINT.search(str(c))]
-    if target is None or target not in df.columns:
-        target = next((c for c in outcomes if _TARGET_PREF.search(str(c))), outcomes[0] if outcomes else num[-1])
-    feats = []
-    for c in num:
-        if c == target or _ID_HINT.match(str(c).strip()) or _OUTCOME_HINT.search(str(c)):
-            continue  # drop the target, ids, and OTHER measured outputs (anti-leakage)
-        col = pd.to_numeric(df[c], errors="coerce")
-        if col.std(skipna=True) and col.std() > 1e-9:
-            feats.append(c)
-    if len(feats) < 1:
-        raise ValueError("no varying process-input columns found (only outputs/ids?)")
-    candidate_targets = outcomes or [target]
-
-    y_all = pd.to_numeric(df[target], errors="coerce")
-    keep = y_all.notna()
-    X_raw = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce")   # NaN preserved (for grouping)
-    X_zf = X_raw.fillna(0.0)                                             # zero-filled (for the GP + box)
-    y = y_all[keep].to_numpy(float)
-    if len(y) < 6:
-        raise ValueError(f"need at least 6 rows with a numeric {target!r}; got {len(y)}")
-    # Cap the rows the O(n^2) exact GP is fit on, separately from the raw-upload
-    # cap. Reject rather than subsample: silent subsampling would be invisible,
-    # non-deterministic data loss and contradict the reproducibility contract.
-    if len(y) > MAX_FIT_ROWS:
-        raise UploadRejected(_ERR_TOO_MANY_FIT_ROWS)
-
-    # The design box is built from the target-present (fitted) rows, so the honest
-    # varying-feature check must be recomputed on THOSE rows, not the full column. A
-    # feature that varies over the whole sheet but is constant on the fitted rows
-    # would otherwise collapse its bound to zero width silently. Drop such features
-    # and record them so provenance flags them instead of misleading the client.
-    fitted_range = X_zf.max(axis=0) - X_zf.min(axis=0)
-    constant_on_fitted = [c for c in feats if float(fitted_range[c]) <= 1e-9]
-    if constant_on_fitted:
-        feats = [c for c in feats if c not in set(constant_on_fitted)]
-        if len(feats) < 1:
-            raise ValueError("no varying process-input columns on the target-present rows")
-        X_raw = X_raw.drop(columns=constant_on_fitted)
-        X_zf = X_zf.drop(columns=constant_on_fitted)
-
-    X = X_zf.to_numpy(float)
-    bounds = np.vstack([X.min(0), X.max(0)])
-
-    gcol = next((c for c in df.columns if _GROUP_HINT.search(str(c))), None)
-    if gcol:
-        groups = df.loc[keep, gcol].astype(str).tolist()
-    else:
-        # group on the RAW values (NaN preserved) so rows missing different
-        # components are not merged into one replicate group by the zero-fill —
-        # via the one leakage-checked, deterministic grouper.
-        groups = row_hash_groups(X_raw)
-
-    # honest grouped cross-validation: pooled out-of-fold predictions + a
-    # group-level bootstrap CI, all through the single leakage-checked splitter.
-    rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds)
-    rho = rep["spearman"]
-    oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
-
-    # distribution-free +/- band from the pooled out-of-fold residuals (approximate
-    # coverage under grouped CV). Honest alternative to the surrogate's own std,
-    # which is often overconfident on small bioprocess datasets.
-    resid = np.asarray(oof_a, float) - np.asarray(oof_p, float)
-    conformal_q = round(q_from_residuals(resid, alpha=0.1), 4) if len(resid) else None
-
-    # Honest reliability verdict: only what this path can actually assess. The
-    # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
-    # NOT assert feasibility or calibration gates, which are not measured here.
-    ci95 = None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)]
-    reliability = {
-        "spearman": None if rho != rho else round(rho, 3),
-        "ci95": ci95,
-        "spearman_floor": 0.20,
-        "clears_floor": bool(rho == rho and rho >= 0.20),
-        "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
-        "unmodeled": ["feasibility probability", "calibration (ECE)", "scale-up transfer"],
-    }
-
-    # signed drivers
-    drv = []
-    for c in feats:
-        r = spearmanr(pd.to_numeric(df.loc[keep, c], errors="coerce").fillna(0.0), y).statistic
-        drv.append([str(c), 0.0 if r != r else float(r)])
-    drv.sort(key=lambda d: -abs(d[1]))
-    drv = drv[:8]
-
-    # proposed next batch, with predicted target + uncertainty + a why per row
-    s = Surrogate().fit(X, y, bounds=bounds)
-    batch = propose(s, bounds, q=5)
-    show = [d[0] for d in drv[:4]]
-    show_idx = [feats.index(f) for f in show]
-    p_mean, p_std = s.posterior(batch)
-
-    # per-column provenance: what was kept as a feature, used as the target, or
-    # dropped (id / other output / constant / sparse), so the client is never left
-    # guessing about a silently dropped column. Mirrors the selection logic above.
-    provenance = provenance_dicts(
-        column_provenance(
-            df,
-            target=str(target),
-            features=[str(c) for c in feats],
-            numeric_cols=[str(c) for c in num],
-            id_hint=_ID_HINT,
-            outcome_hint=_OUTCOME_HINT,
-            constant_on_fitted_rows=[str(c) for c in constant_on_fitted],
-        )
-    )
-
-    result = {
-        "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
-        "targets": [str(c) for c in candidate_targets], "features": [str(c) for c in feats],
-        "cv_spearman": None if rho != rho else round(rho, 3),
-        "cv_ci95": ci95,
-        "cv_n_groups": rep["n_groups"],
-        "conformal_q": conformal_q,
-        "reliability": reliability,
-        "best": round(float(y.max()), 4),
-        "drivers": [{"name": c, "rho": round(r, 3)} for c, r in drv],
-        "proposal_features": show,
-        "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
-        "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
-        "provenance": provenance,
-        "seed": ANALYZE_SEED,
-        "timestamp": int(time.time()),
-        "engine_version": ENGINE_VERSION,
-    }
-    if anonymize:
-        result = _anonymize_result(result)
-    return result
-
-
-def _anonymize_result(result: dict) -> dict:
-    """Replace identifier-type column names in the response with stable pseudonyms.
-
-    Only identifier-like columns (matched by `_ID_HINT`) are renamed; process
-    features and the target keep their real names because the authenticated owner
-    UI legitimately shows them (a driver like "Methanol"). The mapping is stable
-    (same name -> same pseudonym) via the anonymizer's irreversible hash, so an
-    anonymized report is still internally consistent across fields.
-    """
-    def alias(name: str) -> str:
-        return f"col_{_hash(name)[:8]}" if _ID_HINT.match(str(name).strip()) else name
-
-    out = dict(result)
-    if out.get("group_col"):
-        out["group_col"] = alias(out["group_col"])
-    out["provenance"] = [
-        {**row, "name": alias(row["name"])} for row in out.get("provenance", [])
-    ]
-    return out
-
-
-def _reject_oversized_xlsx(raw: bytes) -> None:
-    """Reject an xlsx whose declared dimensions exceed the cell / column caps,
-    BEFORE `pd.read_excel` materializes the frame (the zip-bomb guard).
-
-    Opens the workbook read-only with openpyxl and reads each sheet's declared
-    dimension (`max_row * max_column`) without loading cell values. If any sheet's
-    declared cell count exceeds `MAX_XLSX_CELLS` (or its column count exceeds
-    `MAX_COLUMNS`), raise `UploadRejected` so the caller never allocates the full
-    frame. A corrupt or unreadable zip raises `UploadRejected` too (client error).
-    """
-    import openpyxl
-
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
-    except Exception as exc:  # noqa: BLE001 - corrupt/non-xlsx zip -> generic 400
-        log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
-        raise UploadRejected(_ERR_PARSE) from exc
-    try:
-        for ws in wb.worksheets:
-            cols = ws.max_column or 0
-            rows = ws.max_row or 0
-            if cols > MAX_COLUMNS:
-                raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-            if rows * cols > MAX_XLSX_CELLS:
-                raise UploadRejected(_ERR_TOO_LARGE)
-    finally:
-        wb.close()
-
-
-def _parse_upload(raw: bytes) -> pd.DataFrame:
-    """Turn raw upload bytes into a bounded dataframe, or raise `UploadRejected`.
-
-    Guards, in order:
-      1. byte-size cap (default 25 MB, env `KALOS_MAX_UPLOAD_MB`);
-      2. filetype sniff by MAGIC BYTES, not extension: a zip header (`PK\\x03\\x04`)
-         is treated as xlsx/xls, anything else as UTF-8 text/CSV;
-      3. shape caps: CSV/TSV rows and a column ceiling, and an xlsx cell-count
-         (rows * cols) ceiling to blunt zip-bomb expansion.
-    All rejection messages are generic (no parser text, column, or cell echoed).
-    """
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise UploadRejected(_ERR_TOO_LARGE)
-
-    if raw[:4] == _ZIP_MAGIC:
-        # xlsx/xls: enforce the cell-count ceiling BEFORE pd.read_excel fully
-        # materializes the frame, so a zip-bomb whose DECLARED sheet dimensions are
-        # enormous is rejected without the memory spike of building the DataFrame.
-        # A zip header on a corrupt or non-xlsx zip (BadZipFile, openpyxl's
-        # InvalidFileException, ValueError) is a client error, not a server one.
-        _reject_oversized_xlsx(raw)
-        try:
-            df = pd.read_excel(io.BytesIO(raw))
-        except Exception as exc:  # noqa: BLE001 - normalized to a generic 400 below
-            log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
-            raise UploadRejected(_ERR_PARSE) from exc
-        rows, cols = df.shape
-        # Belt-and-suspenders: re-check the materialized shape. The pre-read guard
-        # uses the sheet's declared dimensions; this catches a mismatch and the
-        # column ceiling on the actual parsed frame.
-        if cols > MAX_COLUMNS:
-            raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-        if rows * cols > MAX_XLSX_CELLS:
-            raise UploadRejected(_ERR_TOO_LARGE)
-        return df
-
-    # Otherwise treat as text/CSV. A binary blob that is neither a zip nor valid
-    # tabular text will not yield usable numeric columns and is rejected downstream
-    # with the same generic parse message.
-    text = raw.decode("utf-8", errors="replace")
-    if text.strip() == "":
-        raise UploadRejected(_ERR_PARSE)
-    head = text[:4000]
-    sep = "\t" if head.count("\t") > head.count(",") else ","
-    # cap columns first (cheap, from the header) before reading the full body
-    ncols = pd.read_csv(io.StringIO(text), sep=sep, nrows=0).shape[1]
-    if ncols > MAX_COLUMNS:
-        raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-    df = pd.read_csv(io.StringIO(text), sep=sep)
-    # Fail closed on the row cap rather than silently truncating to the first
-    # MAX_CSV_ROWS rows: silent data loss would contradict the safe-errors
-    # contract, so an over-cap CSV is rejected like the xlsx cell-cap guard.
-    if len(df) > MAX_CSV_ROWS:
-        raise UploadRejected(_ERR_TOO_LARGE)
-    return df
-
-
 def _run_uploaded_sync(raw: bytes, target: str | None, anonymize: bool, filename: str) -> dict:
     """The CPU-bound body of an upload: parse -> analyze -> persist -> result.
 
@@ -653,302 +279,21 @@ async def run_uploaded(
 
 
 # --- M2.2: /api/experiments - thin wrappers over the store + Singleton runner  #
-# (docs/M2_INTEGRATION.md, "Portal API additions"). Every endpoint above this
-# point is unchanged; everything below is additive.
+# (docs/M2_INTEGRATION.md, "Portal API additions"). The routes themselves live
+# in `kalos.portal.experiments`; mounted here so they are served by this app.
+app.include_router(_experiments_router)
 
-# Module-level singleton store + injectable lock path, resolved lazily through
-# FastAPI dependencies so tests can override both via `app.dependency_overrides`
-# and never touch the real `~/.kalos/experiments.db` or `~/.kalos/runner.lock`.
-_STORE: SqliteStore | None = None
-_RUNNER_LOCK_PATH: str | Path | None = None
-
-
-def get_store() -> SqliteStore:
-    """The module-level `SqliteStore` at the default `~/.kalos/experiments.db`.
-
-    Tests MUST override this via `app.dependency_overrides[get_store]` to
-    point at a `tmp_path` store.
-    """
-    global _STORE
-    if _STORE is None:
-        _STORE = SqliteStore()
-    return _STORE
-
-
-def get_lock_path() -> str | Path | None:
-    """The Singleton runner lock path. `None` defers to the runner's own
-    default (`~/.kalos/runner.lock`); tests override this via
-    `app.dependency_overrides[get_lock_path]` to point at a `tmp_path` lock.
-    """
-    return _RUNNER_LOCK_PATH
-
-
-class _PatchStatusBody(BaseModel):
-    """Body for `PATCH /api/experiments/{id}`. Mirrors the `set_status` shape
-    `HttpBackendAdapter` already sends (`kalos/runner/adapter.py`)."""
-
-    status: str
-    force: bool = False
-    error: str | None = None
-
-
-@app.get("/api/experiments")
-def list_experiments(
-    status: str | None = None, store: SqliteStore = Depends(get_store)
-) -> list[dict[str, Any]]:
-    """`{id, name, status, updated_at}` for every experiment, oldest first.
-
-    Optional `?status=` filters to one status (e.g. `READY`, the filter
-    `HttpBackendAdapter.list_ready` sends, `kalos/runner/adapter.py`);
-    omitted, the default and unchanged behavior, returns every experiment.
-    """
-    status_filter: Status | None = None
-    if status is not None:
-        try:
-            status_filter = Status(status)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"unknown status {status!r}")
-    return [
-        {"id": e.id, "name": e.name, "status": e.status.value, "updated_at": e.updated_at}
-        for e in store.list(status=status_filter)
-    ]
-
-
-def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
-    """DataFrame rows as JSON-safe dicts: NaN/NaT/inf -> None.
-
-    Missing cells arrive from pandas as float NaN; Starlette's JSONResponse
-    encodes with allow_nan=False, so an un-sanitized NaN 500s the response.
-    Coerce every non-finite float and NaT to JSON null, so both the stored
-    payload and the HTTP response are valid JSON. None round-trips back to NaN
-    when `_payload_to_frame` rebuilds the DataFrame for the Singleton.
-    """
-    safe = df.astype(object).where(pd.notna(df), None)
-    records: list[dict[str, Any]] = safe.to_dict(orient="records")
-    for row in records:
-        for key, val in row.items():
-            if isinstance(val, float) and not np.isfinite(val):
-                row[key] = None
-    return records
-
-
-@app.post("/api/experiments")
-async def create_experiment(
-    file: UploadFile = File(...),
-    name: str = Form(...),
-    target: str = Form(default=""),
-    outcomes: str = Form(default=""),
-    anonymize: bool = Form(default=False),
-    store: SqliteStore = Depends(get_store),
-) -> JSONResponse:
-    """Create an experiment (DRAFT) from an uploaded run sheet.
-
-    Reuses `_parse_upload` - the exact CSV/xlsx parsing path `/api/run` already
-    uses - to turn the upload into a DataFrame, then stores it as the
-    `{columns, rows}` payload the Experiment contract documents. `target`,
-    `outcomes` (comma-separated column names), and `anonymize` become `config`,
-    matching `/api/run`'s multipart Form style.
-    """
-    raw = await file.read()
-    try:
-        df = await run_in_threadpool(_parse_upload, raw)
-    except UploadRejected as rej:
-        log.warning("experiment create rejected: %s", rej)
-        return JSONResponse({"error": str(rej)}, status_code=400)
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError, UnicodeError):
-        log.exception("failed to parse an uploaded run sheet for experiment create")
-        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
-    except Exception:  # noqa: BLE001 - normalized to a generic 400, same as /api/run
-        log.exception("failed to parse an uploaded run sheet for experiment create")
-        return JSONResponse({"error": _ERR_PARSE}, status_code=400)
-
-    config: dict[str, Any] = {"target": target or None, "anonymize": anonymize}
-    if outcomes.strip():
-        config["outcomes"] = [c.strip() for c in outcomes.split(",") if c.strip()]
-    payload = {"columns": [str(c) for c in df.columns], "rows": _json_safe_records(df)}
-    exp = store.create(name, payload, config)
-    return JSONResponse(exp.to_dict(), status_code=201)
-
-
-@app.get("/api/experiments/{exp_id}")
-def get_experiment(exp_id: str, store: SqliteStore = Depends(get_store)) -> dict[str, Any]:
-    """The full experiment, including `result`. 404 if it does not exist."""
-    try:
-        return store.get(exp_id).to_dict()
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-
-
-@app.patch("/api/experiments/{exp_id}")
-def patch_experiment_status(
-    exp_id: str, body: _PatchStatusBody, store: SqliteStore = Depends(get_store)
-) -> dict[str, Any]:
-    """Set an experiment's status - this is how the front end flips the READY
-    flag.
-
-    A CLIENT-FACING ALLOWLIST, enforced here (not just `legal_transition`):
-    the only status a client may PATCH to is `READY` - allowed from `DRAFT`
-    and `FAILED` (retry), and from `DONE` only with `force=true` (re-queue).
-    Any target of `PROCESSING`/`DONE`/`FAILED` is rejected with a 409 before
-    it ever reaches the store, because those are set by the runner
-    (`kalos/runner/singleton.py`), not by a client request - without this, a
-    client could walk an experiment DRAFT -> READY -> PROCESSING -> DONE via
-    PATCH alone, reaching DONE with an empty `result`. A request whose
-    experiment is currently `PROCESSING` is rejected too, even when the
-    target is `READY` - that edge is legal at the store layer ONLY for the
-    Singleton's own orphan recovery (`reclaim_stale`), never for a client.
-    An illegal transition that survives the allowlist (e.g. `DONE -> READY`
-    without `force`) is still a 409, not a crash.
-    """
-    try:
-        new_status = Status(body.status)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"unknown status {body.status!r}")
-
-    if new_status != Status.READY:
-        raise HTTPException(
-            status_code=409,
-            detail=f"status {new_status.value!r} is set by the runner, not directly settable",
-        )
-
-    try:
-        current = store.get(exp_id)
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-
-    if current.status == Status.PROCESSING:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"experiment {exp_id!r} is currently PROCESSING; status is set by "
-                "the runner, not directly settable"
-            ),
-        )
-
-    try:
-        exp = store.set_status(exp_id, new_status, force=body.force, error=body.error)
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-    except IllegalTransition as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return exp.to_dict()
-
-
-class _PushResultBody(BaseModel):
-    """Body for `POST /api/experiments/{id}/result` - the result-push
-    endpoint `HttpBackendAdapter.push_result` targets (see
-    `kalos/runner/adapter.py`)."""
-
-    result: dict[str, Any]
-    provenance: dict[str, Any]
-
-
-def _check_runner_token(authorization: str | None) -> None:
-    """Token-gate `/result` (SECURITY - see the module section header below).
-
-    Without this, `/result` accepted an unauthenticated `{result,
-    provenance}` from anyone and marked a `PROCESSING` experiment `DONE`,
-    letting an attacker race a fabricated result in ahead of the genuine one.
-
-    Reads `KALOS_RUNNER_TOKEN` from the environment AT REQUEST TIME (not
-    import time), so tests can monkeypatch/env-override it per-test:
-      - unset -> the endpoint is disabled entirely: 404. The local M2 loop
-        (`LocalStoreAdapter`) never calls this endpoint - it writes to the
-        store directly - so only a remote runner needs it, and it must be
-        opted into explicitly.
-      - set -> the caller must send `Authorization: Bearer <token>` matching
-        EXACTLY (constant-time compare via `hmac.compare_digest`, so a wrong
-        guess cannot be timed byte-by-byte); missing or wrong -> 401.
-    Never logs the token.
-    """
-    token = os.environ.get("KALOS_RUNNER_TOKEN")
-    if not token:
-        raise HTTPException(status_code=404, detail="not found")
-    provided = None
-    if authorization and authorization.startswith("Bearer "):
-        provided = authorization[len("Bearer ") :]
-    if not provided or not hmac.compare_digest(provided, token):
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-
-@app.post("/api/experiments/{exp_id}/result")
-def push_experiment_result(
-    exp_id: str,
-    body: _PushResultBody,
-    authorization: str | None = Header(default=None),
-    store: SqliteStore = Depends(get_store),
-) -> dict[str, Any]:
-    """Ingest a processed result + provenance and mark the experiment DONE
-    (`SqliteStore.save_result`) - only legal from `PROCESSING`. This is the
-    push endpoint the Singleton's `HttpBackendAdapter` targets; the LOCAL
-    Singleton path (`LocalStoreAdapter`, the M2 default) calls
-    `store.save_result` directly and never goes through this HTTP endpoint.
-
-    Token-gated and off by default - see `_check_runner_token`: unset
-    `KALOS_RUNNER_TOKEN` -> 404, missing/wrong bearer -> 401. Also rejects an
-    experiment that already has a non-null `result` with 409 ("result
-    already present"), independent of the `PROCESSING`-only rule already
-    enforced by `save_result` - an integrity/idempotency guard so a stray or
-    racing push can never silently overwrite a genuine result.
-    """
-    _check_runner_token(authorization)
-
-    try:
-        current = store.get(exp_id)
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-    if current.result is not None:
-        raise HTTPException(status_code=409, detail="result already present")
-
-    try:
-        exp = store.save_result(exp_id, body.result, body.provenance)
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-    except IllegalTransition as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return exp.to_dict()
-
-
-@app.post("/api/experiments/{exp_id}/run")
-def run_experiment(
-    exp_id: str,
-    force: bool = False,
-    store: SqliteStore = Depends(get_store),
-    lock_path: str | Path | None = Depends(get_lock_path),
-) -> dict[str, Any]:
-    """Run one experiment now (`singleton.run_one`). The run always completes:
-    a zero-variance target (or any other analysis failure) lands the
-    experiment on FAILED with the actionable message at HTTP 200 - the run
-    itself did not error, the experiment did.
-    """
-    from kalos.runner.adapter import LocalStoreAdapter  # deferred: see import note above
-    from kalos.runner.singleton import run_one
-
-    adapter = LocalStoreAdapter(store)
-    try:
-        run_one(adapter, exp_id, force=force, lock_path=lock_path)
-    except ExperimentNotFound:
-        raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
-    except (ValueError, RuntimeError) as exc:
-        # Already DONE without force, or the Singleton lock is held elsewhere.
-        raise HTTPException(status_code=409, detail=str(exc))
-    return store.get(exp_id).to_dict()
-
-
-@app.post("/api/experiments/run-ready")
-def run_all_ready(
-    store: SqliteStore = Depends(get_store),
-    lock_path: str | Path | None = Depends(get_lock_path),
-) -> list[dict[str, Any]]:
-    """Run every READY experiment now (`singleton.run_ready`) and return a
-    per-experiment summary.
-
-    Synchronous by design for M2 (single-tenant local, deterministic) -
-    see docs/M2_INTEGRATION.md, "Keep the run endpoints synchronous for M2".
-    """
-    from kalos.runner.adapter import LocalStoreAdapter  # deferred: see import note above
-    from kalos.runner.singleton import run_ready
-
-    adapter = LocalStoreAdapter(store)
-    results = run_ready(adapter, lock_path=lock_path)
-    return [dataclasses.asdict(r) for r in results]
+__all__ = [
+    "app",
+    "get_store",
+    "get_lock_path",
+    "_analyze",
+    "UploadRejected",
+    "MAX_COLUMNS",
+    "MAX_CSV_ROWS",
+    "MAX_UPLOAD_BYTES",
+    "MAX_XLSX_CELLS",
+    "_ERR_FIT",
+    "_ERR_PARSE",
+    "_ERR_TOO_MANY_FIT_ROWS",
+]

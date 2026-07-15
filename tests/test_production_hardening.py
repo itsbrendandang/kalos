@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from kalos.core.surrogate import FitError  # noqa: E402
 from kalos.data.anonymizer import _hash, default_salt  # noqa: E402
+from kalos.portal import analysis as portal_analysis  # noqa: E402
 from kalos.portal import app as portal  # noqa: E402
 from kalos.portal.app import (  # noqa: E402
     _ERR_FIT,
@@ -53,7 +54,9 @@ def _post(df: pd.DataFrame, **data):
 def test_row_cap_rejects_before_fitting(monkeypatch):
     # The O(n^2) exact GP must be guarded separately from the raw-upload cap. With
     # a low cap, a sheet above it is rejected (not silently subsampled, not OOM'd).
-    monkeypatch.setattr(portal, "MAX_FIT_ROWS", 20)
+    # `_analyze` (kalos.portal.analysis) reads the cap it imported from
+    # kalos.portal.uploads into its own module globals, so patch it THERE.
+    monkeypatch.setattr(portal_analysis, "MAX_FIT_ROWS", 20)
     r = _post(_sheet(40))
     assert r.status_code == 400
     assert r.json()["error"] == _ERR_TOO_MANY_FIT_ROWS

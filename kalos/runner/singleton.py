@@ -23,7 +23,8 @@ import numpy as np
 import pandas as pd
 
 from kalos.core.replicates import noise_report
-from kalos.portal.app import UploadRejected, _analyze
+from kalos.portal.analysis import _analyze
+from kalos.portal.uploads import UploadRejected
 from kalos.runner.adapter import BackendAdapter
 from kalos.store.models import Status
 
