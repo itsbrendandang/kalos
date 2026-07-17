@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from kalos.core.drivers import bootstrap_spearman
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.splits import row_hash_groups
@@ -216,18 +217,39 @@ def _analyze(
         "unmodeled": ["feasibility probability", "calibration (ECE)", "scale-up transfer"],
     }
 
-    # signed drivers
+    # signed drivers, each with a bootstrap 95% CI so the client can tell a real
+    # driver from noise. A driver whose CI straddles zero is NOT distinguishable
+    # from no-correlation at this sample size; the UI must not present it as a
+    # finding. (Same honesty contract as `reliability.ci_excludes_zero` above.)
     drv = []
-    for c in feats:
-        r = spearmanr(pd.to_numeric(df.loc[keep, c], errors="coerce").fillna(0.0), y).statistic
-        drv.append([str(c), 0.0 if r != r else float(r)])
-    drv.sort(key=lambda d: -abs(d[1]))
+    if feats:
+        Z = np.column_stack(
+            [pd.to_numeric(df.loc[keep, c], errors="coerce").fillna(0.0).to_numpy() for c in feats]
+        )
+        boot = bootstrap_spearman(Z, y, feature_names=[str(c) for c in feats])
+        for j, c in enumerate(feats):
+            # NB: a distinct name (not `rho`) - the outer `rho` is the model's CV
+            # Spearman that `cv_spearman`/`reliability` read below; shadowing it
+            # here would clobber the headline reliability number.
+            d_rho = float(boot["mean"][j])
+            lo, hi = float(boot["lo"][j]), float(boot["hi"][j])
+            if d_rho != d_rho:
+                d_rho, lo, hi = 0.0, 0.0, 0.0
+            drv.append(
+                {
+                    "name": str(c),
+                    "rho": round(d_rho, 3),
+                    "ci95": [round(lo, 3), round(hi, 3)],
+                    "significant": bool(lo > 0 or hi < 0),  # 95% CI excludes zero
+                }
+            )
+    drv.sort(key=lambda d: -abs(d["rho"]))
     drv = drv[:8]
 
     # proposed next batch, with predicted target + uncertainty + a why per row
     s = Surrogate().fit(X, y, bounds=bounds)
     batch = propose(s, bounds, q=5)
-    show = [d[0] for d in drv[:4]]
+    show = [d["name"] for d in drv[:4]]
     show_idx = [feats.index(f) for f in show]
     p_mean, p_std = s.posterior(batch)
     # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
@@ -262,7 +284,7 @@ def _analyze(
         "conformal_q": conformal_q,
         "reliability": reliability,
         "best": round(float(y.max()), 4),
-        "drivers": [{"name": c, "rho": round(r, 3)} for c, r in drv],
+        "drivers": drv,
         "proposal_features": show,
         "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
