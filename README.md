@@ -22,6 +22,8 @@ kalos/
     drivers.py         signed Spearman drivers with bootstrap confidence intervals
     conformal.py       split-conformal prediction intervals (distribution-free)
     gates.py           fail-closed promotion gates
+  kit/
+    __init__.py        torch-free facade re-exporting splits/drivers/conformal/gates/anonymizer
   data/
     anonymizer.py      strip identity, hash grouping keys
     barcode_registry.py  legacy run registry (not part of the Experiment pipeline)
@@ -89,16 +91,23 @@ batch). Because the sheet comes from an external client, the upload path is guar
 
 ## Install / run
 
+The core install is **torch-free**: `numpy` / `pandas` / `scikit-learn` / `scipy`
+only, enough to use `kalos.kit` (leakage-controlled splits, signed Spearman
+drivers, split-conformal intervals, promotion gates, the anonymizer). The GP
+surrogate, acquisition, and grouped-CV evaluation need the `ml` extra
+(torch / botorch / gpytorch).
+
 ```bash
-python -m pip install -e .              # core (torch / botorch / gpytorch)
+python -m pip install -e .              # core, torch-free (kalos.kit primitives only)
+python -m pip install -e ".[ml]"        # + the BoTorch engine (surrogate, optimize, evaluation)
 python -m pip install -e ".[protein]"   # + real ESM-2 (transformers)
 
-python examples/run_bo_loop.py          # BoTorch closed-loop demo
-python examples/run_multiobjective.py   # multi-objective (titer + purity) Pareto demo
+python examples/run_bo_loop.py          # BoTorch closed-loop demo (needs [ml])
+python examples/run_multiobjective.py   # multi-objective (titer + purity) Pareto demo (needs [ml])
 python examples/run_protein_embed.py    # ESM-2 embedding demo (downloads a small model)
 python -m pytest                        # tests (KALOS_TEST_ESM=1 to include ESM-2)
 
-python -m pip install -e ".[portal]"    # the web portal (FastAPI)
+python -m pip install -e ".[ml,portal]" # the web portal (FastAPI) drives the live GP, so it needs [ml] too
 python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
 ```
 
