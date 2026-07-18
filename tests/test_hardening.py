@@ -292,7 +292,7 @@ def _xlsx_with_declared_dims(ref: str) -> bytes:
     names = zin.namelist()
     sheet = next(n for n in names if n.startswith("xl/worksheets/sheet"))
     xml = re.sub(
-        r'<dimension ref="[^"]*"/>', f'<dimension ref="{ref}"/>', zin.read(sheet).decode()
+        r'<dimension ref="[^"]*"\s*/>', f'<dimension ref="{ref}"/>', zin.read(sheet).decode()
     )
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
+import zipfile
 
 import pandas as pd
 
@@ -52,15 +54,41 @@ class UploadRejected(ValueError):
     """A client upload failed a safety guard. Carries a generic, safe message."""
 
 
-def _reject_oversized_xlsx(raw: bytes) -> None:
-    """Reject an xlsx whose declared dimensions exceed the cell / column caps,
-    BEFORE `pd.read_excel` materializes the frame (the zip-bomb guard).
+_SHEET_XML_RE = re.compile(r"^xl/worksheets/sheet\d+\.xml$")
+_DIMENSION_RE = re.compile(rb'<dimension\s+ref="([^"]+)"\s*/?>')
+_CELL_REF_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+# The <dimension> tag is schema-guaranteed to precede the (potentially huge)
+# <sheetData> section, so a bounded prefix read is enough to find it - this
+# keeps the guard cheap even against a sheet whose real (not just declared)
+# content is itself a compressed-XML bomb.
+_DIMENSION_SCAN_BYTES = 65_536
 
-    Opens the workbook read-only with openpyxl and reads each sheet's declared
-    dimension (`max_row * max_column`) without loading cell values. If any sheet's
-    declared cell count exceeds `MAX_XLSX_CELLS` (or its column count exceeds
-    `MAX_COLUMNS`), raise `UploadRejected` so the caller never allocates the full
-    frame. A corrupt or unreadable zip raises `UploadRejected` too (client error).
+
+def _col_letters_to_index(letters: str) -> int:
+    """Convert a 1-based spreadsheet column label (A, Z, AA, SF, ...) to an index."""
+    idx = 0
+    for ch in letters.upper():
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx
+
+
+def _parse_dimension_ref(ref: str) -> tuple[int, int] | None:
+    """Parse a `<dimension ref="...">` value (e.g. `A1:SF1048576`, or a single
+    cell like `A1`) into its 1-based (rows, cols) extent. Returns None if the
+    bottom-right cell reference does not match the expected `<letters><digits>`
+    shape (defensive - callers fall back to openpyxl in that case).
+    """
+    end = ref.split(":")[-1].strip()
+    m = _CELL_REF_RE.match(end)
+    if not m:
+        return None
+    col_letters, row_str = m.groups()
+    return int(row_str), _col_letters_to_index(col_letters)
+
+
+def _reject_oversized_xlsx_via_openpyxl(raw: bytes) -> None:
+    """Fallback guard for the rare sheet with no `<dimension>` tag: open read-only
+    with openpyxl and check its computed `max_row` / `max_column` instead.
     """
     import openpyxl
 
@@ -79,6 +107,55 @@ def _reject_oversized_xlsx(raw: bytes) -> None:
                 raise UploadRejected(_ERR_TOO_LARGE)
     finally:
         wb.close()
+
+
+def _reject_oversized_xlsx(raw: bytes) -> None:
+    """Reject an xlsx whose declared dimensions exceed the cell / column caps,
+    BEFORE `pd.read_excel` materializes the frame (the zip-bomb guard).
+
+    Reads each sheet's `<dimension ref="...">` tag straight out of the raw zip
+    entry (`xl/worksheets/sheet*.xml`) via a lightweight regex - this is the
+    DECLARED shape a crafted workbook can inflate independently of its real
+    content, so it must be checked without ever asking openpyxl or pandas to
+    walk (and thus materialize) the sheet. If a sheet has no `<dimension>` tag,
+    falls back to opening it read-only with openpyxl and using its computed
+    `max_row` / `max_column`. A corrupt or unreadable zip raises
+    `UploadRejected` (client error).
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile as exc:
+        log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
+        raise UploadRejected(_ERR_PARSE) from exc
+
+    with zf:
+        sheet_names = [n for n in zf.namelist() if _SHEET_XML_RE.match(n)]
+        if not sheet_names:
+            # Not a recognizable xlsx layout (or a non-xlsx zip) - let openpyxl's
+            # own validation produce the generic parse-rejection.
+            _reject_oversized_xlsx_via_openpyxl(raw)
+            return
+
+        needs_fallback = False
+        for name in sheet_names:
+            with zf.open(name) as sheet_file:
+                head = sheet_file.read(_DIMENSION_SCAN_BYTES)
+            match = _DIMENSION_RE.search(head)
+            if not match:
+                needs_fallback = True
+                continue
+            parsed = _parse_dimension_ref(match.group(1).decode("ascii", errors="replace"))
+            if parsed is None:
+                needs_fallback = True
+                continue
+            rows, cols = parsed
+            if cols > MAX_COLUMNS:
+                raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
+            if rows * cols > MAX_XLSX_CELLS:
+                raise UploadRejected(_ERR_TOO_LARGE)
+
+    if needs_fallback:
+        _reject_oversized_xlsx_via_openpyxl(raw)
 
 
 def _parse_upload(raw: bytes) -> pd.DataFrame:
