@@ -2,6 +2,28 @@
 
 Newest first.
 
+## 2026-07-18
+
+### Changed - torch/botorch/gpytorch are now optional (`kalos[ml]`); new `kalos.kit` torch-free facade
+Phase 1 of engine consolidation: a sibling repo (`voyager-brain-rebuild`, deliberately torch-free)
+is meant to import Kalos's leakage-controlled splits, driver analysis, conformal intervals,
+promotion gates, and anonymizer instead of keeping its own copies. That only works if installing
+`kalos` does not drag in a ~220 MB torch/botorch/gpytorch stack.
+
+- `pyproject.toml`: `torch`, `botorch`, `gpytorch` moved out of core `dependencies` into a new
+  `ml` extra. Core install (`pip install kalos`) is now torch-free: `numpy` / `pandas` /
+  `scikit-learn` / `scipy` only. The `portal` extra still needs the live GP, so it is installed as
+  `kalos[ml,portal]`.
+- `kalos/kit/__init__.py` (new): a thin re-export facade over the already-torch-free
+  `kalos.core.splits`, `kalos.core.drivers`, `kalos.core.conformal`, `kalos.core.gates`, and
+  `kalos.data.anonymizer`. Nothing moved - existing imports like
+  `from kalos.core.drivers import ...` are unchanged. `import kalos.kit` is guaranteed to never
+  load torch (`tests/test_kit_torch_free.py`).
+- No behavior changes: `kalos/__init__.py` and `kalos/core/__init__.py` were already lazy-loading
+  the torch-dependent surrogate/optimize/evaluation exports (PEP 562 `__getattr__`) from a prior
+  commit; this change only reorganizes the install metadata and adds the `kit` facade on top of
+  that existing lazy-load boundary.
+
 ## 2026-07-06
 
 ### Added - Replicate-aware aggregation + assay noise floor + fixed-noise GP (`kalos/core/replicates.py`)

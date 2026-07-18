@@ -10,9 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 dependencies = [
-  "torch>=2.2",
-  "botorch>=0.11",
-  "gpytorch>=1.11",
   "numpy>=1.24",
   "pandas>=2.0",
   "scikit-learn>=1.3",
@@ -20,9 +17,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The BoTorch/GPyTorch GP surrogate, optimizer, and grouped-CV evaluation. The
+# torch-free `kalos.kit` primitives (splits, drivers, conformal, gates,
+# anonymizer) do not need this extra.
+ml = ["torch>=2.2", "botorch>=0.11", "gpytorch>=1.11"]
 # Real ESM-2 / BioNeMo protein embeddings. The lean KmerEmbedder needs none of this.
 protein = ["transformers>=4.40"]
-# The web portal (FastAPI viewer over the live engine).
+# The web portal (FastAPI viewer over the live engine). The portal drives the
+# live GP surrogate, so it needs `ml` too - install as `kalos[ml,portal]`.
 portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
 dev = ["pytest>=7"]
 
