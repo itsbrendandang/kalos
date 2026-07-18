@@ -11,9 +11,8 @@ import time
 
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr
 
-from kalos.core.drivers import bootstrap_spearman
+from kalos.core.drivers import bootstrap_spearman, spearman_driver_matrix
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.splits import row_hash_groups
@@ -221,26 +220,25 @@ def _analyze(
     # driver from noise. A driver whose CI straddles zero is NOT distinguishable
     # from no-correlation at this sample size; the UI must not present it as a
     # finding. (Same honesty contract as `reliability.ci_excludes_zero` above.)
+    # `rho` is the sample Spearman POINT estimate (consistent with the point
+    # estimate `reliability.spearman` reports); the bootstrap supplies only the CI.
     drv = []
     if feats:
-        Z = np.column_stack(
-            [pd.to_numeric(df.loc[keep, c], errors="coerce").fillna(0.0).to_numpy() for c in feats]
-        )
-        boot = bootstrap_spearman(Z, y, feature_names=[str(c) for c in feats])
+        names = [str(c) for c in feats]
+        point = spearman_driver_matrix(X, y, feature_names=names)["rho"]
+        boot = bootstrap_spearman(X, y, feature_names=names)
         for j, c in enumerate(feats):
-            # NB: a distinct name (not `rho`) - the outer `rho` is the model's CV
-            # Spearman that `cv_spearman`/`reliability` read below; shadowing it
-            # here would clobber the headline reliability number.
-            d_rho = float(boot["mean"][j])
-            lo, hi = float(boot["lo"][j]), float(boot["hi"][j])
-            if d_rho != d_rho:
-                d_rho, lo, hi = 0.0, 0.0, 0.0
+            lo, hi = round(float(boot["lo"][j]), 3), round(float(boot["hi"][j]), 3)
             drv.append(
                 {
+                    "_idx": j,
                     "name": str(c),
-                    "rho": round(d_rho, 3),
-                    "ci95": [round(lo, 3), round(hi, 3)],
-                    "significant": bool(lo > 0 or hi < 0),  # 95% CI excludes zero
+                    "rho": round(float(point[j]), 3),
+                    "ci95": [lo, hi],
+                    # significance uses the SAME rounded bounds the client sees, so
+                    # the flag never disagrees with the displayed CI. Two-sided: a
+                    # strong negative driver is a finding too.
+                    "significant": bool(lo > 0 or hi < 0),
                 }
             )
     drv.sort(key=lambda d: -abs(d["rho"]))
@@ -250,7 +248,9 @@ def _analyze(
     s = Surrogate().fit(X, y, bounds=bounds)
     batch = propose(s, bounds, q=5)
     show = [d["name"] for d in drv[:4]]
-    show_idx = [feats.index(f) for f in show]
+    show_idx = [d["_idx"] for d in drv[:4]]  # carry the feature index, not a name lookup
+    for d in drv:
+        d.pop("_idx", None)  # internal-only; not part of the returned API surface
     p_mean, p_std = s.posterior(batch)
     # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
