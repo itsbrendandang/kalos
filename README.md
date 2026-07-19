@@ -39,6 +39,7 @@ kalos/
     app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
 examples/            demos + run_on_media_data.py + organize_data.py (legacy barcode-registry demo)
+experiments/         off-path research prototypes; NOT part of the shipped package or its guarantees (e.g. missingness_indicator/)
 tests/               pytest
 ```
 
