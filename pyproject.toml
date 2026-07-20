@@ -26,6 +26,11 @@ protein = ["transformers>=4.40"]
 # The web portal (FastAPI viewer over the live engine). The portal drives the
 # live GP surrogate, so it needs `ml` too - install as `kalos[ml,portal]`.
 portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
+# The LLM tier of `kalos.normalize` (kalos/normalize/llm.py). Pydantic ships
+# as a transitive dependency of `anthropic` and is not listed separately.
+# The torch-free deterministic core (units/synonyms/plan/apply) and the
+# offline fallback in llm.py need none of this.
+normalize = ["anthropic>=0.40"]
 dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
