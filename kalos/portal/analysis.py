@@ -148,19 +148,29 @@ def _resolve_columns(
       - `roles` None (default): infer everything from `profile` (with the
         bioprocess profile this reproduces the original behavior exactly).
     """
+    num_set = set(num)
     if roles is not None:
         if roles.target not in df.columns:
             raise ValueError(f"declared target {roles.target!r} is not a column")
-        # A declared feature / categorical / group whose name does not match a
-        # header is a silent data-loss trap (typo, case mismatch): the column
-        # would be dropped and never appear in provenance. Fail loudly instead so
-        # the caller is never told a declared column was honored when it was not.
-        declared_names = [*roles.features, *roles.categoricals]
+        # A declared feature / categorical / group / id whose name does not match
+        # a header is a silent data-loss trap (typo, case mismatch): the real
+        # column would never be excluded/used and provenance would not flag it.
+        # Fail loudly so the caller is never told a declared column was honored
+        # when it was not - ids included (a typo'd id leaves the real id in as a
+        # feature otherwise).
+        declared_names = [*roles.features, *roles.categoricals, *roles.ids]
         if roles.groups:
             declared_names.append(roles.groups)
         unknown = sorted({c for c in declared_names if c not in df.columns})
         if unknown:
             raise ValueError(f"declared columns not found in the sheet: {unknown}")
+        # A column cannot be both the target and an id/categorical - a
+        # self-contradictory schema is a caller error, not something to resolve
+        # silently by dropping one role.
+        if roles.target in set(roles.ids) or roles.target in set(roles.categoricals):
+            raise ValueError(
+                f"declared target {roles.target!r} cannot also be declared an id or categorical"
+            )
         target = roles.target
         cat_feats = [c for c in roles.categoricals if c in df.columns and c != target]
         cat_set = set(cat_feats)
@@ -170,9 +180,13 @@ def _resolve_columns(
         declared: set = {target, *cat_feats, *ids}
         if roles.features:
             declared.update(roles.features)
+            # Declared continuous features must clear the same >=80% numeric-parse
+            # gate inference mode uses (`num`). A text column declared as a feature
+            # (the caller likely meant categorical) is left out here and reported
+            # as `dropped_non_numeric` by provenance, not silently zero-filled in.
             cont_feats = [
                 c for c in roles.features
-                if c != target and c not in ids and c not in cat_set
+                if c != target and c not in ids and c not in cat_set and c in num_set
             ]
         else:
             cont_feats = [
@@ -290,15 +304,18 @@ def _analyze(
             Xc_raw = Xc_raw.drop(columns=constant_on_fitted)
             Xc_zf = Xc_zf.drop(columns=constant_on_fitted)
 
-    # Categorical features: derive ordered levels from the fitted rows (blank -> ""
-    # level), integer-encode, and drop any that carry a single level (no choice to
-    # optimize) - the categorical analogue of the constant-feature drop above.
+    # Categorical features: derive ordered levels from the fitted rows. A blank
+    # cell is NOT a proposable level - it means the categorical is unknown for that
+    # row - so blanks are excluded from the levels here, and rows with a blank in
+    # any kept categorical are dropped from the fit below (you cannot model, or
+    # recommend, a recipe whose categorical component is unknown). Drop any
+    # categorical that carries a single level too (no choice to optimize).
     kept_cats: list = []
     constant_cats: list = []
     cat_dims_map: dict = {}
     for c in cat_feats:
         labels = df.loc[keep, c].fillna("").astype(str).str.strip()
-        levels = tuple(sorted(set(labels.tolist())))
+        levels = tuple(sorted({v for v in labels.tolist() if v != ""}))
         if len(levels) < 2:
             constant_cats.append(c)
             continue
@@ -307,6 +324,28 @@ def _analyze(
 
     if not cont_feats and not kept_cats:
         raise ValueError("no varying process-input columns on the target-present rows")
+
+    # Drop fitted rows whose value for any kept categorical is blank/unknown, so a
+    # missing categorical can never poison the GP (as a NaN code) or surface as a
+    # proposed recipe with an empty categorical. `keep_index` is the original-frame
+    # index of the surviving rows, used for every per-row lookup below.
+    keep_index = df.index[keep.to_numpy()]
+    complete = np.ones(len(y), dtype=bool)
+    for c in kept_cats:
+        labels = df.loc[keep_index, c].fillna("").astype(str).str.strip()
+        complete &= labels.isin(cat_dims_map[c]).to_numpy()
+    n_dropped_incomplete = int((~complete).sum())
+    if n_dropped_incomplete:
+        if int(complete.sum()) < 6:
+            raise ValueError(
+                f"only {int(complete.sum())} rows have all declared categoricals present; "
+                "need at least 6 to fit"
+            )
+        pos = np.flatnonzero(complete)
+        y = y[complete]
+        Xc_raw = Xc_raw.iloc[pos]
+        Xc_zf = Xc_zf.iloc[pos]
+        keep_index = keep_index[pos]
 
     # Assemble the design space with continuous dims first, categorical dims last.
     # BoTorch's mixed models accept arbitrary cat_dims indices, so this order is not
@@ -323,7 +362,7 @@ def _analyze(
     if kept_cats:
         code_maps = {c: {lvl: i for i, lvl in enumerate(cat_dims_map[c])} for c in kept_cats}
         cat_cols = [
-            df.loc[keep, c].fillna("").astype(str).str.strip().map(code_maps[c]).to_numpy(float)
+            df.loc[keep_index, c].fillna("").astype(str).str.strip().map(code_maps[c]).to_numpy(float)
             for c in kept_cats
         ]
         X = np.column_stack([cont_arr, *cat_cols]) if cont_feats else np.column_stack(cat_cols)
@@ -334,7 +373,7 @@ def _analyze(
     cat_cardinalities = design.cat_cardinalities or None
 
     if gcol:
-        groups = df.loc[keep, gcol].astype(str).tolist()
+        groups = df.loc[keep_index, gcol].astype(str).tolist()
     else:
         # group on the RAW values (NaN preserved) so rows missing different
         # components are not merged into one replicate group by the zero-fill —
@@ -342,7 +381,7 @@ def _analyze(
         # join the grouping key so identical recipes stay one replicate group.
         gf = Xc_raw.copy()
         for c in kept_cats:
-            gf[c] = df.loc[keep, c].fillna("").astype(str)
+            gf[c] = df.loc[keep_index, c].fillna("").astype(str)
         groups = row_hash_groups(gf)
 
     # honest grouped cross-validation: pooled out-of-fold predictions + a
@@ -452,9 +491,10 @@ def _analyze(
         proposal_optimizer = "mixed_exact" if n_combos <= MAX_MIXED_COMBOS else "mixed_alternating"
 
     result = {
-        "n": int(keep.sum()), "d": len(kept_features), "target": str(target), "group_col": gcol,
+        "n": int(len(y)), "d": len(kept_features), "target": str(target), "group_col": gcol,
         "targets": [str(c) for c in candidate_targets], "features": kept_features,
         "categorical_features": [str(c) for c in kept_cats],
+        "n_dropped_incomplete": n_dropped_incomplete,
         "proposal_optimizer": proposal_optimizer,
         "cv_spearman": None if rho != rho else round(rho, 3),
         "cv_ci95": ci95,

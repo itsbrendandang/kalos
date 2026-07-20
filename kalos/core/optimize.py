@@ -4,6 +4,7 @@ Single-objective: q-batch Log Noisy Expected Improvement (qLogNEI). Titer / yiel
 are noisy measurements, so the NOISY variant is the right choice: it integrates
 improvement over the posterior at the observed baseline points (`X_baseline`)
 rather than trusting a single noiseless incumbent (`best_f`), which the plain
+qLogEI does. This mirrors the multi-objective path, which already uses the noisy
 qLogNEHVI. Proposals are optimized inside the design bounds with multi-start
 L-BFGS (`optimize_acqf`).
 

@@ -83,3 +83,13 @@ def test_mixed_run_is_reproducible_and_monotone():
     assert np.allclose(a, b)
     assert a.shape == (11,)  # n_init + budget
     assert np.all(np.diff(a) >= -1e-9)  # best-so-far never decreases
+
+
+def test_mixed_bo_strategy_is_reproducible():
+    # The model-based strategy (not just random) must be deterministic given a
+    # seed: same seed -> bit-identical trajectory, so a regression would be caught.
+    obj = mixed_bump(n_cont=2, n_levels=3)
+    a = run_mixed_one(obj, "bo", budget=6, n_init=6, noise=0.05, seed=2)
+    b = run_mixed_one(obj, "bo", budget=6, n_init=6, noise=0.05, seed=2)
+    assert np.allclose(a, b)
+    assert np.all(np.diff(a) >= -1e-9)

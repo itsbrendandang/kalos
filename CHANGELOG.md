@@ -35,15 +35,18 @@ process choices (which catalyst, which resin), not just continuous recipes.
   (`declared` vs `inferred`) so the audit trail is honest about who decided the role.
 - `kalos/bench/`: `MixedObjective` + `mixed_bump` + `run_mixed_one` exercise the mixed loop; a test
   confirms mixed BO reaches far lower simple regret than random choice.
-- No behavior change on the bioprocess path: default profile and continuous engine branch are
-  byte-for-byte the prior code paths, guarded by the existing portal/hardening/bench tests.
+- No behavior change on the bioprocess path: the default profile and continuous engine branch are
+  byte-for-byte the prior code paths (verified field-by-field against `main`); the analyze response
+  only gains additive fields (`categorical_features`, `proposal_optimizer`, per-proposal `recipe`,
+  per-column `source`). Guarded by the existing portal/hardening/bench tests.
 
 ### Fixed - provenance honesty for declared roles + surfaced mixed optimizer (review follow-ups)
 An adversarial review of the change above found the modeling core correct but flagged honesty gaps in
 the new declared-roles/provenance layer (no correctness bugs). Addressed:
-- `kalos/portal/analysis.py`: a declared feature / categorical / group name that does not match a
+- `kalos/portal/analysis.py`: a declared feature / categorical / group / id name that does not match a
   sheet header now raises a clear `ValueError` instead of being silently dropped (a typo previously
-  vanished with no signal, so a client believed a column was honored when it was not).
+  vanished with no signal, so a client believed a column was honored when it was not; a typo'd id in
+  particular used to leave the real id column in as a feature).
 - `kalos/portal/validate.py`: `column_provenance` gained `declared_ids` and `declared_features`. A
   declared id now reports as `dropped_id` with `source="declared"` (not the misleading
   `dropped_sparse`/`inferred`), and a column declared as a continuous feature but holding text now
@@ -53,10 +56,23 @@ the new declared-roles/provenance layer (no correctness bugs). Addressed:
   (`continuous` | `mixed_exact` | `mixed_alternating`) so the client can tell when a large categorical
   space fell back from exact enumeration to the alternating heuristic, alongside the existing
   seed/timestamp/engine_version audit fields.
-- Known follow-ups (not yet done): blank categorical cells are still encoded as an ordinary level and
-  can be proposed (should be treated as missing and the row dropped); and there is no per-level
-  replicate-count warning for a categorical level too sparse to identify - the recommended materials
-  guardrail before running on real small-n formulation data.
+
+A second review round found and closed further honesty gaps:
+- `kalos/portal/analysis.py`: a self-contradictory schema (the target also declared an id or
+  categorical) now raises instead of silently dropping one role.
+- `kalos/portal/analysis.py`: declared continuous features must clear the same >=80% numeric-parse
+  gate inference mode uses; a mostly-text column declared as a feature is now reported
+  `dropped_non_numeric` rather than silently zero-filled into the model as a `kept_feature`.
+- `kalos/portal/analysis.py`: blank categorical cells are no longer an ordinary proposable level -
+  they are excluded from the levels and their rows dropped from the fit (an unknown categorical can
+  neither be modeled nor recommended). The response reports `n_dropped_incomplete`, and `n` is the
+  row count actually fit.
+- Test coverage added for all of the above plus previously-untested paths: the alternating optimizer
+  (large cardinality), all-categorical design spaces, single-level categorical drop, declared group
+  columns, and mixed-BO run reproducibility.
+- Known follow-up (not yet done): there is no per-level replicate-count warning for a categorical
+  level too sparse to identify - the recommended materials guardrail before running on real small-n
+  formulation data.
 
 ## 2026-07-18
 
