@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kalos"
 version = "0.1.0"
-description = "Kalos: a Bayesian-optimization platform for bioprocess development, built on BoTorch with NVIDIA BioNeMo / ESM-2 protein features."
+description = "Kalos: a domain-neutral Bayesian-optimization platform for sequential experiment design, built on BoTorch. Ships a bioprocess domain (NVIDIA BioNeMo / ESM-2 protein features) and supports mixed continuous/categorical design spaces."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }

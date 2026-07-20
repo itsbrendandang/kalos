@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -236,7 +237,9 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
     }
 
 
-def _run_uploaded_sync(raw: bytes, target: str | None, anonymize: bool, filename: str) -> dict:
+def _run_uploaded_sync(
+    raw: bytes, target: str | None, anonymize: bool, filename: str, roles_json: str = ""
+) -> dict:
     """The CPU-bound body of an upload: parse -> analyze -> persist -> result.
 
     This is the heavy, blocking work (pandas parse, ~7 GP fits, optimize_acqf) and
@@ -245,10 +248,19 @@ def _run_uploaded_sync(raw: bytes, target: str | None, anonymize: bool, filename
     fit. It raises `UploadRejected` / `ValueError` / `FitError` / parser errors;
     the async wrapper maps each to the right 400 envelope. Kept fully synchronous
     so it is trivially unit-testable in isolation.
+
+    When `roles_json` is a non-empty JSON object it is parsed into a `ColumnRoles`
+    schema and the analysis runs domain-neutrally (the generic profile) instead of
+    inferring bioprocess roles from column names. Omitted, the bioprocess profile
+    infers roles exactly as before.
     """
     _ensure_torch_threads()
     df = _parse_upload(raw)
-    result = _analyze(df, target, anonymize=anonymize)
+    if roles_json.strip():
+        roles = ColumnRoles.from_dict(json.loads(roles_json))
+        result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
+    else:
+        result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
     _save_latest(result, filename)
     return result
 
@@ -258,6 +270,7 @@ async def run_uploaded(
     file: UploadFile = File(...),
     target: str = Form(default=""),
     anonymize: bool = Form(default=False),
+    roles: str = Form(default=""),
 ) -> JSONResponse:
     from kalos.core.surrogate import FitError  # deferred: only needed to match the except below
 
@@ -268,7 +281,7 @@ async def run_uploaded(
         # single-worker service does not block the event loop (and every other
         # request, including GET /api/latest) while a GP fit runs.
         result = await run_in_threadpool(
-            _run_uploaded_sync, raw, target or None, anonymize, filename
+            _run_uploaded_sync, raw, target or None, anonymize, filename, roles
         )
         return JSONResponse(result)
     except UploadRejected as rej:

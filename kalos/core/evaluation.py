@@ -9,7 +9,7 @@ more precise than it is, so `grouped_cv_report` is the number to quote.
 """
 from __future__ import annotations
 
-from typing import Iterator, Optional, Sequence, Tuple
+from typing import Iterator, Sequence, Tuple
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -28,9 +28,13 @@ def grouped_folds(groups: Sequence, n_splits: int = 5) -> Iterator[Tuple[np.ndar
     yield from make_splits(np.zeros((n, 1)), np.zeros(n), groups, n_splits=n_splits)
 
 
-def _oof(X, y, groups, n_splits, bounds):
+def _oof(X, y, groups, n_splits, bounds, cat_dims=None):
     """Pooled out-of-fold predictions under one fixed normalization box.
-    Returns (pred, actual, group, n_folds)."""
+    Returns (pred, actual, group, n_folds).
+
+    `cat_dims` (optional) marks categorical columns so each fold is fit with the
+    same mixed GP the deployed model uses; omitted, every fold is the continuous
+    SingleTaskGP (unchanged behavior)."""
     X = np.asarray(X, float)
     y = np.asarray(y, float).reshape(-1)
     if groups is None:
@@ -47,7 +51,7 @@ def _oof(X, y, groups, n_splits, bounds):
         if len(tr) < 4 or len(te) < 1:
             continue
         n_folds += 1
-        s = Surrogate().fit(X[tr], y[tr], bounds=bounds)
+        s = Surrogate().fit(X[tr], y[tr], bounds=bounds, cat_dims=cat_dims)
         mean, _ = s.posterior(X[te])
         pred.extend(np.asarray(mean).ravel().tolist())
         actual.extend(y[te].tolist())
@@ -71,13 +75,17 @@ def grouped_cv_spearman(X, y, groups=None, n_splits: int = 5, bounds=None) -> fl
 
 
 def grouped_cv_report(
-    X, y, groups=None, n_splits: int = 5, bounds=None, n_boot: int = 1000, random_state: int = 0
+    X, y, groups=None, n_splits: int = 5, bounds=None, n_boot: int = 1000, random_state: int = 0,
+    cat_dims=None,
 ) -> dict:
     """The honest CV number: pooled OOF Spearman plus a group-level bootstrap 95%
     CI (resample GROUPS, not rows), the count of held-out points and groups, and
     the fold count. The CI is wide on purpose at small n — relative ranking is
-    more trustworthy than the absolute value."""
-    pred, actual, grp, n_folds = _oof(X, y, groups, n_splits, bounds)
+    more trustworthy than the absolute value.
+
+    `cat_dims` (optional) marks categorical columns so the CV evaluates the same
+    mixed GP the deployed model uses; omitted, behavior is unchanged."""
+    pred, actual, grp, n_folds = _oof(X, y, groups, n_splits, bounds, cat_dims=cat_dims)
     point = _spearman(pred, actual)
     uniq = np.unique(grp)
     lo = hi = float("nan")

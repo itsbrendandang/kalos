@@ -15,9 +15,10 @@ from scipy.stats import qmc
 from kalos.core.optimize import propose
 from kalos.core.surrogate import FitError, Surrogate
 
-from .objectives import Objective
+from .objectives import MixedObjective, Objective
 
 STRATEGIES = ("bo", "lhs", "random")
+MIXED_STRATEGIES = ("bo", "random")
 
 
 def _lhs(n: int, bounds: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -84,6 +85,73 @@ def run_one(
         y_obs = np.append(y_obs, yo)
         best = max(best, float(yt[0]))
         traj.append(best)
+
+    return np.asarray(traj, dtype=float)
+
+
+def _sample_mixed(
+    n: int, obj: MixedObjective, rng: np.random.Generator
+) -> np.ndarray:
+    """Draw `n` random mixed points: LHS over the continuous dims, uniform integer
+    codes over each categorical dim."""
+    lower, upper = obj.cont_bounds[0], obj.cont_bounds[1]
+    if obj.n_cont:
+        u = qmc.LatinHypercube(d=obj.n_cont, seed=rng).random(n)
+        cont = lower + u * (upper - lower)
+    else:
+        cont = np.empty((n, 0))
+    cats = np.column_stack([
+        rng.integers(0, k, size=n).astype(float) for k in obj.cat_cardinalities
+    ]) if obj.cat_cardinalities else np.empty((n, 0))
+    return np.hstack([cont, cats])
+
+
+def run_mixed_one(
+    obj: MixedObjective,
+    strategy: str,
+    *,
+    budget: int = 15,
+    n_init: int = 6,
+    noise: float = 0.0,
+    seed: int = 0,
+) -> np.ndarray:
+    """One closed-loop mixed (continuous + categorical) trial; returns the best
+    true-so-far trajectory (length `n_init + budget`).
+
+    `bo` fits the mixed GP and proposes with `optimize_acqf_mixed`; `random`
+    draws uniform mixed points. A degenerate fit falls back to a random draw
+    rather than crashing (the honest worst case, not a free pass)."""
+    if strategy not in MIXED_STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}; expected one of {MIXED_STRATEGIES}")
+    import torch  # local import: keep the module import light
+
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+
+    bounds = obj.bounds()
+    cat_dims = obj.cat_dims
+    cat_cardinalities = list(obj.cat_cardinalities)
+
+    X = _sample_mixed(n_init, obj, rng)
+    y_true, y_obs = obj.evaluate(X, noise, rng)
+    traj: List[float] = list(np.maximum.accumulate(y_true))
+
+    for _ in range(budget):
+        if strategy == "bo":
+            try:
+                s = Surrogate().fit(X, y_obs, bounds=bounds, cat_dims=cat_dims)
+                x_next = propose(
+                    s, bounds, q=1, cat_dims=cat_dims, cat_cardinalities=cat_cardinalities
+                )[0]
+            except FitError:
+                x_next = _sample_mixed(1, obj, rng)[0]
+        else:  # "random"
+            x_next = _sample_mixed(1, obj, rng)[0]
+
+        yt, yo = obj.evaluate(x_next, noise, rng)
+        X = np.vstack([X, x_next])
+        y_obs = np.append(y_obs, yo)
+        traj.append(max(traj[-1], float(yt[0])))
 
     return np.asarray(traj, dtype=float)
 

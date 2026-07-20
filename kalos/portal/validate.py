@@ -28,18 +28,28 @@ ColumnStatus = Literal[
     "dropped_constant",
     "dropped_constant_on_fitted_rows",
     "dropped_sparse",
+    "dropped_non_numeric",
     "dropped_all_blank",
 ]
 
 
+RoleSource = Literal["declared", "inferred"]
+
+
 @dataclass(frozen=True)
 class ColumnProvenance:
-    """Why one uploaded column was kept or dropped, and its coercion count."""
+    """Why one uploaded column was kept or dropped, and its coercion count.
+
+    `source` records whether the column's role came from an explicit declaration
+    (`ColumnRoles`) or was inferred from the domain profile's hint patterns, so
+    the audit trail is honest about which decisions the caller made.
+    """
 
     name: str
     status: ColumnStatus
     coerced_cells: int  # non-blank cells that did not parse as a plain number
     non_null: int  # count of non-blank cells
+    source: RoleSource = "inferred"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -71,6 +81,9 @@ def column_provenance(
     id_hint: Pattern[str],
     outcome_hint: Pattern[str],
     constant_on_fitted_rows: list[str] | None = None,
+    declared: set[str] | None = None,
+    declared_ids: set[str] | None = None,
+    declared_features: set[str] | None = None,
 ) -> list[ColumnProvenance]:
     """Build a per-column provenance report mirroring `_analyze`'s selection.
 
@@ -85,14 +98,25 @@ def column_provenance(
         constant on the target-present rows the GP actually fits, so their design
         box would collapse to zero width. `_analyze` drops these; they are flagged
         here (not silently pinned) so the client is not misled about that column.
+      - `declared_ids`: columns the caller explicitly declared as ids to ignore,
+        so they are reported as `dropped_id` (source `declared`) rather than
+        mislabeled `dropped_sparse` by the generic non-numeric branch.
+      - `declared_features`: columns the caller declared as features; if such a
+        column is non-numeric (and not a categorical the engine used) it is
+        reported as `dropped_non_numeric` - an honest "you likely meant to mark
+        this categorical" - rather than the misleading `dropped_sparse`.
 
     Status precedence per column:
-      target -> kept_feature -> dropped_all_blank -> dropped_constant_on_fitted_rows
-      -> dropped_id -> dropped_output -> dropped_constant -> dropped_sparse.
+      target -> kept_feature -> dropped_id(declared) -> dropped_constant_on_fitted_rows
+      -> dropped_all_blank -> dropped_non_numeric(declared) -> dropped_id -> dropped_output
+      -> dropped_constant -> dropped_sparse.
     """
     feat_set = set(features)
     num_set = set(numeric_cols)
     constant_fitted = set(constant_on_fitted_rows or [])
+    declared_set = declared or set()
+    declared_id_set = declared_ids or set()
+    declared_feat_set = declared_features or set()
     report: list[ColumnProvenance] = []
     for col in df.columns:
         name = str(col)
@@ -102,10 +126,18 @@ def column_provenance(
             status = "target"
         elif col in feat_set:
             status = "kept_feature"
+        elif name in declared_id_set:
+            # the caller explicitly excluded this column; its drop is an
+            # instruction, not a data-quality inference.
+            status = "dropped_id"
         elif name in constant_fitted:
             status = "dropped_constant_on_fitted_rows"
         elif non_null == 0:
             status = "dropped_all_blank"
+        elif name in declared_feat_set and col not in num_set:
+            # declared as a feature but not numeric and not used as a categorical:
+            # honestly say it could not be modeled as a number, not "sparse".
+            status = "dropped_non_numeric"
         elif id_hint.match(name.strip()):
             status = "dropped_id"
         elif outcome_hint.search(name):
@@ -119,9 +151,11 @@ def column_provenance(
             col_num = pd.to_numeric(df[col], errors="coerce")
             std = col_num.std(skipna=True)
             status = "dropped_constant" if (std != std or std <= 1e-9) else "dropped_sparse"
+        source: RoleSource = "declared" if name in declared_set else "inferred"
         report.append(
             ColumnProvenance(
-                name=name, status=status, coerced_cells=coerced, non_null=non_null
+                name=name, status=status, coerced_cells=coerced, non_null=non_null,
+                source=source,
             )
         )
     return report
@@ -135,6 +169,7 @@ def provenance_dicts(report: list[ColumnProvenance]) -> list[dict]:
 __all__ = [
     "ColumnProvenance",
     "ColumnStatus",
+    "RoleSource",
     "column_provenance",
     "provenance_dicts",
 ]

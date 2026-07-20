@@ -2,6 +2,62 @@
 
 Newest first.
 
+## 2026-07-20
+
+### Added - domain-neutral core: declared column roles + mixed continuous/categorical design spaces (`kalos/domains/`)
+Kalos was branded bioprocess-only, but the engine (`core/`), store, runner, and upload pipeline
+operate on numeric arrays and are domain-agnostic. This change makes that reusable without touching
+the engine, and adds categorical-parameter support so the platform fits industries with discrete
+process choices (which catalyst, which resin), not just continuous recipes.
+
+- `kalos/domains/` (new, torch-free): `ColumnRoles` (an explicit target/features/groups/ids/
+  categoricals schema), `DomainProfile` (fallback role-hint regexes as data, not engine code),
+  `DesignSpace` + `Dimension` (per-dimension continuous/categorical spec with integer encoding and
+  label decoding), and `build_design_space`. Ships `BIOPROCESS_PROFILE` (the legacy hints, so the
+  default path is unchanged) and `GENERIC_PROFILE` (domain-neutral). Importing `kalos.domains` never
+  loads torch (`tests/test_domains.py`).
+- `kalos/core/surrogate.py`: `Surrogate.fit(..., cat_dims=)` fits a BoTorch `MixedSingleTaskGP`
+  (CategoricalKernel on the categorical dims, Matern on the continuous, continuous dims normalized to
+  the box) when categoricals are present; the continuous `SingleTaskGP` path is unchanged.
+- `kalos/core/optimize.py`: `propose(..., cat_dims=, cat_cardinalities=)` uses `optimize_acqf_mixed`
+  (enumerating categorical assignments, exact) for small categorical spaces and falls back to
+  `optimize_acqf_mixed_alternating` past `MAX_MIXED_COMBOS`. Continuous path unchanged.
+- `kalos/core/evaluation.py`: `grouped_cv_report(..., cat_dims=)` threads the mixed GP through
+  leakage-controlled CV so the reported number matches the deployed model.
+- `kalos/portal/analysis.py`: `_analyze(..., roles=, profile=)`. With a declared `ColumnRoles` the
+  roles are used directly (generic profile); with none, the bioprocess profile infers them exactly as
+  before. Drivers are computed over continuous features only (a Spearman "driver" for a nominal
+  category is not meaningful). Proposals carry a decoded `recipe` (`{feature: value}`), and the
+  response adds `categorical_features`.
+- `kalos/portal/app.py`: `POST /api/run` accepts an optional `roles` JSON form field; when present the
+  upload is analyzed domain-neutrally.
+- `kalos/portal/validate.py`: `column_provenance(..., declared=)` records each column's role `source`
+  (`declared` vs `inferred`) so the audit trail is honest about who decided the role.
+- `kalos/bench/`: `MixedObjective` + `mixed_bump` + `run_mixed_one` exercise the mixed loop; a test
+  confirms mixed BO reaches far lower simple regret than random choice.
+- No behavior change on the bioprocess path: default profile and continuous engine branch are
+  byte-for-byte the prior code paths, guarded by the existing portal/hardening/bench tests.
+
+### Fixed - provenance honesty for declared roles + surfaced mixed optimizer (review follow-ups)
+An adversarial review of the change above found the modeling core correct but flagged honesty gaps in
+the new declared-roles/provenance layer (no correctness bugs). Addressed:
+- `kalos/portal/analysis.py`: a declared feature / categorical / group name that does not match a
+  sheet header now raises a clear `ValueError` instead of being silently dropped (a typo previously
+  vanished with no signal, so a client believed a column was honored when it was not).
+- `kalos/portal/validate.py`: `column_provenance` gained `declared_ids` and `declared_features`. A
+  declared id now reports as `dropped_id` with `source="declared"` (not the misleading
+  `dropped_sparse`/`inferred`), and a column declared as a continuous feature but holding text now
+  reports as the new `dropped_non_numeric` status - an honest "you likely meant to mark this
+  categorical" - instead of `dropped_sparse`.
+- `kalos/portal/analysis.py`: the analyze response now carries `proposal_optimizer`
+  (`continuous` | `mixed_exact` | `mixed_alternating`) so the client can tell when a large categorical
+  space fell back from exact enumeration to the alternating heuristic, alongside the existing
+  seed/timestamp/engine_version audit fields.
+- Known follow-ups (not yet done): blank categorical cells are still encoded as an ordinary level and
+  can be proposed (should be treated as missing and the row dropped); and there is no per-level
+  replicate-count warning for a categorical level too sparse to identify - the recommended materials
+  guardrail before running on real small-n formulation data.
+
 ## 2026-07-18
 
 ### Changed - torch/botorch/gpytorch are now optional (`kalos[ml]`); new `kalos.kit` torch-free facade

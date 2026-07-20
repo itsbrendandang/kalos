@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from kalos.bench import ackley, gaussian_bump, run_benchmark, run_one, summarize
+from kalos.bench import (
+    ackley,
+    gaussian_bump,
+    mixed_bump,
+    run_benchmark,
+    run_mixed_one,
+    run_one,
+    summarize,
+)
 
 
 def test_run_one_is_reproducible_and_monotone():
@@ -41,3 +49,37 @@ def test_objectives_expose_a_reachable_optimum():
         best = np.full((1, obj.dim), 0.6) if "bump" in obj.name else np.zeros((1, obj.dim))
         y_true, _ = obj.evaluate(best, noise=0.0)
         assert abs(float(y_true[0]) - obj.optimum) < 1e-6
+
+
+def test_mixed_objective_optimum_needs_the_right_level():
+    # The optimum is only reached on the best categorical level; the same
+    # continuous point on a worse level leaves the bonus on the table.
+    obj = mixed_bump(n_cont=2, n_levels=3)
+    best = np.array([[0.6, 0.6, 2.0]])  # bump center + best level (code 2)
+    worse = np.array([[0.6, 0.6, 0.0]])  # bump center, wrong level
+    assert abs(float(obj.evaluate(best, noise=0.0)[0][0]) - obj.optimum) < 1e-6
+    assert float(obj.evaluate(worse, noise=0.0)[0][0]) < obj.optimum - 2.0
+
+
+def test_mixed_bo_beats_random():
+    # The mixed loop must both find the continuous peak and pick the right level,
+    # so it ends with strictly lower simple regret than random mixed sampling.
+    obj = mixed_bump(n_cont=2, n_levels=3)
+    bo = np.mean([
+        obj.optimum - run_mixed_one(obj, "bo", budget=12, n_init=6, noise=0.05, seed=s)[-1]
+        for s in range(3)
+    ])
+    rnd = np.mean([
+        obj.optimum - run_mixed_one(obj, "random", budget=12, n_init=6, noise=0.05, seed=s)[-1]
+        for s in range(3)
+    ])
+    assert bo < rnd
+
+
+def test_mixed_run_is_reproducible_and_monotone():
+    obj = mixed_bump(n_cont=2, n_levels=3)
+    a = run_mixed_one(obj, "random", budget=5, n_init=6, noise=0.0, seed=1)
+    b = run_mixed_one(obj, "random", budget=5, n_init=6, noise=0.0, seed=1)
+    assert np.allclose(a, b)
+    assert a.shape == (11,)  # n_init + budget
+    assert np.all(np.diff(a) >= -1e-9)  # best-so-far never decreases
