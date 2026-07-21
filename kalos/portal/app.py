@@ -37,6 +37,7 @@ from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
+from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
 from kalos.portal.uploads import (
@@ -266,6 +267,15 @@ def _run_uploaded_sync(
     else:
         result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
     _save_latest(result, filename)
+    try:
+        # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
+        # "Seeding"). Best-effort: a seeding failure must never break the
+        # upload response the client is waiting on.
+        from kalos.portal.campaign import get_campaign_store
+
+        get_campaign_store().seed(df, result["target"], result["proposal_features"])
+    except Exception:  # noqa: BLE001 - seeding must never fail the upload
+        log.exception("failed to seed the campaign from an uploaded run sheet")
     return result
 
 
@@ -319,6 +329,12 @@ async def run_uploaded(
 # (docs/M2_INTEGRATION.md, "Portal API additions"). The routes themselves live
 # in `kalos.portal.experiments`; mounted here so they are served by this app.
 app.include_router(_experiments_router)
+
+# --- campaign loop: /api/campaign* (docs/CAMPAIGN_LOOP.md) - the closed
+# optimization loop: propose -> run -> log outcome -> re-propose. Routes live
+# in `kalos.portal.campaign_routes`; mounted here so they are served by this
+# app, same pattern as the experiments router above.
+app.include_router(_campaign_router)
 
 __all__ = [
     "app",
