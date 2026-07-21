@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -419,14 +420,16 @@ def _analyze(
     # rank correlation on an integer-coded nominal category is not a meaningful
     # "driver", so categorical dims are deliberately excluded here. Their
     # continuous indices (0..len(cont_feats)-1) align with the leading columns of X.
-    drv = []
+    drv: list[dict[str, Any]] = []
     if cont_feats:
         names = [str(c) for c in cont_feats]
         Xcont = X[:, : len(cont_feats)]
-        point = spearman_driver_matrix(Xcont, y, feature_names=names)["rho"]
+        point = np.asarray(spearman_driver_matrix(Xcont, y, feature_names=names)["rho"]).astype(float)
         boot = bootstrap_spearman(Xcont, y, feature_names=names)
+        boot_lo = np.asarray(boot["lo"], dtype=float)
+        boot_hi = np.asarray(boot["hi"], dtype=float)
         for j, c in enumerate(cont_feats):
-            lo, hi = round(float(boot["lo"][j]), 3), round(float(boot["hi"][j]), 3)
+            lo, hi = round(float(boot_lo[j]), 3), round(float(boot_hi[j]), 3)
             drv.append(
                 {
                     "_idx": j,
@@ -439,7 +442,7 @@ def _analyze(
                     "significant": bool(lo > 0 or hi < 0),
                 }
             )
-    drv.sort(key=lambda d: -abs(d["rho"]))
+    drv.sort(key=lambda d: -abs(float(d["rho"])))
     drv = drv[:8]
 
     # proposed next batch, with predicted target + uncertainty + a why per row

@@ -26,10 +26,23 @@ protein = ["transformers>=4.40"]
 # The web portal (FastAPI viewer over the live engine). The portal drives the
 # live GP surrogate, so it needs `ml` too - install as `kalos[ml,portal]`.
 portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs"]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["kalos"]
+# Third-party libs without usable stubs in this project's context. torch/botorch/
+# gpytorch DO ship py.typed, but following their full type surface makes a cold-cache
+# run take minutes; we typecheck kalos's own code, not theirs.
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "botorch.*", "gpytorch.*", "linear_operator.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

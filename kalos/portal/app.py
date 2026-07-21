@@ -198,11 +198,14 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
     from kalos.core.surrogate import DEVICE, DTYPE
 
     _ensure_torch_threads()
+    rounds = max(1, rounds)  # at least one round, so last_batch is always bound
+    q = max(1, q)
     rng = np.random.default_rng(0)
     X = rng.uniform(0, 1, (8, 3))
     Y = _objectives(X)
     traj: list = []
     proposals: list = []
+    last_batch = np.empty((0, X.shape[1]))
     for r in range(rounds):
         s = MultiObjectiveSurrogate().fit(X, Y, bounds=BOUNDS)
         nxt = propose_multiobjective(s, BOUNDS, q=q)
@@ -214,6 +217,7 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
         )
         last_batch = nxt
     s = MultiObjectiveSurrogate().fit(X, Y, bounds=BOUNDS)
+    assert s.model is not None  # fit() always sets the ModelListGP
     # predicted titer + purity (with uncertainty) for each proposed experiment
     import torch
     post = s.model.posterior(torch.as_tensor(last_batch, dtype=DTYPE, device=DEVICE))

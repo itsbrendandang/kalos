@@ -14,6 +14,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
 
@@ -41,7 +42,7 @@ def row_hash_groups(
     return pd.factorize(keys)[0]
 
 
-def _is_imbalanced(y: Sequence, threshold: float = 0.10) -> bool:
+def _is_imbalanced(y: ArrayLike, threshold: float = 0.10) -> bool:
     counts = pd.Series(y).astype("category").value_counts(normalize=True)
     if len(counts) < 2:
         return False
@@ -50,8 +51,8 @@ def _is_imbalanced(y: Sequence, threshold: float = 0.10) -> bool:
 
 def make_splits(
     X,
-    y: Sequence,
-    groups: Sequence,
+    y: ArrayLike,
+    groups: ArrayLike,
     n_splits: int = 5,
     stratify: Optional[bool] = None,
     random_state: int = 42,
@@ -93,7 +94,7 @@ def make_splits(
     return splits
 
 
-def assert_no_group_leakage(splits: Sequence[Tuple[np.ndarray, np.ndarray]], groups: Sequence) -> None:
+def assert_no_group_leakage(splits: Sequence[Tuple[np.ndarray, np.ndarray]], groups: ArrayLike) -> None:
     """Raise AssertionError if any fold shares a group between train and val."""
     g = np.asarray(pd.Series(groups).astype(str).values)
     for i, (tr, va) in enumerate(splits):

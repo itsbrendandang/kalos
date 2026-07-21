@@ -116,6 +116,18 @@ python -m pip install -e ".[ml,portal]" # the web portal (FastAPI) drives the li
 python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
 ```
 
+### Development checks
+
+CI runs the same three gates on every push and pull request (`.github/workflows/ci.yml`).
+Reproduce them from a clean `.[ml,portal,dev]` install:
+
+```bash
+python -m pip install -e ".[ml,portal,dev]"  # + ruff, mypy, and type stubs
+ruff check kalos/                            # lint
+mypy                                          # types (config in pyproject [tool.mypy])
+python -m pytest -q                           # tests
+```
+
 ## Device
 
 BoTorch GPs run in float64 for numerical stability, and Apple's MPS backend is

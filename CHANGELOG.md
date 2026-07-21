@@ -2,6 +2,32 @@
 
 Newest first.
 
+## 2026-07-21
+
+### Changed - CI now gates ruff + mypy + the portal tests, and the type layer is clean
+
+CI ran `pytest` only, and it installed `.[ml,dev]` without the `portal` extra, so the portal tests (which `importorskip("fastapi")`) were silently skipped on every run.
+Lint and type checking were never enforced at all.
+This wires the quality gates that were only ever run by hand.
+
+- `.github/workflows/ci.yml`: installs `.[ml,portal,dev]` and runs `ruff check kalos/`, `mypy`, then `pytest`.
+  The portal is a shipped surface, so its tests now actually execute in CI instead of skipping.
+- `pyproject.toml`: `dev` extra gains `ruff`, `mypy`, `pandas-stubs`, and `scipy-stubs`, so the checks are reproducible from a clean `.[dev]` install rather than depending on a globally installed tool.
+- `pyproject.toml`: added a `[tool.mypy]` block targeting Python 3.12 (the CI and dev interpreter) over the `kalos` package.
+  `torch` / `botorch` / `gpytorch` / `linear_operator` are set to `follow_imports = skip`; following their full typed surface pushed a cold-cache run into minutes, and we typecheck kalos's own code, not theirs.
+
+### Fixed - 12 real mypy errors + a `rounds=0` edge case in `/api/multi`
+
+With the type stubs installed, mypy surfaced twelve genuine typing gaps.
+None changed runtime behavior except the last.
+
+- `kalos/core/gates.py`: `_finite` now returns `TypeGuard[float]`, so mypy narrows `stats.get(key)` from `Any | None` to `float` inside the guarded branch (the `float(v)` / `v < lo` comparisons were untyped before).
+- `kalos/core/splits.py`, `kalos/core/drivers.py`: array-like parameters (`y`, `groups`, `signal`) are typed `numpy.typing.ArrayLike` instead of `Sequence`, since they are called with numpy arrays and immediately go through `np.asarray`.
+- `kalos/portal/serialization.py`, `kalos/portal/analysis.py`, `kalos/core/drivers.py`: narrowed a few `object`-typed values (pandas `to_dict` records, driver dicts, `feature_names`) with `cast` / explicit annotations so the downstream `float(...)` / indexing typechecks.
+- `kalos/portal/app.py`: `run_multi` now clamps `rounds`/`q` to at least 1 and pre-binds `last_batch`.
+  A `?rounds=0` request previously hit `last_batch` unbound and raised `NameError`; it now returns one honest round.
+  Added an `assert s.model is not None` after `fit()` to document the invariant mypy could not otherwise see.
+
 ## 2026-07-20
 
 ### Added - domain-neutral core: declared column roles + mixed continuous/categorical design spaces (`kalos/domains/`)
