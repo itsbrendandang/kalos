@@ -86,7 +86,7 @@ async def reanalyze_campaign(
     `run_in_threadpool`, matching how `/api/run` offloads it in `app.py`.
     """
     from kalos.domains import BIOPROCESS_PROFILE
-    from kalos.portal.app import _analyze, _save_latest
+    from kalos.portal.app import _analyze, _load_latest, _save_latest
 
     try:
         df, target, state = store.fold_and_snapshot()
@@ -107,4 +107,9 @@ async def reanalyze_campaign(
         return JSONResponse({"error": "could not analyze the campaign data"}, status_code=400)
 
     _save_latest(result, f"campaign round {state['round']}")
-    return JSONResponse({"analysis": {"has_data": True, **result}, "campaign": store.summary()})
+    # Return the SAME shape GET /api/latest returns: _save_latest stamps the
+    # persisted state with `dataset` and `updated`, so read it back rather than
+    # returning the bare `result` (which lacks those two fields the frontend's
+    # PopulatedResult type expects).
+    saved = _load_latest() or result
+    return JSONResponse({"analysis": {"has_data": True, **saved}, "campaign": store.summary()})

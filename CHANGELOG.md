@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 2026-07-21 (later)
+
+### Added - campaign loop: the closed optimization loop (`kalos/portal/campaign.py`, `/api/campaign*`)
+
+Until now the portal was a one-shot analysis viewer: upload a run sheet, get a batch, done.
+This adds the loop that makes it a product - propose, run, log the measured outcome, re-propose - reusing the existing `_analyze` path with no new engine capability.
+Design and full contract in `docs/CAMPAIGN_LOOP.md`.
+
+- `kalos/portal/campaign.py` (new, torch-free): `CampaignStore` persists one campaign (a target plus a growing `base_rows` dataset and a list of started `pending` runs) to `~/.kalos/campaign.json`, lock-guarded and written atomically (temp file + `os.replace`), mirroring the `_LATEST` state pattern.
+  `best` is the max MEASURED target over `base_rows`, never a prediction; a non-finite result is rejected; only runs with a real measured outcome are ever folded into the dataset.
+- `kalos/portal/campaign_routes.py` (new): `GET /api/campaign` (summary for the `/decide` view), `POST /api/campaign/start` (append proposed recipes as awaiting runs), `POST /api/campaign/result` (log a measured outcome), `POST /api/campaign/reanalyze` (fold measured runs into the dataset, re-run `_analyze` via a worker thread, persist as the new `/api/latest`, increment the round).
+  `reanalyze` returns the same shape `GET /api/latest` does (including `dataset` and `updated`), so the frontend can swap it straight into its `PopulatedResult` state.
+- `kalos/portal/app.py`: a fresh `/api/run` upload now seeds a fresh campaign from `(df, target, proposal_features)` (best-effort - a seeding failure never breaks the upload); the campaign router is mounted beside the experiments router.
+- Honest by construction each round: re-analyze routes through the same leakage-controlled grouped-CV `_analyze`, so reliability, conformal bands, and the "not modeled" callouts stay first-class every cycle.
+
+`tests/test_campaign.py`: 12 tests (seed, summary states, start, result validation, and the fold-and-re-analyze round-trip that grows the base and increments the round).
+
 ## 2026-07-21
 
 ### Changed - CI now gates ruff + mypy + the portal tests, and the type layer is clean

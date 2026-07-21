@@ -64,6 +64,17 @@ anonymizer. A separate legacy barcode registry
 (`kalos/data/barcode_registry.py`, `examples/organize_data.py`) predates this
 pipeline and is not part of it.
 
+## The campaign loop (`/api/campaign*`)
+
+The closed optimization loop behind the kalos-web `/decide` surface: propose a
+batch, run the recipes, log the measured outcome, re-propose on the grown
+dataset. A campaign is one target plus a growing dataset of (recipe -> measured
+outcome) rows; `POST /api/campaign/reanalyze` folds logged results into that
+dataset and re-runs the same leakage-controlled `_analyze`, so each round stays
+as honest as the first (grouped-CV reliability, conformal bands, "not modeled"
+callouts). It adds no new engine capability. See `docs/CAMPAIGN_LOOP.md` for the
+full contract.
+
 ## Uploading a run sheet (`POST /api/run`)
 
 The portal accepts an uploaded CSV / TSV / Excel run sheet and returns the analysis
