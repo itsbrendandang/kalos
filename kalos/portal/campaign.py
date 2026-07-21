@@ -50,6 +50,15 @@ def _finite_number(value: Any) -> float | None:
     return v if math.isfinite(v) else None
 
 
+def _best_measured(base_rows: list[dict[str, Any]], target: str) -> float | None:
+    """The best (max) MEASURED target value over `base_rows`, or None when no
+    row carries a finite numeric target — never a prediction (docs/CAMPAIGN_LOOP.md,
+    "Honesty constraints"). Because base rows only ever grow, this is
+    non-decreasing round over round, which is what the progress trajectory plots."""
+    values = [v for row in base_rows if (v := _finite_number(row.get(target))) is not None]
+    return max(values) if values else None
+
+
 class CampaignStore:
     """Persists exactly one campaign to `<state_dir>/campaign.json`.
 
@@ -101,12 +110,16 @@ class CampaignStore:
         from kalos.portal.serialization import _json_safe_records  # local: avoids a cycle at import time
 
         with self._lock:
+            base_rows = _json_safe_records(df)
             state: dict[str, Any] = {
                 "target": target,
                 "features": list(features),
-                "base_rows": _json_safe_records(df),
+                "base_rows": base_rows,
                 "pending": [],
                 "round": 0,
+                # Progress trajectory: best-so-far at each round, starting at
+                # round 0 (the uploaded base). Each reanalyze appends a point.
+                "history": [{"round": 0, "best": _best_measured(base_rows, target), "n_base": len(base_rows)}],
                 "updated_at": time.time(),
             }
             self._write_locked(state)
@@ -133,8 +146,7 @@ class CampaignStore:
 
         target = state["target"]
         base_rows: list[dict[str, Any]] = state["base_rows"]
-        values = [v for row in base_rows if (v := _finite_number(row.get(target))) is not None]
-        best = max(values) if values else None
+        best = _best_measured(base_rows, target)
 
         pending = [{**run, "awaiting": run["result"] is None} for run in state["pending"]]
         n_awaiting = sum(1 for run in pending if run["awaiting"])
@@ -145,6 +157,10 @@ class CampaignStore:
             "n_base": len(base_rows),
             "best": best,
             "round": state["round"],
+            # Older campaigns (seeded before history existed) fall back to a
+            # single current point so the frontend always has something to plot.
+            "history": state.get("history")
+            or [{"round": state["round"], "best": best, "n_base": len(base_rows)}],
             "pending": pending,
             "n_awaiting": n_awaiting,
             "n_measured": len(pending) - n_awaiting,
@@ -219,6 +235,16 @@ class CampaignStore:
                     still_pending.append(run)
             state["pending"] = still_pending
             state["round"] += 1
+            # Record the new best-so-far for the progress trajectory. base_rows
+            # only grew, so this point is >= the previous one.
+            history = state.setdefault("history", [])
+            history.append(
+                {
+                    "round": state["round"],
+                    "best": _best_measured(state["base_rows"], target),
+                    "n_base": len(state["base_rows"]),
+                }
+            )
             state["updated_at"] = time.time()
             self._write_locked(state)
             return pd.DataFrame(state["base_rows"]), target, state

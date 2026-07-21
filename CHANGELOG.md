@@ -16,8 +16,9 @@ Design and full contract in `docs/CAMPAIGN_LOOP.md`.
   `reanalyze` returns the same shape `GET /api/latest` does (including `dataset` and `updated`), so the frontend can swap it straight into its `PopulatedResult` state.
 - `kalos/portal/app.py`: a fresh `/api/run` upload now seeds a fresh campaign from `(df, target, proposal_features)` (best-effort - a seeding failure never breaks the upload); the campaign router is mounted beside the experiments router.
 - Honest by construction each round: re-analyze routes through the same leakage-controlled grouped-CV `_analyze`, so reliability, conformal bands, and the "not modeled" callouts stay first-class every cycle.
+- Progress trajectory: the campaign records a `history` of `{round, best, n_base}` points (round 0 at seed, one per re-analyze) so the frontend can plot best-so-far converging. `best` is measured and base rows only grow, so the trajectory is non-decreasing.
 
-`tests/test_campaign.py`: 12 tests (seed, summary states, start, result validation, and the fold-and-re-analyze round-trip that grows the base and increments the round).
+`tests/test_campaign.py`: 12 tests (seed, summary states, start, result validation, and the fold-and-re-analyze round-trip that grows the base, increments the round, and extends the history trajectory).
 
 ## 2026-07-21
 

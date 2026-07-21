@@ -229,6 +229,14 @@ def test_reanalyze_folds_measured_runs_and_keeps_awaiting(store, client):
     assert [p["id"] for p in campaign["pending"]] == [awaiting_id]
     assert campaign["pending"][0]["awaiting"] is True
 
+    # progress trajectory: a point at round 0 (seed) and round 1 (this fold),
+    # best-so-far non-decreasing because base_rows only grow
+    history = campaign["history"]
+    assert [h["round"] for h in history] == [0, 1]
+    assert history[1]["n_base"] == len(df) + 2
+    assert history[0]["best"] is not None and history[1]["best"] is not None
+    assert history[1]["best"] >= history[0]["best"]
+
     # GET /api/campaign reflects the same folded-in state
     follow_up = client.get("/api/campaign").json()
     assert follow_up["n_base"] == len(df) + 2

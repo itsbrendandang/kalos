@@ -68,6 +68,9 @@ A fresh upload starts a fresh campaign (new base, empty pending, round 0).
   "n_base": 40,
   "best": 5.9,
   "round": 2,
+  "history": [{ "round": 0, "best": 4.6, "n_base": 40 },
+              { "round": 1, "best": 5.2, "n_base": 42 },
+              { "round": 2, "best": 5.9, "n_base": 45 }],
   "pending": [{ "id": "...", "recipe": {...}, "pred": 1.58, "std": 0.33,
                "mode": "explore", "reason": "...", "result": null, "awaiting": true }],
   "n_awaiting": 3,
@@ -76,6 +79,8 @@ A fresh upload starts a fresh campaign (new base, empty pending, round 0).
 ```
 
 `best` is `max(target over base_rows)` - the best *measured* value so far, not a prediction.
+`history` is the progress trajectory: one `{round, best, n_base}` point per round (round 0 = the seeded base, then one per re-analyze), so the frontend can plot best-so-far converging.
+Because base rows only grow, `best` is non-decreasing across the trajectory.
 
 ## Re-analyze = the loop closing
 
