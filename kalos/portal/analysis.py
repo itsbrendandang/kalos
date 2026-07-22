@@ -15,6 +15,7 @@ import pandas as pd
 from kalos.core.drivers import bootstrap_spearman, spearman_driver_matrix
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
+from kalos.core.replicates import aggregate_replicates, noise_report
 from kalos.core.splits import row_hash_groups
 from kalos.data.anonymizer import _hash
 from kalos.domains import (
@@ -219,6 +220,40 @@ def _resolve_columns(
     ]
     gcol = next((c for c in df.columns if profile.group_hint.search(str(c))), None)
     return target, cont_feats, [], gcol, set()
+
+
+def _noise_block(
+    nr: dict, best_single: float, best_reproducible: float | None, replicate_aware: bool
+) -> dict:
+    """The `noise` report for the analysis result: replicate structure + the
+    honest signal-to-noise picture (BENCHMARK.md, "the real lever is assay noise").
+
+    `icc` is the intraclass correlation - the fraction of titer variance that is
+    real recipe-to-recipe signal rather than assay noise; a low ICC means most of
+    the spread is noise and single-measurement "bests" are largely luck.
+    `best_single` is the best individual measurement (rewards noise spikes);
+    `best_reproducible` is the best replicate-averaged recipe - the titer a client
+    would actually ship. `replicate_aware` is True when the proposed batch was fit
+    on that reproducible objective with the measured noise floor fed to the GP.
+    NaN stats (too few recipes / no replicates to estimate them) serialize as null.
+    """
+    def _num(x: float | None, nd: int = 4) -> float | None:
+        if x is None or not np.isfinite(x):
+            return None
+        return round(float(x), nd)
+
+    noise_var = nr["noise_var"]
+    signal_var = nr["signal_var"]
+    return {
+        "n_recipes": int(nr["n_recipes"]),
+        "n_replicated": int(nr["n_replicated"]),
+        "replicate_aware": bool(replicate_aware),
+        "icc": _num(nr["icc"], 3),
+        "noise_sd": _num(np.sqrt(noise_var) if np.isfinite(noise_var) else None),
+        "signal_sd": _num(np.sqrt(signal_var) if np.isfinite(signal_var) else None),
+        "best_single": _num(best_single),
+        "best_reproducible": _num(best_reproducible),
+    }
 
 
 def _analyze(
@@ -445,8 +480,40 @@ def _analyze(
     drv.sort(key=lambda d: -abs(float(d["rho"])))
     drv = drv[:8]
 
+    # Replicate structure + assay noise floor (the "SNR lever", BENCHMARK.md).
+    # Media DoE sheets are frequently heavily replicated because the ASSAY is
+    # noisy, not the process. Scoring/optimizing single measurements rewards
+    # lucky noise spikes - which is why undirected search can out-score BO on
+    # such data. When replicates are present we instead fit the PROPOSAL
+    # surrogate on the reproducible (replicate-averaged) titer and hand the GP
+    # the measured assay noise floor as fixed per-recipe observation variance
+    # (sigma^2 / n_reps, the variance of each recipe mean), so it stops chasing
+    # spikes. This is the configuration the benchmark shows actually beats random
+    # on the real data. Diagnostics (grouped-CV reliability, drivers) stay on the
+    # raw rows - they are already replicate-grouped for leakage and describe the
+    # as-measured signal; only the proposed batch switches to the reproducible
+    # objective.
+    nr = noise_report(X, y)
+    best_single = float(y.max())
+    best_reproducible: float | None = None
+    replicate_aware = False
+    incumbent = best_single
+    if nr["n_replicated"] >= 1:
+        Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y)
+        best_reproducible = float(yf.max())
+        sigma2 = nr["noise_var"]
+        # Only swap in the reproducible objective when there are enough distinct
+        # recipes to fit a meaningful GP and a real, positive noise floor to feed;
+        # otherwise fall through to the unchanged raw fit (still reported honestly).
+        if nr["n_recipes"] >= 6 and np.isfinite(sigma2) and sigma2 > 0:
+            replicate_aware = True
+            per_point_var = float(sigma2) / np.maximum(n_reps_g, 1).astype(float)
+            s = Surrogate().fit(Xf, yf, bounds=bounds, noise=per_point_var, cat_dims=cat_dims)
+            incumbent = best_reproducible
+
     # proposed next batch, with predicted target + uncertainty + a why per row
-    s = Surrogate().fit(X, y, bounds=bounds, cat_dims=cat_dims)
+    if not replicate_aware:
+        s = Surrogate().fit(X, y, bounds=bounds, cat_dims=cat_dims)
     batch = propose(s, bounds, q=5, cat_dims=cat_dims, cat_cardinalities=cat_cardinalities)
     show = [d["name"] for d in drv[:4]]
     show_idx = [d["_idx"] for d in drv[:4]]  # carry the feature index, not a name lookup
@@ -504,10 +571,11 @@ def _analyze(
         "cv_n_groups": rep["n_groups"],
         "conformal_q": conformal_q,
         "reliability": reliability,
-        "best": round(float(y.max()), 4),
+        "best": round(best_single, 4),
+        "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware),
         "drivers": drv,
         "proposal_features": show,
-        "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx, design=design),
+        "proposals": _annotate(batch, p_mean, p_std, incumbent, cols=show_idx, design=design),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
         "provenance": provenance,
         "seed": ANALYZE_SEED,

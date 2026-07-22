@@ -2,6 +2,20 @@
 
 Newest first.
 
+## 2026-07-21 (even later)
+
+### Changed - the SNR lever ships in production: replicate-aware proposals (`kalos/portal/analysis.py`)
+
+BENCHMARK.md established that BO only beats random on the real zero-inflated media data when it optimizes the replicate-averaged (reproducible) titer with the measured assay noise floor fed to the GP - single measurements reward lucky noise spikes (ICC ~0.26, roughly three quarters of titer variance is assay noise).
+That fix lived only in the benchmark harness; the production analysis path still fit the GP on raw single measurements.
+
+- `kalos/portal/analysis.py` (`_analyze`): when the fitted rows have replicated recipes (>= 2 replicated, >= 6 distinct recipes, positive noise floor), the proposal surrogate is now fit on `aggregate_replicates()` means with per-recipe fixed observation variance `sigma^2 / n_reps` (via `Surrogate.fit(noise=...)`), and the proposed batch optimizes that reproducible objective; the shown incumbent is the reproducible best.
+  Non-replicated sheets fall through to the unchanged raw fit.
+- Every analysis result now carries a `noise` block: `n_recipes`, `n_replicated`, `replicate_aware`, `icc`, `noise_sd`, `signal_sd`, `best_single`, `best_reproducible` - the honest signal-to-noise picture and the reproducible ceiling, not just the lucky spike.
+  Diagnostics (grouped-CV reliability, drivers) stay on the raw rows - they are already replicate-grouped for leakage and describe the as-measured signal.
+- `examples/benchmark_media_pool.py` (new): a committed, runnable reproduction of the real-data pool retrospective (`KALOS_MEDIA_DATA=/path python examples/benchmark_media_pool.py`), racing BO / feasibility-gated BO / random on the reproducible objective (BO leads) and the single-measurement objective (the artifact). No client data is committed.
+- `tests/test_replicate_aware_analysis.py` (new): replicate-aware fit triggers + honest noise report; non-replicated unchanged; deterministic.
+
 ## 2026-07-21 (later)
 
 ### Added - campaign loop: the closed optimization loop (`kalos/portal/campaign.py`, `/api/campaign*`)
