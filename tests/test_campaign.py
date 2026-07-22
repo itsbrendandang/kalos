@@ -253,3 +253,112 @@ def test_reanalyze_without_a_campaign_returns_400(client):
     resp = client.post("/api/campaign/reanalyze")
     assert resp.status_code == 400
     assert "error" in resp.json()
+
+
+def test_reanalyze_with_no_measured_runs_returns_400_and_does_not_advance_round(store, client):
+    """Re-analyzing with nothing newly measured is rejected up front — it would
+    only inflate `round` and the progress trajectory over an unchanged base."""
+    df = _tiny_df()
+    store.seed(df, "lipase_titer", ["Methanol", "pH"])
+    # one awaiting run, never measured
+    client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "awaiting"},
+    ]})
+
+    resp = client.post("/api/campaign/reanalyze")
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+    body = client.get("/api/campaign").json()
+    assert body["round"] == 0
+    assert body["n_base"] == len(df)
+    assert [h["round"] for h in body["history"]] == [0]  # no phantom round appended
+
+
+# --- malformed recipe rejected at the point of input (not a later 500) ------ #
+
+@pytest.mark.parametrize("bad_recipe", [
+    {"pred": 1.0},                 # no "recipe" key at all
+    {"recipe": None},              # explicit null
+    {"recipe": "not-a-mapping"},   # wrong type
+    {"recipe": {}},                # empty mapping
+])
+def test_start_rejects_malformed_recipe_with_400(store, client, bad_recipe):
+    store.seed(_tiny_df(), "lipase_titer", ["Methanol", "pH"])
+    resp = client.post("/api/campaign/start", json={"recipes": [bad_recipe]})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+    # nothing was appended
+    assert client.get("/api/campaign").json()["pending"] == []
+
+
+# --- transactional reanalyze: failure and reseed-race leave state intact ---- #
+
+def test_reanalyze_analyze_failure_does_not_advance_round_or_fold(store, client, monkeypatch):
+    """If `_analyze` raises mid-reanalyze, nothing is committed: the measured
+    run stays pending, `round`/`base_rows` are untouched, and a retry (once
+    `_analyze` works) folds normally. Regression for the persist-then-validate
+    ordering bug."""
+    df = _tiny_df()
+    store.seed(df, "lipase_titer", ["Methanol", "pH"])
+    started = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "measured"},
+    ]}).json()["started"]
+    client.post("/api/campaign/result", json={"id": started[0]["id"], "value": 6.0})
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated GP fit failure")
+
+    monkeypatch.setattr(portal_module, "_analyze", _boom)
+    resp = client.post("/api/campaign/reanalyze")
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+    # nothing folded, nothing advanced — the measured run is still pending
+    body = client.get("/api/campaign").json()
+    assert body["round"] == 0
+    assert body["n_base"] == len(df)
+    assert body["n_measured"] == 1
+    assert [h["round"] for h in body["history"]] == [0]
+
+    # retry with a working _analyze now folds the run in
+    monkeypatch.undo()
+    resp = client.post("/api/campaign/reanalyze")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["campaign"]["round"] == 1
+    assert resp.json()["campaign"]["n_base"] == len(df) + 1
+
+
+def test_commit_fold_aborts_when_campaign_reseeded_underneath(store):
+    """A `seed()` (fresh `/api/run` upload) landing between `plan_fold` and
+    `commit_fold` bumps the generation, so `commit_fold` refuses to write —
+    the caller then skips `_save_latest`, so `/api/latest` is never clobbered
+    with the stale analysis. Regression for the concurrent-upload data-loss
+    BLOCKER."""
+    from kalos.portal.campaign import CampaignError
+
+    store.seed(_tiny_df(seed=1), "lipase_titer", ["Methanol", "pH"])
+    started = store.start([
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "measured"},
+    ])
+    store.set_result(started[0]["id"], 6.0)
+
+    # plan the fold (captures the current generation), then a fresh upload
+    # reseeds the whole campaign underneath the in-flight re-analysis
+    _df, _target, generation = store.plan_fold()
+    fresh = _tiny_df(n=10, seed=2)
+    store.seed(fresh, "lipase_titer", ["Methanol", "pH"])
+
+    with pytest.raises(CampaignError):
+        store.commit_fold(generation)
+
+    # the fresh upload survives intact: still round 0, base == the new upload,
+    # no round-1 fold written over it
+    state = store.get()
+    assert state is not None
+    assert state["round"] == 0
+    assert len(state["base_rows"]) == len(fresh)
+    assert state["pending"] == []
