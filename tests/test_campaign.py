@@ -331,6 +331,36 @@ def test_reanalyze_analyze_failure_does_not_advance_round_or_fold(store, client,
     assert resp.json()["campaign"]["n_base"] == len(df) + 1
 
 
+def test_reanalyze_on_legacy_campaign_without_generation_key(store, client, tmp_path):
+    """A campaign.json written before the `generation` token existed has no
+    such key. The first reanalyze after upgrade must not crash (KeyError -> 500)
+    — plan_fold reads it with .get(), so it folds normally. Regression for the
+    migration crash."""
+    import json as _json
+
+    df = _tiny_df()
+    store.seed(df, "lipase_titer", ["Methanol", "pH"])
+    started = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "measured"},
+    ]}).json()["started"]
+    client.post("/api/campaign/result", json={"id": started[0]["id"], "value": 6.0})
+
+    # simulate a pre-generation file: strip the key as the last write before reanalyze
+    path = tmp_path / "campaign.json"
+    state = _json.loads(path.read_text())
+    state.pop("generation", None)
+    path.write_text(_json.dumps(state))
+
+    resp = client.post("/api/campaign/reanalyze")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["campaign"]["round"] == 1
+    assert body["campaign"]["n_base"] == len(df) + 1
+    # the migration is self-healing: the commit re-stamped a real generation
+    assert "generation" in _json.loads(path.read_text())
+
+
 def test_commit_fold_aborts_when_campaign_reseeded_underneath(store):
     """A `seed()` (fresh `/api/run` upload) landing between `plan_fold` and
     `commit_fold` bumps the generation, so `commit_fold` refuses to write —

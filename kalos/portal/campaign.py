@@ -234,7 +234,7 @@ class CampaignStore:
                     return run
             raise CampaignError(f"unknown pending run id {run_id!r}")
 
-    def plan_fold(self) -> tuple[pd.DataFrame, str, str]:
+    def plan_fold(self) -> tuple[pd.DataFrame, str, str | None]:
         """Compute the folded base dataset WITHOUT persisting anything.
 
         Returns `(DataFrame(folded_base_rows), target, generation)` where the
@@ -243,6 +243,13 @@ class CampaignStore:
         from. The caller (`kalos.portal.campaign_routes`) runs `_analyze` on
         the DataFrame and, only if that succeeds, calls `commit_fold(generation)`
         to make the fold durable.
+
+        `generation` is read with `.get()` (not `[]`): a `campaign.json` written
+        before the generation token existed has no such key, and the very first
+        re-analyze after that upgrade must not crash. It flows back as `None`,
+        which `commit_fold` compares by equality just like any other token — and
+        the migration is self-healing, because `commit_fold`'s own write mints a
+        real generation from then on.
 
         Nothing is mutated or written here, so a `_analyze` failure — or a
         concurrent `seed()` from a fresh upload — leaves the campaign exactly
@@ -264,9 +271,9 @@ class CampaignStore:
                     measured += 1
             if measured == 0:
                 raise CampaignError("no measured runs to fold; log at least one result first")
-            return pd.DataFrame(folded), target, state["generation"]
+            return pd.DataFrame(folded), target, state.get("generation")
 
-    def commit_fold(self, generation: str) -> dict[str, Any]:
+    def commit_fold(self, generation: str | None) -> dict[str, Any]:
         """Make the fold planned by `plan_fold` durable, but ONLY if the
         campaign has not changed since (its `generation` still matches).
 
@@ -279,12 +286,14 @@ class CampaignStore:
         the analysis the caller just computed describes a base dataset that no
         longer exists, so committing it — and letting the caller overwrite
         `/api/latest` with it — would silently destroy the newer data. The
-        caller turns this into a "please retry" 400 and leaves `/api/latest`
+        caller turns this into a "please retry" 409 and leaves `/api/latest`
         untouched.
         """
         with self._lock:
             state = self._read_locked()
-            if state is None or state.get("generation") != generation:
+            if state is None:
+                raise CampaignError("no active campaign; nothing to commit")
+            if state.get("generation") != generation:
                 raise CampaignError(
                     "the campaign changed during re-analysis (a new upload or result "
                     "landed); nothing was committed — please re-analyze again"
