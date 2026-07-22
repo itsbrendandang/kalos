@@ -12,18 +12,21 @@ Deliberately kept torch-free: this module only persists data. `_analyze`
 calls it, not this store, so importing `kalos.portal.campaign` never pays the
 torch/botorch import tax and the store stays trivially unit-testable.
 
-Persistence mirrors the `_LATEST` pattern in `kalos.portal.app`: one JSON file
-under `KALOS_STATE_DIR` (default `~/.kalos`), guarded by a lock, written
-atomically (temp file + `os.replace`) so a reader never observes a
-half-written file. The env var is read independently here (not imported from
-`app.py`'s `_STATE_DIR`) to avoid a circular import — `app.py` seeds the
-campaign after every upload, so it must import this module, not the reverse.
+Persistence is a SQLite table `campaigns(tenant, state, updated_at)` in
+`<KALOS_STATE_DIR>/portal.db` (default `~/.kalos`), **one row per tenant**
+(docs/HARDENING.md, Phase 1b). Every method takes a `tenant` (defaulting to
+`"default"`, the open-mode tenant), so two tenants can never see or overwrite
+each other's campaign. A single lock serializes read-modify-write cycles, and
+each write runs in a SQLite transaction, so a reader never observes a partial
+state. The generation-token check that makes re-analyze transactional is
+unchanged — it lives inside the per-tenant `state` blob.
 """
 from __future__ import annotations
 
 import json
 import math
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -31,6 +34,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS campaigns (
+    tenant TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
 
 
 class CampaignError(ValueError):
@@ -60,37 +71,45 @@ def _best_measured(base_rows: list[dict[str, Any]], target: str) -> float | None
 
 
 class CampaignStore:
-    """Persists exactly one campaign to `<state_dir>/campaign.json`.
+    """Persists one campaign PER TENANT as a row in `<state_dir>/portal.db`.
 
-    One campaign at a time (single local user), matching
-    docs/CAMPAIGN_LOOP.md. Every read and write is guarded by a lock, and
-    every write is atomic — written to a temp file in the same directory,
-    then `os.replace`'d into place — so a concurrent reader never observes a
-    partially-written file.
+    Every read and write is guarded by a single lock and runs in a SQLite
+    transaction, so a concurrent reader never observes a partial state. Each
+    public method takes a `tenant` (default `"default"`, the open-mode tenant);
+    rows are keyed by tenant, so no two tenants share a campaign
+    (docs/HARDENING.md, Phase 1b).
     """
 
     def __init__(self, state_dir: Path | None = None) -> None:
         self._dir = Path(state_dir) if state_dir is not None else Path(
             os.environ.get("KALOS_STATE_DIR", Path.home() / ".kalos")
         )
-        self._path = self._dir / "campaign.json"
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._path = self._dir / "portal.db"
         self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        with self._conn:
+            self._conn.execute(_SCHEMA)
 
     # --- persistence -------------------------------------------------------- #
 
-    def _read_locked(self) -> dict[str, Any] | None:
-        """Read the campaign file. Caller must hold `self._lock`."""
-        if not self._path.exists():
+    def _read_locked(self, tenant: str) -> dict[str, Any] | None:
+        """Read the campaign row for `tenant`. Caller must hold `self._lock`."""
+        row = self._conn.execute(
+            "SELECT state FROM campaigns WHERE tenant = ?", (tenant,)
+        ).fetchone()
+        if row is None:
             return None
         try:
-            data = json.loads(self._path.read_text())
-        except (OSError, ValueError):  # a corrupt file must not break the API
+            data = json.loads(row[0])
+        except ValueError:  # a corrupt row must not break the API
             return None
         return data if isinstance(data, dict) else None
 
-    def _write_locked(self, state: dict[str, Any]) -> None:
-        """Persist `state` atomically, stamping it with a fresh `generation`
-        token. Caller must hold `self._lock`.
+    def _write_locked(self, tenant: str, state: dict[str, Any]) -> None:
+        """Persist `state` for `tenant` in one transaction, stamping it with a
+        fresh `generation` token. Caller must hold `self._lock`.
 
         Every write mints a new `generation` (a random token), so any
         intervening write — a `seed()` from a concurrent `/api/run`, a
@@ -101,14 +120,19 @@ class CampaignStore:
         (see docs/CAMPAIGN_LOOP.md, "Re-analyze = the loop closing").
         """
         state["generation"] = uuid.uuid4().hex
-        self._dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(state))
-        os.replace(tmp_path, self._path)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO campaigns (tenant, state, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(tenant) DO UPDATE SET state = excluded.state, "
+                "updated_at = excluded.updated_at",
+                (tenant, json.dumps(state), time.time()),
+            )
 
     # --- public API ----------------------------------------------------------- #
 
-    def seed(self, df: pd.DataFrame, target: str, features: list[str]) -> None:
+    def seed(
+        self, df: pd.DataFrame, target: str, features: list[str], *, tenant: str = "default"
+    ) -> None:
         """Start a FRESH campaign, overwriting any existing one.
 
         Called after every successful `/api/run` upload: a new upload is a
@@ -133,14 +157,14 @@ class CampaignStore:
                 "history": [{"round": 0, "best": _best_measured(base_rows, target), "n_base": len(base_rows)}],
                 "updated_at": time.time(),
             }
-            self._write_locked(state)
+            self._write_locked(tenant, state)
 
-    def get(self) -> dict[str, Any] | None:
-        """The raw campaign state, or None if no campaign has been seeded yet."""
+    def get(self, *, tenant: str = "default") -> dict[str, Any] | None:
+        """The raw campaign state for `tenant`, or None if none seeded yet."""
         with self._lock:
-            return self._read_locked()
+            return self._read_locked(tenant)
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, *, tenant: str = "default") -> dict[str, Any]:
         """The `GET /api/campaign` response: `{"has_campaign": False}` before
         any upload has ever seeded a campaign, else the full summary
         (docs/CAMPAIGN_LOOP.md, "GET /api/campaign response").
@@ -151,7 +175,7 @@ class CampaignStore:
         column carries no finite numeric value.
         """
         with self._lock:
-            state = self._read_locked()
+            state = self._read_locked(tenant)
         if state is None:
             return {"has_campaign": False}
 
@@ -177,11 +201,13 @@ class CampaignStore:
             "n_measured": len(pending) - n_awaiting,
         }
 
-    def start(self, recipes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def start(
+        self, recipes: list[dict[str, Any]], *, tenant: str = "default"
+    ) -> list[dict[str, Any]]:
         """Append each proposed recipe as a pending, awaiting run. Returns
         the appended runs (each with its assigned `id`)."""
         with self._lock:
-            state = self._read_locked()
+            state = self._read_locked(tenant)
             if state is None:
                 raise CampaignError("no active campaign; upload a run sheet first")
             now = time.time()
@@ -210,10 +236,12 @@ class CampaignStore:
                 state["pending"].append(run)
                 appended.append(run)
             state["updated_at"] = now
-            self._write_locked(state)
+            self._write_locked(tenant, state)
             return appended
 
-    def set_result(self, run_id: str, value: float) -> dict[str, Any]:
+    def set_result(
+        self, run_id: str, value: float, *, tenant: str = "default"
+    ) -> dict[str, Any]:
         """Set the measured outcome on a pending run. Raises `CampaignError`
         (never silently ignored) if `run_id` is unknown or `value` is not a
         finite number — a NaN/inf result must never be foldable into the
@@ -221,7 +249,7 @@ class CampaignStore:
         if not math.isfinite(value):
             raise CampaignError(f"result value must be a finite number; got {value!r}")
         with self._lock:
-            state = self._read_locked()
+            state = self._read_locked(tenant)
             if state is None:
                 raise CampaignError(f"no active campaign; unknown run id {run_id!r}")
             for run in state["pending"]:
@@ -230,11 +258,11 @@ class CampaignStore:
                     run["result"] = value
                     run["measured_at"] = now
                     state["updated_at"] = now
-                    self._write_locked(state)
+                    self._write_locked(tenant, state)
                     return run
             raise CampaignError(f"unknown pending run id {run_id!r}")
 
-    def plan_fold(self) -> tuple[pd.DataFrame, str, str | None]:
+    def plan_fold(self, *, tenant: str = "default") -> tuple[pd.DataFrame, str, str | None]:
         """Compute the folded base dataset WITHOUT persisting anything.
 
         Returns `(DataFrame(folded_base_rows), target, generation)` where the
@@ -259,7 +287,7 @@ class CampaignStore:
         new would only inflate `round` and the progress trajectory).
         """
         with self._lock:
-            state = self._read_locked()
+            state = self._read_locked(tenant)
             if state is None:
                 raise CampaignError("no active campaign; upload a run sheet first")
             target = state["target"]
@@ -273,7 +301,7 @@ class CampaignStore:
                 raise CampaignError("no measured runs to fold; log at least one result first")
             return pd.DataFrame(folded), target, state.get("generation")
 
-    def commit_fold(self, generation: str | None) -> dict[str, Any]:
+    def commit_fold(self, generation: str | None, *, tenant: str = "default") -> dict[str, Any]:
         """Make the fold planned by `plan_fold` durable, but ONLY if the
         campaign has not changed since (its `generation` still matches).
 
@@ -290,7 +318,7 @@ class CampaignStore:
         untouched.
         """
         with self._lock:
-            state = self._read_locked()
+            state = self._read_locked(tenant)
             if state is None:
                 raise CampaignError("no active campaign; nothing to commit")
             if state.get("generation") != generation:
@@ -318,7 +346,7 @@ class CampaignStore:
                 }
             )
             state["updated_at"] = time.time()
-            self._write_locked(state)
+            self._write_locked(tenant, state)
             return state
 
 
@@ -327,13 +355,12 @@ _STORE: CampaignStore | None = None
 
 
 def get_campaign_store() -> CampaignStore:
-    """The module-level `CampaignStore` at the default
-    `~/.kalos/campaign.json`.
+    """The module-level `CampaignStore` at the default `~/.kalos/portal.db`.
 
     Tests override this via `app.dependency_overrides[get_campaign_store]`
     (same pattern as `kalos.portal.experiments.get_store`), pointing at a
     fresh `CampaignStore(tmp_path)` so they never touch the real
-    `~/.kalos/campaign.json`.
+    `~/.kalos/portal.db`.
     """
     global _STORE
     if _STORE is None:

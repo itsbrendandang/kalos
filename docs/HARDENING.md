@@ -26,10 +26,12 @@ Tokens are provisioned by the operator and stored as SHA-256 hashes (never plain
 With no tokens configured the layer returns an anonymous principal on a `default` tenant with read+write scope, preserving today's behavior and logging a startup warning.
 Mutating endpoints (`/api/run`, `/api/campaign/*`) require the `write` scope; the existing runner-token channel is subsumed by the same mechanism over time.
 
-**1b. Tenant-scoped persistence (next).**
-Add a `tenant` (and `owner`) column to the stores and key every read/write by the caller's `Principal.tenant`.
-Replace the single global in-memory `_LATEST` and the single `~/.kalos/campaign.json` with per-tenant rows in the durable store, so two tenants can never see or overwrite each other's analysis or campaign.
-The `campaign.json` generation-token transactional design carries over as a row-versioning column.
+**1b. Tenant-scoped persistence (done).**
+Every store read/write is keyed by the caller's `Principal.tenant`.
+The campaign is now a SQLite row per tenant in `<state_dir>/portal.db` (`campaigns(tenant, state, updated_at)`), replacing the single `~/.kalos/campaign.json`; the transactional generation token carries over inside the per-tenant `state` blob unchanged.
+`/api/latest` is now keyed by tenant too (an in-memory map plus a per-tenant best-effort JSON cache under `<state_dir>/latest/`), replacing the single global `_LATEST`.
+So two tenants can never see or overwrite each other's campaign or analysis.
+Follow-up: move the `latest` cache into the same SQLite store as a row, and add an `owner`/`created_by` column for finer-grained authorization.
 
 **1c. Secrets + transport.**
 Move `KALOS_*` secrets behind a secrets provider abstraction (env for dev, file/e.g. Vault for prod).
@@ -81,5 +83,6 @@ echo "give this to the caller once: $TOKEN"
 
 ## Status log
 
-- Phase 1a authentication + authorization: **in progress** on `feat/hardening-auth`.
-- All later phases: planned, not started.
+- Phase 1a authentication + authorization: **done** (merged).
+- Phase 1b tenant-scoped persistence: **done** on `feat/hardening-tenancy` (campaign -> SQLite rows per tenant; `/api/latest` per tenant; every store call keyed by `Principal.tenant`).
+- Phase 1c secrets/TLS/CORS and all later phases: planned, not started.
