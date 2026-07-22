@@ -2,15 +2,12 @@
 docs/CAMPAIGN_LOOP.md). Thin wrappers over `kalos.portal.campaign.CampaignStore`,
 mirroring the router pattern in `kalos.portal.experiments`.
 
-Auth posture (deliberate): these endpoints are UNAUTHENTICATED, the same as
-`/api/run` and `/api/latest` — the campaign loop is the browser-facing surface
-`/decide` drives, and the portal is a single-local-user tool bound to localhost.
-This is intentionally *not* gated like the machine-to-machine
-`/api/experiments/{id}/result` runner channel (which uses a runner token). If
-this portal is ever exposed beyond localhost, `/api/campaign/result` — which
-injects `base_rows` that become ground truth for the surrogate — must be gated
-too; until then the trust boundary is the loopback interface, matching the rest
-of the browser-facing API.
+Auth posture: the mutating endpoints (`start`, `result`, `reanalyze`) require
+the `write` scope via `kalos.portal.auth` (docs/HARDENING.md, Phase 1). In open
+mode (no tokens configured) the anonymous principal holds read+write, so the
+local dev/pilot loop is unchanged; once tokens are provisioned these endpoints
+enforce them. `GET /api/campaign` stays open for now (read gating is a
+follow-up). Per-tenant isolation of the campaign store is the next slice.
 """
 from __future__ import annotations
 
@@ -22,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.campaign import CampaignError, CampaignStore, get_campaign_store
 
 log = logging.getLogger("kalos.portal")
@@ -53,9 +51,11 @@ def get_campaign(store: CampaignStore = Depends(get_campaign_store)) -> dict[str
 
 @router.post("/api/campaign/start")
 def start_campaign(
-    body: _StartBody, store: CampaignStore = Depends(get_campaign_store)
+    body: _StartBody,
+    store: CampaignStore = Depends(get_campaign_store),
+    _principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
-    """Append each proposed recipe as a pending, awaiting run."""
+    """Append each proposed recipe as a pending, awaiting run. Requires `write`."""
     try:
         started = store.start(body.recipes)
     except CampaignError as exc:
@@ -67,11 +67,13 @@ def start_campaign(
 
 @router.post("/api/campaign/result")
 def log_campaign_result(
-    body: _ResultBody, store: CampaignStore = Depends(get_campaign_store)
+    body: _ResultBody,
+    store: CampaignStore = Depends(get_campaign_store),
+    _principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
-    """Set the measured outcome on a pending run. 400 on an unknown id or a
-    non-finite value — an unmeasured or bad-value run must never silently
-    become foldable into the base dataset."""
+    """Set the measured outcome on a pending run. Requires `write`. 400 on an
+    unknown id or a non-finite value — an unmeasured or bad-value run must never
+    silently become foldable into the base dataset."""
     try:
         run = store.set_result(body.id, body.value)
     except CampaignError as exc:
@@ -83,6 +85,7 @@ def log_campaign_result(
 @router.post("/api/campaign/reanalyze")
 async def reanalyze_campaign(
     store: CampaignStore = Depends(get_campaign_store),
+    _principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     """Fold every measured pending run into the base dataset, re-run the
     engine (`_analyze`) on the grown dataset, and persist it as the new

@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-07-22
+
+### Added - production hardening Phase 1a: in-house API authentication (`kalos/portal/auth.py`)
+
+First step of the behind-the-scenes hardening track (`docs/HARDENING.md`) toward a multi-tenant, operable service. Compliance/certification work is handled offline and is out of scope here.
+
+- `kalos/portal/auth.py` (new): a self-hosted token layer. A bearer token resolves to a `Principal` (subject, tenant, scopes); tokens are provisioned as SHA-256 hashes (never plaintext, never logged) and constant-time compared. Config is read at request time from `KALOS_AUTH_TOKENS_FILE` (preferred) or `KALOS_AUTH_TOKENS`, so rotation needs no restart.
+  FastAPI dependencies `require_principal` / `require_scope(scope)` gate endpoints.
+- **Backward compatible.** With no tokens configured the API runs in *open mode* - every request gets an anonymous `default`-tenant principal with read+write (today's behavior) and a startup warning is logged; `admin` is never granted without a real token. The moment tokens are provisioned, enforcement turns on.
+- Gated the mutating endpoints on the `write` scope: `POST /api/run` (`kalos/portal/app.py`) and `POST /api/campaign/{start,result,reanalyze}` (`kalos/portal/campaign_routes.py`). `GET` reads stay open for now; per-tenant data isolation is the next slice.
+- `docs/HARDENING.md` (new): the in-house hardening plan and configuration reference (auth -> tenant-scoped persistence -> reliability -> operability).
+- `tests/test_auth.py` (new): 27 tests - open mode, valid/invalid/missing/malformed tokens, tenant isolation, file-over-env precedence, scope gating, and HTTP end-to-end that `/api/campaign/start` is 401 unauthenticated, 403 for a read-only token, and clears the gate with a valid write token. Full portal suite green (open mode unchanged).
+
 ## 2026-07-21 (even later)
 
 ### Changed - the SNR lever ships in production: replicate-aware proposals (`kalos/portal/analysis.py`)

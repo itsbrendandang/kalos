@@ -30,13 +30,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
+from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -285,6 +286,7 @@ async def run_uploaded(
     target: str = Form(default=""),
     anonymize: bool = Form(default=False),
     roles: str = Form(default=""),
+    _principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     from kalos.core.surrogate import FitError  # deferred: only needed to match the except below
 
