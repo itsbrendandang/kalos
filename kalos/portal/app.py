@@ -21,6 +21,7 @@ below so existing call sites and tests keep working unchanged.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -37,7 +38,7 @@ from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
-from kalos.portal.auth import WRITE, Principal, require_scope
+from kalos.portal.auth import READ, WRITE, Principal, require_scope
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -109,38 +110,49 @@ def _objectives(X: np.ndarray) -> np.ndarray:
     return np.stack([_titer(x), _purity(x)], axis=-1)
 
 
-# --- persistence of the most-recently analyzed real dataset ------------------ #
+# --- persistence of the most-recently analyzed real dataset, PER TENANT ------ #
 # The Overview reads /api/latest so the landing page reflects the LAST dataset a
-# user actually uploaded, not the synthetic demo objective. In-memory is the
-# source of truth; the JSON file is best-effort so it survives a portal restart.
+# tenant actually uploaded. Keyed by tenant (docs/HARDENING.md, Phase 1b) so two
+# tenants never see each other's analysis. In-memory is the source of truth; a
+# per-tenant JSON file is best-effort so it survives a portal restart.
 _STATE_DIR = Path(os.environ.get("KALOS_STATE_DIR", Path.home() / ".kalos"))
-_LATEST_PATH = _STATE_DIR / "latest_analysis.json"
-_LATEST: dict | None = None
-# `_analyze` now runs in a worker thread (see `run_uploaded`), so `_save_latest`
-# and `_load_latest` touch the `_LATEST` global and the state file from multiple
-# threads concurrently. This lock serializes the read-modify-write + file write
-# so two overlapping uploads cannot interleave a half-written global or file.
+_LATEST_DIR = _STATE_DIR / "latest"
+_LATEST: dict[str, dict] = {}  # tenant -> latest analysis state
+# `_analyze` runs in a worker thread (see `run_uploaded`), so `_save_latest`/
+# `_load_latest` touch the `_LATEST` map and the per-tenant files from multiple
+# threads. This lock serializes the read-modify-write + file write so two
+# overlapping uploads cannot interleave a half-written entry or file.
 _LATEST_LOCK = threading.Lock()
 
 
-def _load_latest() -> dict | None:
-    global _LATEST
+def _latest_path(tenant: str) -> Path:
+    """Per-tenant best-effort cache file. The tenant is sanitized to a safe
+    filename so a token-provisioned tenant id can never traverse the path."""
+    safe = "".join(c if (c.isalnum() or c in "_.-") else "_" for c in tenant) or "default"
+    return _LATEST_DIR / f"{safe}.json"
+
+
+def _load_latest(tenant: str = "default") -> dict | None:
     with _LATEST_LOCK:
-        if _LATEST is None and _LATEST_PATH.exists():
+        if tenant not in _LATEST:
+            path = _latest_path(tenant)
+            if not path.exists():
+                return None
             try:
-                _LATEST = json.loads(_LATEST_PATH.read_text())
+                _LATEST[tenant] = json.loads(path.read_text())
             except (OSError, ValueError):  # a corrupt cache must not break the API
-                _LATEST = None
-        return _LATEST
+                return None
+        return _LATEST.get(tenant)
 
 
-def _save_latest(result: dict, dataset: str) -> None:
-    global _LATEST
+def _save_latest(result: dict, dataset: str, *, tenant: str = "default") -> None:
     with _LATEST_LOCK:
-        _LATEST = {**result, "dataset": dataset, "updated": time.time()}
+        state = {**result, "dataset": dataset, "updated": time.time()}
+        _LATEST[tenant] = state
         try:
-            _STATE_DIR.mkdir(parents=True, exist_ok=True)
-            _LATEST_PATH.write_text(json.dumps(_LATEST))
+            path = _latest_path(tenant)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(state))
         except (OSError, TypeError, ValueError):
             # Disk persistence is best-effort; in-memory still serves this run and a
             # serialization hiccup must never fail the upload.
@@ -148,11 +160,11 @@ def _save_latest(result: dict, dataset: str) -> None:
 
 
 @app.get("/api/latest")
-def latest() -> dict:
-    """The most recent real (uploaded) analysis, for the Overview. `has_data` is
-    False until the first successful /api/run so the home can show an upload
-    prompt instead of pretending there is data."""
-    data = _load_latest()
+def latest(principal: Principal = Depends(require_scope(READ))) -> dict:
+    """The most recent real (uploaded) analysis for the caller's tenant, for the
+    Overview. `has_data` is False until the first successful /api/run so the home
+    can show an upload prompt instead of pretending there is data."""
+    data = _load_latest(principal.tenant)
     if not data:
         return {"has_data": False}
     return {"has_data": True, **data}
@@ -244,7 +256,8 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
 
 
 def _run_uploaded_sync(
-    raw: bytes, target: str | None, anonymize: bool, filename: str, roles_json: str = ""
+    raw: bytes, target: str | None, anonymize: bool, filename: str, roles_json: str = "",
+    *, tenant: str = "default",
 ) -> dict:
     """The CPU-bound body of an upload: parse -> analyze -> persist -> result.
 
@@ -267,14 +280,16 @@ def _run_uploaded_sync(
         result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
     else:
         result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
-    _save_latest(result, filename)
+    _save_latest(result, filename, tenant=tenant)
     try:
         # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
-        # "Seeding"). Best-effort: a seeding failure must never break the
-        # upload response the client is waiting on.
+        # "Seeding") for THIS tenant. Best-effort: a seeding failure must never
+        # break the upload response the client is waiting on.
         from kalos.portal.campaign import get_campaign_store
 
-        get_campaign_store().seed(df, result["target"], result["proposal_features"])
+        get_campaign_store().seed(
+            df, result["target"], result["proposal_features"], tenant=tenant
+        )
     except Exception:  # noqa: BLE001 - seeding must never fail the upload
         log.exception("failed to seed the campaign from an uploaded run sheet")
     return result
@@ -292,12 +307,15 @@ async def run_uploaded(
 
     raw = await file.read()
     filename = file.filename or "uploaded dataset"
+    tenant = _principal.tenant
     try:
         # Offload the CPU-bound parse + fit + save to a worker thread so this
         # single-worker service does not block the event loop (and every other
         # request, including GET /api/latest) while a GP fit runs.
         result = await run_in_threadpool(
-            _run_uploaded_sync, raw, target or None, anonymize, filename, roles
+            functools.partial(
+                _run_uploaded_sync, raw, target or None, anonymize, filename, roles, tenant=tenant
+            )
         )
         return JSONResponse(result)
     except UploadRejected as rej:
