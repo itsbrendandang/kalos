@@ -59,13 +59,18 @@ class BackendAdapter(Protocol):
 
 
 class LocalStoreAdapter:
-    """`BackendAdapter` backed directly by a `SqliteStore`. The M2 default."""
+    """`BackendAdapter` backed directly by a `SqliteStore`. The M2 default.
 
-    def __init__(self, store: SqliteStore) -> None:
+    Bound to one `tenant` (default `"default"`) so every store call it makes is
+    scoped to that tenant (docs/HARDENING.md, Phase 1b/P1): the runner only ever
+    sees and mutates the calling tenant's experiments."""
+
+    def __init__(self, store: SqliteStore, *, tenant: str = "default") -> None:
         self._store = store
+        self._tenant = tenant
 
     def list_ready(self) -> list[str]:
-        return [exp.id for exp in self._store.list(status=Status.READY)]
+        return [exp.id for exp in self._store.list(status=Status.READY, tenant=self._tenant)]
 
     def list_processing(self) -> list[str]:
         """Ids of `PROCESSING` experiments - used by
@@ -74,18 +79,18 @@ class LocalStoreAdapter:
         adapter can enumerate by arbitrary status); `reclaim_stale` degrades
         to a no-op for a backend that lacks this method, e.g.
         `HttpBackendAdapter` (never wired to a live server in M2)."""
-        return [exp.id for exp in self._store.list(status=Status.PROCESSING)]
+        return [exp.id for exp in self._store.list(status=Status.PROCESSING, tenant=self._tenant)]
 
     def fetch(self, exp_id: str) -> Experiment:
-        return self._store.get(exp_id)
+        return self._store.get(exp_id, tenant=self._tenant)
 
     def set_status(
         self, exp_id: str, status: Status, *, force: bool = False, error: str | None = None
     ) -> None:
-        self._store.set_status(exp_id, status, force=force, error=error)
+        self._store.set_status(exp_id, status, force=force, error=error, tenant=self._tenant)
 
     def push_result(self, exp_id: str, result: dict[str, Any], provenance: dict[str, Any]) -> None:
-        self._store.save_result(exp_id, result, provenance)
+        self._store.save_result(exp_id, result, provenance, tenant=self._tenant)
 
 
 def _urllib_transport(

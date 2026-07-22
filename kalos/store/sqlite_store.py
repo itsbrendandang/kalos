@@ -26,6 +26,7 @@ DEFAULT_DB_PATH = Path.home() / ".kalos" / "experiments.db"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL DEFAULT 'default',
     name TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     error TEXT
 )
 """
+_TENANT_INDEX = "CREATE INDEX IF NOT EXISTS idx_experiments_tenant ON experiments(tenant)"
 
 
 class ExperimentNotFound(KeyError):
@@ -103,6 +105,20 @@ class SqliteStore:
         with contextlib.closing(self._connect()) as conn:
             with conn:
                 conn.execute(_SCHEMA)
+                self._migrate_tenant(conn)
+                conn.execute(_TENANT_INDEX)
+
+    @staticmethod
+    def _migrate_tenant(conn: sqlite3.Connection) -> None:
+        """Backfill the `tenant` column on a pre-multi-tenant database.
+
+        A `experiments.db` created before Phase 1b has no `tenant` column;
+        `ADD COLUMN ... DEFAULT 'default'` adds it and backfills every existing
+        row to the `default` tenant (docs/HARDENING.md, Phase 1b). No-op once the
+        column exists, so it is safe to run on every startup."""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(experiments)")}
+        if "tenant" not in cols:
+            conn.execute("ALTER TABLE experiments ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30.0)
@@ -112,8 +128,10 @@ class SqliteStore:
 
     # --- CRUD ------------------------------------------------------------ #
 
-    def create(self, name: str, payload: dict[str, Any], config: dict[str, Any]) -> Experiment:
-        """Create a new experiment in `DRAFT`."""
+    def create(
+        self, name: str, payload: dict[str, Any], config: dict[str, Any], *, tenant: str = "default"
+    ) -> Experiment:
+        """Create a new experiment in `DRAFT`, owned by `tenant`."""
         now = _now_iso()
         exp = Experiment(
             id=f"exp_{uuid.uuid4()}",
@@ -128,41 +146,49 @@ class SqliteStore:
             with conn:
                 conn.execute(
                     "INSERT INTO experiments "
-                    "(id, name, status, created_at, updated_at, config, payload, result, provenance, error) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, tenant, name, status, created_at, updated_at, config, payload, result, provenance, error) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        exp.id, exp.name, exp.status.value, exp.created_at, exp.updated_at,
+                        exp.id, tenant, exp.name, exp.status.value, exp.created_at, exp.updated_at,
                         _dumps(exp.config), _dumps(exp.payload), None, None, None,
                     ),
                 )
         return exp
 
-    def get(self, exp_id: str) -> Experiment:
-        """Fetch one experiment. Raises `ExperimentNotFound` if it does not exist."""
+    def get(self, exp_id: str, *, tenant: str = "default") -> Experiment:
+        """Fetch one experiment owned by `tenant`. Raises `ExperimentNotFound` if
+        no such experiment exists FOR THIS TENANT - a cross-tenant id is
+        indistinguishable from a missing one, so tenants can never probe each
+        other's ids."""
         with contextlib.closing(self._connect()) as conn:
             with conn:
-                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM experiments WHERE id = ? AND tenant = ?", (exp_id, tenant)
+                ).fetchone()
         if row is None:
             raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
         return _row_to_experiment(row)
 
-    def list(self, status: Status | None = None) -> list[Experiment]:
-        """List experiments, optionally filtered to one status, oldest first."""
+    def list(self, status: Status | None = None, *, tenant: str = "default") -> list[Experiment]:
+        """List `tenant`'s experiments, optionally filtered to one status, oldest first."""
         with contextlib.closing(self._connect()) as conn:
             with conn:
                 if status is None:
-                    rows = conn.execute("SELECT * FROM experiments ORDER BY created_at").fetchall()
+                    rows = conn.execute(
+                        "SELECT * FROM experiments WHERE tenant = ? ORDER BY created_at", (tenant,)
+                    ).fetchall()
                 else:
                     rows = conn.execute(
-                        "SELECT * FROM experiments WHERE status = ? ORDER BY created_at",
-                        (status.value,),
+                        "SELECT * FROM experiments WHERE tenant = ? AND status = ? ORDER BY created_at",
+                        (tenant, status.value),
                     ).fetchall()
         return [_row_to_experiment(r) for r in rows]
 
     # --- lifecycle mutations ---------------------------------------------- #
 
     def set_status(
-        self, exp_id: str, status: Status, *, force: bool = False, error: str | None = None
+        self, exp_id: str, status: Status, *, force: bool = False, error: str | None = None,
+        tenant: str = "default",
     ) -> Experiment:
         """Flip an experiment's status, enforcing `legal_transition`.
 
@@ -177,7 +203,9 @@ class SqliteStore:
         """
         with contextlib.closing(self._connect()) as conn:
             with conn:
-                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM experiments WHERE id = ? AND tenant = ?", (exp_id, tenant)
+                ).fetchone()
                 if row is None:
                     raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
                 current = Status(row["status"])
@@ -191,29 +219,35 @@ class SqliteStore:
                 if reset_result:
                     conn.execute(
                         "UPDATE experiments SET status = ?, updated_at = ?, "
-                        "result = NULL, provenance = NULL, error = NULL WHERE id = ?",
-                        (status.value, now, exp_id),
+                        "result = NULL, provenance = NULL, error = NULL WHERE id = ? AND tenant = ?",
+                        (status.value, now, exp_id, tenant),
                     )
                 elif status == Status.FAILED:
                     conn.execute(
-                        "UPDATE experiments SET status = ?, updated_at = ?, error = ? WHERE id = ?",
-                        (status.value, now, error, exp_id),
+                        "UPDATE experiments SET status = ?, updated_at = ?, error = ? "
+                        "WHERE id = ? AND tenant = ?",
+                        (status.value, now, error, exp_id, tenant),
                     )
                 elif status == Status.READY:
                     conn.execute(
-                        "UPDATE experiments SET status = ?, updated_at = ?, error = NULL WHERE id = ?",
-                        (status.value, now, exp_id),
+                        "UPDATE experiments SET status = ?, updated_at = ?, error = NULL "
+                        "WHERE id = ? AND tenant = ?",
+                        (status.value, now, exp_id, tenant),
                     )
                 else:
                     conn.execute(
-                        "UPDATE experiments SET status = ?, updated_at = ? WHERE id = ?",
-                        (status.value, now, exp_id),
+                        "UPDATE experiments SET status = ?, updated_at = ? WHERE id = ? AND tenant = ?",
+                        (status.value, now, exp_id, tenant),
                     )
-                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM experiments WHERE id = ? AND tenant = ?", (exp_id, tenant)
+                ).fetchone()
         return _row_to_experiment(row)
 
-    def save_result(self, exp_id: str, result: dict[str, Any], provenance: dict[str, Any]) -> Experiment:
-        """Push a processed result and mark the experiment `DONE`.
+    def save_result(
+        self, exp_id: str, result: dict[str, Any], provenance: dict[str, Any], *, tenant: str = "default"
+    ) -> Experiment:
+        """Push a processed result and mark `tenant`'s experiment `DONE`.
 
         Only legal from `PROCESSING` (via `legal_transition`); raises
         `IllegalTransition` otherwise, so a stray push cannot silently
@@ -221,7 +255,9 @@ class SqliteStore:
         """
         with contextlib.closing(self._connect()) as conn:
             with conn:
-                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM experiments WHERE id = ? AND tenant = ?", (exp_id, tenant)
+                ).fetchone()
                 if row is None:
                     raise ExperimentNotFound(f"no experiment with id {exp_id!r}")
                 current = Status(row["status"])
@@ -233,8 +269,10 @@ class SqliteStore:
                 now = _now_iso()
                 conn.execute(
                     "UPDATE experiments SET status = ?, updated_at = ?, result = ?, provenance = ?, error = NULL "
-                    "WHERE id = ?",
-                    (Status.DONE.value, now, _dumps(result), _dumps(provenance), exp_id),
+                    "WHERE id = ? AND tenant = ?",
+                    (Status.DONE.value, now, _dumps(result), _dumps(provenance), exp_id, tenant),
                 )
-                row = conn.execute("SELECT * FROM experiments WHERE id = ?", (exp_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM experiments WHERE id = ? AND tenant = ?", (exp_id, tenant)
+                ).fetchone()
         return _row_to_experiment(row)
