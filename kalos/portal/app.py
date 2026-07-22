@@ -38,7 +38,8 @@ from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
-from kalos.portal.auth import READ, WRITE, Principal, require_scope
+from kalos.portal.auth import READ, WRITE, Principal, get_authenticator, require_scope
+from kalos.portal.config import cors_config, log_security_posture
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -79,13 +80,12 @@ def _ensure_torch_threads() -> None:
 
 app = FastAPI(title="Kalos Engine API")
 
-# Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS policy: an explicit allowlist when `KALOS_CORS_ORIGINS` is set (production),
+# else the permissive localhost default (dev/pilot). See kalos.portal.config.
+app.add_middleware(CORSMiddleware, **cors_config())
+
+# Log the effective security posture (auth + CORS) once at import/startup.
+log_security_posture(auth_enforced=get_authenticator().is_configured())
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)
