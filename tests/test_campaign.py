@@ -49,8 +49,8 @@ def client(store, tmp_path, monkeypatch):
     # Patch the module's globals directly instead, mirroring
     # tests/test_m2_portal.py::test_existing_run_and_latest_endpoints_still_work.
     monkeypatch.setattr(portal_module, "_STATE_DIR", tmp_path)
-    monkeypatch.setattr(portal_module, "_LATEST_PATH", tmp_path / "latest.json")
-    monkeypatch.setattr(portal_module, "_LATEST", None)
+    monkeypatch.setattr(portal_module, "_LATEST_DIR", tmp_path / "latest")
+    monkeypatch.setattr(portal_module, "_LATEST", {})
     app.dependency_overrides[get_campaign_store] = lambda: store
     try:
         yield TestClient(app)
@@ -331,10 +331,10 @@ def test_reanalyze_analyze_failure_does_not_advance_round_or_fold(store, client,
     assert resp.json()["campaign"]["n_base"] == len(df) + 1
 
 
-def test_reanalyze_on_legacy_campaign_without_generation_key(store, client, tmp_path):
-    """A campaign.json written before the `generation` token existed has no
-    such key. The first reanalyze after upgrade must not crash (KeyError -> 500)
-    — plan_fold reads it with .get(), so it folds normally. Regression for the
+def test_reanalyze_on_legacy_campaign_without_generation_key(store, client):
+    """A campaign row written before the `generation` token existed has no such
+    key. The first reanalyze after upgrade must not crash (KeyError -> 500) —
+    plan_fold reads it with .get(), so it folds normally. Regression for the
     migration crash."""
     import json as _json
 
@@ -346,11 +346,14 @@ def test_reanalyze_on_legacy_campaign_without_generation_key(store, client, tmp_
     ]}).json()["started"]
     client.post("/api/campaign/result", json={"id": started[0]["id"], "value": 6.0})
 
-    # simulate a pre-generation file: strip the key as the last write before reanalyze
-    path = tmp_path / "campaign.json"
-    state = _json.loads(path.read_text())
+    # simulate a pre-generation row: strip the key as the last write before reanalyze
+    state = store.get()
+    assert state is not None
     state.pop("generation", None)
-    path.write_text(_json.dumps(state))
+    with store._conn:
+        store._conn.execute(
+            "UPDATE campaigns SET state = ? WHERE tenant = ?", (_json.dumps(state), "default")
+        )
 
     resp = client.post("/api/campaign/reanalyze")
     assert resp.status_code == 200, resp.text
@@ -358,7 +361,8 @@ def test_reanalyze_on_legacy_campaign_without_generation_key(store, client, tmp_
     assert body["campaign"]["round"] == 1
     assert body["campaign"]["n_base"] == len(df) + 1
     # the migration is self-healing: the commit re-stamped a real generation
-    assert "generation" in _json.loads(path.read_text())
+    final = store.get()
+    assert final is not None and "generation" in final
 
 
 def test_commit_fold_aborts_when_campaign_reseeded_underneath(store):

@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-07-22 (later)
+
+### Changed - production hardening Phase 1b: per-tenant persistence (`docs/HARDENING.md`)
+
+Every portal read/write is now keyed by the caller's tenant (`Principal.tenant` from the auth layer), so two tenants can never see or overwrite each other's campaign or analysis. Backward compatible: in open mode everything maps to the `default` tenant, so the dev/pilot loop is unchanged.
+
+- `kalos/portal/campaign.py`: the `CampaignStore` is now backed by **SQLite** - one `campaigns(tenant, state, updated_at)` row per tenant in `<state_dir>/portal.db`, replacing the single `~/.kalos/campaign.json`. Each method takes a `tenant` (default `"default"`); each write is one transaction. The transactional generation-token logic is unchanged (it lives inside the per-tenant `state` blob).
+- `kalos/portal/app.py`: `_LATEST` is now a per-tenant map plus a per-tenant best-effort cache file under `<state_dir>/latest/<tenant>.json` (tenant sanitized for the filename), replacing the single global. `/api/latest` requires the `read` scope and returns the caller's tenant's analysis; `/api/run` seeds the campaign and saves latest under `Principal.tenant`.
+- `kalos/portal/campaign_routes.py`: `GET /api/campaign` requires `read`; every store call (`summary`/`start`/`set_result`/`plan_fold`/`commit_fold`/`get`) and the reanalyze `_save_latest`/`_load_latest` pass `principal.tenant`.
+- `tests/test_tenant_isolation.py` (new): 4 tests - campaigns and `/api/latest` isolated per tenant at the store level, reseeding one tenant never touches another, and an HTTP end-to-end proof that one tenant's campaign is invisible and untouchable by another through the authenticated API. Existing portal/campaign fixtures updated for the SQLite + per-tenant-latest shape.
+
 ## 2026-07-22
 
 ### Added - production hardening Phase 1a: in-house API authentication (`kalos/portal/auth.py`)

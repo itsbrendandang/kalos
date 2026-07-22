@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from kalos.portal.auth import WRITE, Principal, require_scope
+from kalos.portal.auth import READ, WRITE, Principal, require_scope
 from kalos.portal.campaign import CampaignError, CampaignStore, get_campaign_store
 
 log = logging.getLogger("kalos.portal")
@@ -43,21 +43,24 @@ class _ResultBody(BaseModel):
 
 
 @router.get("/api/campaign")
-def get_campaign(store: CampaignStore = Depends(get_campaign_store)) -> dict[str, Any]:
-    """The current campaign summary for the `/decide` view, or
+def get_campaign(
+    store: CampaignStore = Depends(get_campaign_store),
+    principal: Principal = Depends(require_scope(READ)),
+) -> dict[str, Any]:
+    """The caller's tenant's campaign summary for the `/decide` view, or
     `{"has_campaign": false}` before any upload has ever seeded one."""
-    return store.summary()
+    return store.summary(tenant=principal.tenant)
 
 
 @router.post("/api/campaign/start")
 def start_campaign(
     body: _StartBody,
     store: CampaignStore = Depends(get_campaign_store),
-    _principal: Principal = Depends(require_scope(WRITE)),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     """Append each proposed recipe as a pending, awaiting run. Requires `write`."""
     try:
-        started = store.start(body.recipes)
+        started = store.start(body.recipes, tenant=principal.tenant)
     except CampaignError as exc:
         # Authored by CampaignStore, not a raw library error — safe to echo.
         log.warning("campaign start rejected: %s", exc)
@@ -69,13 +72,13 @@ def start_campaign(
 def log_campaign_result(
     body: _ResultBody,
     store: CampaignStore = Depends(get_campaign_store),
-    _principal: Principal = Depends(require_scope(WRITE)),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     """Set the measured outcome on a pending run. Requires `write`. 400 on an
     unknown id or a non-finite value — an unmeasured or bad-value run must never
     silently become foldable into the base dataset."""
     try:
-        run = store.set_result(body.id, body.value)
+        run = store.set_result(body.id, body.value, tenant=principal.tenant)
     except CampaignError as exc:
         log.warning("campaign result rejected: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -85,7 +88,7 @@ def log_campaign_result(
 @router.post("/api/campaign/reanalyze")
 async def reanalyze_campaign(
     store: CampaignStore = Depends(get_campaign_store),
-    _principal: Principal = Depends(require_scope(WRITE)),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     """Fold every measured pending run into the base dataset, re-run the
     engine (`_analyze`) on the grown dataset, and persist it as the new
@@ -117,10 +120,12 @@ async def reanalyze_campaign(
     from kalos.domains import BIOPROCESS_PROFILE
     from kalos.portal.app import _analyze, _load_latest, _save_latest
 
+    tenant = principal.tenant
     # Transactional re-analyze (docs/CAMPAIGN_LOOP.md): plan the fold in memory,
-    # run the (slow, thread-offloaded) analysis, and only THEN commit.
+    # run the (slow, thread-offloaded) analysis, and only THEN commit. All store
+    # and /api/latest access is scoped to this tenant.
     try:
-        df, target, generation = store.plan_fold()
+        df, target, generation = store.plan_fold(tenant=tenant)
     except CampaignError as exc:
         log.warning("reanalyze rejected: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -140,7 +145,7 @@ async def reanalyze_campaign(
         return JSONResponse({"error": "could not analyze the campaign data"}, status_code=400)
 
     try:
-        state = store.commit_fold(generation)
+        state = store.commit_fold(generation, tenant=tenant)
     except CampaignError as exc:
         # The campaign was reseeded/rewritten while _analyze ran: `result`
         # describes a base dataset that no longer exists. Do NOT _save_latest —
@@ -156,7 +161,7 @@ async def reanalyze_campaign(
     # and _LATEST have independent locks taken in opposite orders by the upload
     # path, so they cannot be spanned by one lock without risking deadlock; this
     # re-check is the safe ceiling — see this function's docstring.)
-    current = store.get()
+    current = store.get(tenant=tenant)
     if current is None or current.get("generation") != state["generation"]:
         log.warning("reanalyze committed but a fresh upload landed; skipping stale /api/latest write")
         return JSONResponse(
@@ -164,10 +169,12 @@ async def reanalyze_campaign(
             status_code=409,
         )
 
-    _save_latest(result, f"campaign round {state['round']}")
+    _save_latest(result, f"campaign round {state['round']}", tenant=tenant)
     # Return the SAME shape GET /api/latest returns: _save_latest stamps the
     # persisted state with `dataset` and `updated`, so read it back rather than
     # returning the bare `result` (which lacks those two fields the frontend's
     # PopulatedResult type expects).
-    saved = _load_latest() or result
-    return JSONResponse({"analysis": {"has_data": True, **saved}, "campaign": store.summary()})
+    saved = _load_latest(tenant) or result
+    return JSONResponse(
+        {"analysis": {"has_data": True, **saved}, "campaign": store.summary(tenant=tenant)}
+    )
