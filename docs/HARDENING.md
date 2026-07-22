@@ -33,9 +33,12 @@ The campaign is now a SQLite row per tenant in `<state_dir>/portal.db` (`campaig
 So two tenants can never see or overwrite each other's campaign or analysis.
 Follow-up: move the `latest` cache into the same SQLite store as a row, and add an `owner`/`created_by` column for finer-grained authorization.
 
-**1c. Secrets + transport.**
-Move `KALOS_*` secrets behind a secrets provider abstraction (env for dev, file/e.g. Vault for prod).
-Document TLS termination (reverse proxy) and tighten CORS from "any localhost" to an explicit allowlist when auth is on.
+**1c. Transport + secrets (in progress).**
+CORS is now an explicit allowlist when `KALOS_CORS_ORIGINS` is set (the production posture) and the permissive localhost regex otherwise (`kalos/portal/config.py`); the effective security posture (auth + CORS) is logged once at startup, with a warning when the portal is not locked down.
+TLS is terminated by a reverse proxy in front of the app (deployment note below); the app speaks plain HTTP on the loopback to the proxy.
+Follow-up: a secrets-provider abstraction so `KALOS_*` secrets can come from a file/Vault instead of the environment, and tightening CORS methods/headers from `*` to the minimum the client needs.
+
+**Deployment (transport):** run the app behind a TLS-terminating reverse proxy (nginx/Caddy/an ALB). The proxy holds the certificate and forwards to the app over loopback; set `KALOS_CORS_ORIGINS` to the exact browser origin(s) the proxy serves.
 
 ### Phase 2 - Reliability and scale
 
@@ -57,6 +60,7 @@ Document TLS termination (reverse proxy) and tighten CORS from "any localhost" t
 | `KALOS_AUTH_TOKENS_FILE` | Path to a JSON file of provisioned principals (see below). Takes precedence over the env var. | unset |
 | `KALOS_AUTH_TOKENS` | Inline JSON array of provisioned principals. | unset |
 | `KALOS_RUNNER_TOKEN` | Legacy single-token gate for the machine-to-machine `/api/experiments/{id}/result` channel. Subsumed by the token layer over time. | unset |
+| `KALOS_CORS_ORIGINS` | Comma-separated explicit CORS allowlist (e.g. `https://app.acme.com`). When set, replaces the permissive localhost default. | unset (dev localhost) |
 
 When neither `KALOS_AUTH_TOKENS_FILE` nor `KALOS_AUTH_TOKENS` is set, the API runs in **open mode** (anonymous `default` tenant, read+write, admin withheld) and logs a warning at startup.
 
@@ -84,5 +88,6 @@ echo "give this to the caller once: $TOKEN"
 ## Status log
 
 - Phase 1a authentication + authorization: **done** (merged).
-- Phase 1b tenant-scoped persistence: **done** on `feat/hardening-tenancy` (campaign -> SQLite rows per tenant; `/api/latest` per tenant; every store call keyed by `Principal.tenant`).
-- Phase 1c secrets/TLS/CORS and all later phases: planned, not started.
+- Phase 1b tenant-scoped persistence: **done** (merged) - campaign -> SQLite rows per tenant; `/api/latest` per tenant; every store call keyed by `Principal.tenant`.
+- Phase 1c transport/CORS: **done** on `feat/hardening-1c` - CORS allowlist via `KALOS_CORS_ORIGINS`, startup security-posture logging, TLS-via-proxy deployment note. Secrets-provider abstraction deferred.
+- Phase 2 (reliability) and Phase 3 (operability): planned, not started.

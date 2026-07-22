@@ -2,6 +2,15 @@
 
 Newest first.
 
+## 2026-07-22 (even later still)
+
+### Added - production hardening Phase 1c: CORS allowlist + startup security posture (`kalos/portal/config.py`)
+
+- `kalos/portal/config.py` (new): centralizes the portal's deployment security config. CORS is an explicit allowlist when `KALOS_CORS_ORIGINS` is set (the production posture) and the permissive localhost regex otherwise (dev/pilot, unchanged). `log_security_posture` logs auth+CORS state once at startup and warns when the portal is not locked down.
+- `kalos/portal/app.py`: the CORS middleware now uses `cors_config()`; the posture is logged at startup.
+- `docs/HARDENING.md`: `KALOS_CORS_ORIGINS` config reference and a TLS-via-reverse-proxy deployment note.
+- `tests/test_config.py` (new): 9 tests - allowlist parsing, dev-default regex vs configured allowlist, and the posture warning.
+
 ## 2026-07-22 (later)
 
 ### Changed - production hardening Phase 1b: per-tenant persistence (`docs/HARDENING.md`)
