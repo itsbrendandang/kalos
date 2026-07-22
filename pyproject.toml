@@ -26,7 +26,12 @@ protein = ["transformers>=4.40"]
 # The web portal (FastAPI viewer over the live engine). The portal drives the
 # live GP surrogate, so it needs `ml` too - install as `kalos[ml,portal]`.
 portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9", "openpyxl>=3.1"]
-dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs"]
+# `httpx` is the transport `starlette.testclient.TestClient` (used across the
+# portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
+# a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
+# portal test errors at import. Pinned below starlette's httpx2 cutover to keep
+# the proven, locally-green transport. See CHANGELOG 2026-07-21 (later).
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs", "httpx>=0.27,<1"]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]

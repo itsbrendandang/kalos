@@ -527,6 +527,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pandas-stubs", version = "2.3.3.260113", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas-stubs", version = "3.0.3.260530", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -557,6 +558,7 @@ requires-dist = [
     { name = "botorch", marker = "extra == 'ml'", specifier = ">=0.11" },
     { name = "fastapi", marker = "extra == 'portal'", specifier = ">=0.110" },
     { name = "gpytorch", marker = "extra == 'ml'", specifier = ">=1.11" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27,<1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "openpyxl", marker = "extra == 'portal'", specifier = ">=3.1" },

@@ -20,6 +20,24 @@ Design and full contract in `docs/CAMPAIGN_LOOP.md`.
 
 `tests/test_campaign.py`: 12 tests (seed, summary states, start, result validation, and the fold-and-re-analyze round-trip that grows the base, increments the round, and extends the history trajectory).
 
+### Fixed - campaign re-analyze is now transactional (no data loss, no phantom rounds)
+
+Review of the closed loop surfaced a persist-then-validate ordering defect: `fold_and_snapshot` committed the fold (round++, measured runs merged into `base_rows`) to disk *before* `_analyze` ran, so an analysis failure permanently advanced the round with no rollback, and a concurrent `/api/run` upload during the multi-second analysis could silently destroy the just-folded measured data and clobber `/api/latest` with stale numbers.
+
+- `kalos/portal/campaign.py`: `fold_and_snapshot` is split into `plan_fold()` (computes the folded dataset in memory, mutating nothing) and `commit_fold(generation)` (persists only if the campaign is unchanged).
+  Every write now stamps a fresh `generation` token, so a re-analysis that was planned against one campaign refuses to commit if a `seed()`/`set_result`/`start` landed underneath it.
+- `kalos/portal/campaign_routes.py`: `reanalyze` now plans the fold, runs `_analyze`, and only then commits - so a failed analysis leaves the campaign untouched (a retry is meaningful), and a campaign reseeded mid-analysis returns `409` without ever calling `_save_latest`, so `campaign.json` is never overwritten with stale results.
+  Re-analyzing with no newly measured run is rejected up front (it would only inflate the round and the progress trajectory).
+- `/api/latest` is a separate resource (own lock, taken in the opposite order by the upload path), so its final write is guarded best-effort: the route re-checks the campaign generation immediately before `_save_latest` and skips the stale write if a fresh upload reseeded in between.
+  This eliminates the multi-second race across `_analyze` and the upload-lands-after-commit case; a sub-millisecond residual window is documented in `docs/CAMPAIGN_LOOP.md` (fully sealing it needs an ordered stamp on `_LATEST`).
+- `kalos/portal/campaign.py`: `plan_fold` reads `generation` with `.get()` so a pre-token `campaign.json` re-analyzes without crashing (`KeyError` -> `500`); the migration is self-healing (the commit re-stamps a real token).
+- `kalos/portal/campaign.py`: `start()` now validates each `recipe` is a non-empty mapping and raises `CampaignError` at the point of the bad input, instead of surfacing as an unhandled `500` rounds later inside the fold.
+- `kalos/portal/campaign_routes.py`: documented the deliberate unauthenticated auth posture for `/api/campaign*` (browser-facing, localhost-bound, same as `/api/run`).
+- `docs/CAMPAIGN_LOOP.md`: added Mermaid diagrams (the closed loop, the pending-run lifecycle, the transactional re-analyze sequence) and documented the transactional design and the residual `/api/latest` window.
+- `pyproject.toml`: added `httpx>=0.27,<1` to the `dev` extra. `starlette.testclient.TestClient` (used by every portal test) needs `httpx`, but it is not pulled in transitively, so CI's `pip install -e ".[ml,portal,dev]"` left it absent and the whole portal suite errored at import (`RuntimeError: ... requires the httpx2 package`). This was red on `feat/campaign-loop` before this branch; the fix lands with the merge.
+
+`tests/test_campaign.py`: +8 tests - malformed-recipe rejection (×4), no-measured-runs rejection, `_analyze`-failure leaves round/base untouched then a retry folds normally, `commit_fold` aborting when the campaign is reseeded underneath it, and re-analyze on a legacy (pre-`generation`) `campaign.json` not crashing.
+
 ## 2026-07-21
 
 ### Changed - CI now gates ruff + mypy + the portal tests, and the type layer is clean

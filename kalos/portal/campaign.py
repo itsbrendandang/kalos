@@ -89,7 +89,18 @@ class CampaignStore:
         return data if isinstance(data, dict) else None
 
     def _write_locked(self, state: dict[str, Any]) -> None:
-        """Persist `state` atomically. Caller must hold `self._lock`."""
+        """Persist `state` atomically, stamping it with a fresh `generation`
+        token. Caller must hold `self._lock`.
+
+        Every write mints a new `generation` (a random token), so any
+        intervening write — a `seed()` from a concurrent `/api/run`, a
+        `set_result`, another `start` — is detectable: a re-analyze captures
+        the generation it planned against (`plan_fold`) and refuses to commit
+        (`commit_fold`) if it changed underneath. This is what stops a
+        concurrent upload from silently destroying just-folded measured data
+        (see docs/CAMPAIGN_LOOP.md, "Re-analyze = the loop closing").
+        """
+        state["generation"] = uuid.uuid4().hex
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(state))
@@ -176,9 +187,18 @@ class CampaignStore:
             now = time.time()
             appended: list[dict[str, Any]] = []
             for recipe in recipes:
+                # Validate the recipe mapping HERE, at the point of the bad
+                # input, so a malformed body 400s cleanly at /api/campaign/start
+                # rather than surfacing as an unhandled 500 rounds later inside
+                # fold_and_snapshot's `{**recipe, target: result}` expansion.
+                recipe_map = recipe.get("recipe")
+                if not isinstance(recipe_map, dict) or not recipe_map:
+                    raise CampaignError(
+                        "each recipe must include a non-empty 'recipe' mapping of feature -> value"
+                    )
                 run = {
                     "id": uuid.uuid4().hex,
-                    "recipe": recipe.get("recipe"),
+                    "recipe": recipe_map,
                     "pred": recipe.get("pred"),
                     "std": recipe.get("std"),
                     "mode": recipe.get("mode"),
@@ -214,18 +234,70 @@ class CampaignStore:
                     return run
             raise CampaignError(f"unknown pending run id {run_id!r}")
 
-    def fold_and_snapshot(self) -> tuple[pd.DataFrame, str, dict[str, Any]]:
-        """Fold every measured pending run into `base_rows`, drop them from
-        `pending` (awaiting runs stay), increment `round`, and persist.
+    def plan_fold(self) -> tuple[pd.DataFrame, str, str | None]:
+        """Compute the folded base dataset WITHOUT persisting anything.
 
-        Returns `(DataFrame(base_rows), target, updated_campaign_state)` for
-        the caller (`kalos.portal.campaign_routes`) to re-run `_analyze` on —
-        this store stays torch-free and never calls `_analyze` itself.
+        Returns `(DataFrame(folded_base_rows), target, generation)` where the
+        DataFrame is `base_rows` plus every measured pending run folded in, and
+        `generation` is the token of the campaign state this plan was built
+        from. The caller (`kalos.portal.campaign_routes`) runs `_analyze` on
+        the DataFrame and, only if that succeeds, calls `commit_fold(generation)`
+        to make the fold durable.
+
+        `generation` is read with `.get()` (not `[]`): a `campaign.json` written
+        before the generation token existed has no such key, and the very first
+        re-analyze after that upgrade must not crash. It flows back as `None`,
+        which `commit_fold` compares by equality just like any other token — and
+        the migration is self-healing, because `commit_fold`'s own write mints a
+        real generation from then on.
+
+        Nothing is mutated or written here, so a `_analyze` failure — or a
+        concurrent `seed()` from a fresh upload — leaves the campaign exactly
+        as it was: no lost round, no half-folded base (docs/CAMPAIGN_LOOP.md,
+        "Re-analyze = the loop closing"). Raises `CampaignError` if there is no
+        active campaign or no measured run to fold (re-analyzing with nothing
+        new would only inflate `round` and the progress trajectory).
         """
         with self._lock:
             state = self._read_locked()
             if state is None:
                 raise CampaignError("no active campaign; upload a run sheet first")
+            target = state["target"]
+            folded = list(state["base_rows"])
+            measured = 0
+            for run in state["pending"]:
+                if run["result"] is not None:
+                    folded.append({**run["recipe"], target: run["result"]})
+                    measured += 1
+            if measured == 0:
+                raise CampaignError("no measured runs to fold; log at least one result first")
+            return pd.DataFrame(folded), target, state.get("generation")
+
+    def commit_fold(self, generation: str | None) -> dict[str, Any]:
+        """Make the fold planned by `plan_fold` durable, but ONLY if the
+        campaign has not changed since (its `generation` still matches).
+
+        Folds every measured pending run into `base_rows`, drops them from
+        `pending` (awaiting runs stay), increments `round`, appends the
+        progress-trajectory point, and persists. Returns the updated state.
+
+        Raises `CampaignError` if the campaign was reseeded or otherwise
+        written underneath the in-flight re-analysis (`generation` mismatch):
+        the analysis the caller just computed describes a base dataset that no
+        longer exists, so committing it — and letting the caller overwrite
+        `/api/latest` with it — would silently destroy the newer data. The
+        caller turns this into a "please retry" 409 and leaves `/api/latest`
+        untouched.
+        """
+        with self._lock:
+            state = self._read_locked()
+            if state is None:
+                raise CampaignError("no active campaign; nothing to commit")
+            if state.get("generation") != generation:
+                raise CampaignError(
+                    "the campaign changed during re-analysis (a new upload or result "
+                    "landed); nothing was committed — please re-analyze again"
+                )
             target = state["target"]
             still_pending: list[dict[str, Any]] = []
             for run in state["pending"]:
@@ -247,7 +319,7 @@ class CampaignStore:
             )
             state["updated_at"] = time.time()
             self._write_locked(state)
-            return pd.DataFrame(state["base_rows"]), target, state
+            return state
 
 
 # --- module-level singleton, mirroring kalos.portal.experiments.get_store --- #

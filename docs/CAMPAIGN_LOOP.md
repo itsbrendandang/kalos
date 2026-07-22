@@ -10,6 +10,30 @@ This is the loop that closes: propose -> run -> log outcome -> re-propose.
 It deliberately reuses the existing analysis path (`_analyze` in `kalos/portal/analysis.py`) and adds no new engine capability.
 A campaign is just a growing dataset that gets re-analyzed each round.
 
+## The loop at a glance
+
+```mermaid
+flowchart LR
+    Upload(["/api/run upload"]) --> Seed["seed campaign<br/>base_rows · round 0"]
+    Seed --> Analyze[["_analyze()<br/>propose a batch"]]
+    Analyze --> Decide{{"/decide:<br/>scientist picks recipes"}}
+    Decide -->|"POST /api/campaign/start"| Pending["pending runs<br/>awaiting"]
+    Pending --> Lab["run in the lab"]
+    Lab -->|"POST /api/campaign/result"| Measured["pending runs<br/>measured"]
+    Measured --> Reprop{"enough<br/>measured?"}
+    Reprop -->|"not yet"| Lab
+    Reprop -->|"POST /api/campaign/reanalyze"| Fold["fold measured runs<br/>into base_rows · round + 1"]
+    Fold --> Analyze
+
+    classDef engine fill:#1e293b,stroke:#38bdf8,color:#e2e8f0;
+    classDef human fill:#0f2e1d,stroke:#34d399,color:#d1fae5;
+    class Seed,Analyze,Fold engine;
+    class Decide,Lab human;
+```
+
+The engine boxes (`_analyze`, seed, fold) are pure re-runs of the existing analysis path; the human steps (pick recipes, run in the lab) are where the round actually advances.
+Each trip around the loop grows `base_rows` by the runs that were measured, so the next proposed batch accounts for them.
+
 ## Concept
 
 A **campaign** is one optimization target plus a growing table of (recipe -> measured outcome) rows.
@@ -18,6 +42,23 @@ A **campaign** is one optimization target plus a growing table of (recipe -> mea
 - **pending runs**: recipes the scientist started from a proposed batch. Each is either *awaiting* a measured outcome (`result: null`) or *measured* (`result` filled), waiting to be folded into base on the next re-analyze.
 
 One campaign at a time (single local user). It lives in `~/.kalos/campaign.json`, guarded by a lock and written atomically, mirroring the `_LATEST` state pattern in `kalos/portal/app.py`.
+
+Every pending run walks a strict one-way lifecycle - and an *awaiting* run can never skip a step and silently become a data point:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Awaiting: start()<br/>result = null
+    Awaiting --> Awaiting: survives every reanalyze<br/>until measured
+    Awaiting --> Measured: set_result()<br/>finite value only
+    Measured --> BaseRow: reanalyze / commit_fold()<br/>folded into base_rows
+    BaseRow --> [*]: now permanent measured data
+    note right of Measured
+        a non-finite (NaN/inf)
+        value is rejected at
+        set_result(), never stored
+    end note
+```
 
 ## State shape (`~/.kalos/campaign.json`)
 
@@ -37,11 +78,13 @@ One campaign at a time (single local user). It lives in `~/.kalos/campaign.json`
     }
   ],
   "round": 2,
-  "updated_at": 1690000000.0
+  "updated_at": 1690000000.0,
+  "generation": "3f9a1c8b..."
 }
 ```
 
 `features` and `target` come from the analysis result (`proposal_features`, `target`), so the campaign never guesses column roles - it takes them from the engine.
+`generation` is re-minted on every single write (`seed`, `start`, `set_result`, `commit_fold`); a re-analysis captures the generation it planned against and refuses to commit if it changed underneath - see "Re-analyze = the loop closing" below.
 
 ## Seeding
 
@@ -56,7 +99,7 @@ A fresh upload starts a fresh campaign (new base, empty pending, round 0).
 | GET | `/api/campaign` | - | Campaign summary for the `/decide` view (below), or `{"has_campaign": false}` before any upload. |
 | POST | `/api/campaign/start` | `{"recipes": [{recipe, pred, std, mode, reason}]}` | Append each recipe as a pending awaiting run. Returns the appended runs with ids. |
 | POST | `/api/campaign/result` | `{"id": "...", "value": 3.2}` | Set the measured outcome on a pending run. 400 on unknown id or non-finite value. |
-| POST | `/api/campaign/reanalyze` | - | Fold every measured pending run into base rows, drop them from pending, increment `round`, rebuild the DataFrame, run `_analyze`, `_save_latest`. Returns `{analysis, campaign}`. Awaiting (unmeasured) runs stay pending. |
+| POST | `/api/campaign/reanalyze` | - | Fold every measured pending run into base rows, run `_analyze` on the grown dataset, and commit + `_save_latest`. Returns `{analysis, campaign}`. Awaiting runs stay pending. `400` if there is nothing new to fold; `409` if the campaign was reseeded mid-analysis (retry). See below. |
 
 `GET /api/campaign` response:
 
@@ -84,16 +127,52 @@ Because base rows only grow, `best` is non-decreasing across the trajectory.
 
 ## Re-analyze = the loop closing
 
-`reanalyze` is the whole point:
+`reanalyze` is the whole point - and it is **transactional**, because `_analyze` is a multi-second GP fit and a fresh `/api/run` upload can land right in the middle of it.
+The naive "fold first, then analyze" ordering would let a failed analysis strand a half-advanced campaign, and let a concurrent upload silently destroy the just-folded data.
+So the fold is planned in memory, the analysis runs, and only then is the fold committed - and only if nothing changed underneath:
 
-1. Every pending run with a non-null `result` becomes a base row: `{**recipe, target: result}`.
-2. Those runs leave `pending`; awaiting runs stay.
-3. `round += 1`.
-4. Build `df = DataFrame(base_rows)`, call `_analyze(df, target, profile=BIOPROCESS_PROFILE)`, then `_save_latest(result, "campaign round N")`.
-5. Return the fresh analysis (same shape `/api/latest` returns) plus the updated campaign.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as /decide (browser)
+    participant R as reanalyze route
+    participant S as CampaignStore
+    participant A as _analyze (worker thread)
+
+    UI->>R: POST /api/campaign/reanalyze
+    R->>S: plan_fold()
+    Note over S: reads state, folds measured runs<br/>in memory — writes NOTHING
+    S-->>R: (df, target, generation G1)
+    R->>A: _analyze(df) — slow GP fit
+    Note over S: a concurrent /api/run may<br/>seed() here (generation G2)
+    A-->>R: analysis result
+    R->>S: commit_fold(G1)
+    alt generation still G1 (no upload landed)
+        S-->>R: committed — round + 1, new generation
+        R->>R: re-check generation, then _save_latest
+        R-->>UI: 200 {analysis, campaign}
+    else generation changed (upload reseeded)
+        S-->>R: CampaignError
+        R-->>UI: 409 — retry, /api/latest untouched
+    end
+```
+
+What each step guarantees:
+
+1. **`plan_fold()`** reads the state, folds every measured pending run into a DataFrame *in memory*, and returns it with the campaign's current `generation` token. It writes nothing, so a later failure costs nothing. It rejects a re-analyze with no measured run to fold (that would only inflate the round).
+2. **`_analyze`** runs on the grown DataFrame, off the event loop in a worker thread. If it raises, the campaign is still exactly as it was - a retry is meaningful.
+3. **`commit_fold(generation)`** re-reads the state and writes the fold (measured runs → `base_rows`, `round += 1`, new history point) **only if the `generation` still matches**. Every write mints a fresh generation, so if a `seed()`/`set_result`/`start` landed during `_analyze`, the token differs and the commit is refused with a `409` - the analysis described a dataset that no longer exists, and nothing is written.
+4. **`_save_latest`** publishes the fresh analysis to `/api/latest`, then the route returns it (same shape `GET /api/latest` returns) plus the updated campaign.
 
 The next `/api/latest` and the next `GET /api/campaign` both reflect the folded-in data, so `/decide` shows a batch that accounts for the results just logged.
 This adds no engine capability - it is the same `_analyze` the upload path runs, on a dataset that grew by one round.
+
+### A note on `/api/latest` and the residual window
+
+`campaign.json` is fully guarded by the `generation` token. `/api/latest` (`_LATEST`) is a *separate* resource with its own lock, and the upload path takes the two locks in the opposite order from the re-analyze path, so they cannot be spanned by a single lock without risking a deadlock.
+The route therefore re-checks the generation once more immediately before `_save_latest` and skips the write if a fresh upload reseeded in between (that upload already published its own newer analysis).
+This eliminates the entire multi-second race across `_analyze` and closes the upload-lands-after-commit case; a sub-millisecond window between the final re-check and `_save_latest` remains.
+Fully sealing it would require an ordered generation stamp on `_LATEST` itself so an older analysis can never overwrite a newer one - a deliberate follow-up, not shipped here, and negligible for a single-local-user localhost portal.
 
 ## Honesty constraints (do not regress)
 
