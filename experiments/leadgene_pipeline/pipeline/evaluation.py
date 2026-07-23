@@ -43,12 +43,25 @@ class MethodResult:
     collapsed_on_client: bool = False
 
     @property
+    def validated(self) -> bool:
+        """Real CV signal at this sample size: the bootstrap 95% CI on CV
+        Spearman excludes 0. Identical to how `verdict` is set in
+        CrossValidator.bootstrap_ci -- the point estimate alone is unreliable
+        down at small n, so this, not `cv_spearman > 0`, is the honest gate."""
+        return self.ci_low > 0.0
+
+    @property
     def weight(self) -> float:
-        """Zero out a method that (a) shows no real CV signal, or (b) has
-        collapsed to a near-constant prediction on the client cohort -- real
+        """Zero out a method unless its CV signal is VALIDATED (bootstrap CI
+        excludes 0) and it has not collapsed to a near-constant prediction on
+        the client cohort. Gating on the raw point estimate (max(0, cv_spearman))
+        would let a NOT VALIDATED method -- CI crossing 0 -- drive the blend,
+        breaking the 'trust the verdict, not the point estimate' contract. Real
         in-distribution skill that provides zero differentiation for these
-        specific wells is not something a blend should trust."""
-        return 0.0 if self.collapsed_on_client else max(0.0, self.cv_spearman)
+        specific wells is likewise not something a blend should trust."""
+        if self.collapsed_on_client or not self.validated:
+            return 0.0
+        return self.cv_spearman
 
 
 @dataclass

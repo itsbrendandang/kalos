@@ -32,3 +32,26 @@ leverage:
    meaningfully; revisit once row count grows.
 7. **Reference-data parity check.** Get Leadgene's original moat dataset and
    compare numbers directly — isolates whether any remaining gap is data or method.
+
+# Code-quality backlog (2026-07-23 review)
+
+A review after vendoring this pipeline into kalos `experiments/` fixed the
+honesty-layer issues (the blend weight, confidence tier, and analysis
+Interpretation now gate on the bootstrap-CI verdict, not the raw CV Spearman
+point estimate; the collapse check is scale-invariant; `predictions.csv` carries
+a `blend_validated` flag). The leakage audit was clean (preprocessing and feature
+selection are fold-safe). The following lower-severity items were deferred:
+
+1. **Pin `requirements.txt`.** Unpinned deps undercut the reproducibility the
+   verdict layer promises; pin to the versions this lab was validated against.
+2. **Defensively exclude `source_col` from features.** Today it is only kept out
+   of the model incidentally, via dtype; exclude it by name so a numeric-coded
+   source can never leak in as a feature.
+3. **Guard `culture_duration_days == 0`** in the duration-normalized target
+   (`ingest.py`) so a bad row fails with a clear message, not a cryptic later error.
+4. **Remove the dead categorical-preprocessing path** (`preprocess.py`): the
+   pipeline is numeric-only, so the categorical branch never runs.
+5. **Guard the `.iloc[0]` seed-context reads** (`ingest.py`) for runs missing a
+   VCD Day 0/Day 4 measurement.
+6. **Out-of-fold permutation importance** (also item 5 above) would make the
+   driver figure an honest generalization signal rather than an in-sample one.

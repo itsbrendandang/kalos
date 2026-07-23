@@ -33,6 +33,14 @@ from .models import (BayesianRidgeModel, BootstrapEnsembleRegressor,
 
 MIN_UNIQUE_GROUPS = 2
 
+# A model has "collapsed" on the cohort when its predictions are near-constant,
+# i.e. it no longer differentiates the wells. Measured relative to the
+# predictions' own magnitude (coefficient of variation) so the test is
+# invariant to titer units -- an absolute epsilon silently under-detects
+# collapse on a raw-titer target where predictions are O(10-1000).
+COLLAPSE_REL_TOL = 1e-3   # spread < 0.1% of the mean prediction -> collapsed
+COLLAPSE_ABS_FLOOR = 1e-9  # predictions centered on ~0: fall back to absolute spread
+
 
 def _model_factories(cfg: dict, n_synthetic: int) -> dict:
     return {
@@ -134,6 +142,11 @@ class Report:
         model's individual predicted titer and uncertainty."""
         table = self.blend_table.rename(columns={"blended_score": "predicted_titer"}).copy()
         table = table.drop(columns=["n_methods_agreeing_top10"], errors="ignore")
+        # Run-level honesty flag carried in the primary output: True only when at
+        # least one method earned real (validated, non-collapsed) weight. False
+        # means the blend fell back to an equal-weight consensus of unvalidated
+        # models -- the ranking is not statistically distinguishable from noise.
+        table["blend_validated"] = any(r.weight > 0 for r in self.results)
         for r in self.results:
             mean = pd.Series(r.client_mean, index=r.client_well_ids)
             std = pd.Series(r.client_std, index=r.client_well_ids)
@@ -182,7 +195,10 @@ class PredictPipeline:
         results = []
         for fm in self.bundle["methods"]:
             client_mean, client_std = fm.model.score_client(cohort)
-            collapsed = bool(np.std(client_mean) < 1e-3)
+            spread = float(np.std(client_mean))
+            scale = float(np.abs(np.mean(client_mean)))
+            collapsed = (spread / scale < COLLAPSE_REL_TOL if scale > COLLAPSE_ABS_FLOOR
+                         else spread < COLLAPSE_ABS_FLOOR)
             results.append(MethodResult(
                 name=fm.name, n_train=fm.n_train, n_unique_groups=fm.n_unique_groups,
                 n_features=fm.n_features, cv_spearman=fm.cv_spearman, cv_p=fm.cv_p,

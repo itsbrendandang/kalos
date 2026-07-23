@@ -137,6 +137,8 @@ def write_analysis(report, path: str | Path) -> Path:
         L.append(", ".join(f"`{k}` (z={v})" for k, v in d["novelty"].items()) + "\n")
 
     L.append("## Interpretation\n")
+    ref_lo = d["reference_ci"][0]
+    reference_validated = ref_lo is not None and ref_lo > 0
     if _degenerate(d):
         L.append("**This ranking is not trustworthy as a differentiator.** " + " ".join(filter(None, [
             (f"No model validated at train time, so the blend fell back to an equal-weight "
@@ -150,6 +152,12 @@ def write_analysis(report, path: str | Path) -> Path:
         L.append("Root cause is data, not code: small training set (feature cap "
                  f"{d['n_features_selected']}), no cross-validated ranking clears 0, and/or the "
                  "cohort is out-of-distribution vs the training wells. See `TODO.md`.")
+    elif not reference_validated:
+        L.append("**The blend differentiates the cohort, but the reference model's ranking "
+                 "signal is NOT VALIDATED** (its bootstrap CI on CV Spearman includes 0), so "
+                 "treat the ranking as directional only, not a validated result. "
+                 "`predicted_titer` is the blended estimate (titer units); `confidence_tier` is "
+                 "cross-model agreement, not statistical validation.")
     else:
         L.append("The reference model shows a validated ranking signal; `predicted_titer` is the "
                  "blended estimate (titer units), wells are ranked by predicted titer, and "
@@ -196,7 +204,10 @@ def write_visualizations(report, figdir: str | Path, cfg: dict) -> list[Path]:
     ax.set_xlabel("Predicted titer (reference signal, relative units)")
     ax.set_ylabel("Clone / plate well")
     ax.set_title(title)
-    fig.tight_layout(); p = figdir / "fig1_ranking.png"; fig.savefig(p, dpi=150); plt.close(fig)
+    fig.tight_layout()
+    p = figdir / "fig1_ranking.png"
+    fig.savefig(p, dpi=150)
+    plt.close(fig)
     written.append(p)
 
     # ---- fig2: drivers (permutation importance) + within-plate contrast ----
@@ -224,7 +235,10 @@ def write_visualizations(report, figdir: str | Path, cfg: dict) -> list[Path]:
 
         fig.suptitle("What the model weights — and how the top picks differ",
                      fontsize=13, fontweight="bold")
-        fig.tight_layout(); p = figdir / "fig2_drivers.png"; fig.savefig(p, dpi=150); plt.close(fig)
+        fig.tight_layout()
+        p = figdir / "fig2_drivers.png"
+        fig.savefig(p, dpi=150)
+        plt.close(fig)
         written.append(p)
 
     return written
