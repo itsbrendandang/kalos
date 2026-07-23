@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from kalos.portal.auth import READ, WRITE, Principal, require_scope
 from kalos.portal.serialization import _json_safe_records
 from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
 from kalos.runner.adapter import LocalStoreAdapter
@@ -64,7 +65,9 @@ class _PatchStatusBody(BaseModel):
 
 @router.get("/api/experiments")
 def list_experiments(
-    status: str | None = None, store: SqliteStore = Depends(get_store)
+    status: str | None = None,
+    store: SqliteStore = Depends(get_store),
+    principal: Principal = Depends(require_scope(READ)),
 ) -> list[dict[str, Any]]:
     """`{id, name, status, updated_at}` for every experiment, oldest first.
 
@@ -80,7 +83,7 @@ def list_experiments(
             raise HTTPException(status_code=400, detail=f"unknown status {status!r}")
     return [
         {"id": e.id, "name": e.name, "status": e.status.value, "updated_at": e.updated_at}
-        for e in store.list(status=status_filter)
+        for e in store.list(status=status_filter, tenant=principal.tenant)
     ]
 
 
@@ -92,6 +95,7 @@ async def create_experiment(
     outcomes: str = Form(default=""),
     anonymize: bool = Form(default=False),
     store: SqliteStore = Depends(get_store),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
     """Create an experiment (DRAFT) from an uploaded run sheet.
 
@@ -118,22 +122,30 @@ async def create_experiment(
     if outcomes.strip():
         config["outcomes"] = [c.strip() for c in outcomes.split(",") if c.strip()]
     payload = {"columns": [str(c) for c in df.columns], "rows": _json_safe_records(df)}
-    exp = store.create(name, payload, config)
+    exp = store.create(name, payload, config, tenant=principal.tenant)
     return JSONResponse(exp.to_dict(), status_code=201)
 
 
 @router.get("/api/experiments/{exp_id}")
-def get_experiment(exp_id: str, store: SqliteStore = Depends(get_store)) -> dict[str, Any]:
-    """The full experiment, including `result`. 404 if it does not exist."""
+def get_experiment(
+    exp_id: str,
+    store: SqliteStore = Depends(get_store),
+    principal: Principal = Depends(require_scope(READ)),
+) -> dict[str, Any]:
+    """The full experiment, including `result`. 404 if it does not exist for
+    this tenant (a cross-tenant id reads as not-found)."""
     try:
-        return store.get(exp_id).to_dict()
+        return store.get(exp_id, tenant=principal.tenant).to_dict()
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
 
 
 @router.patch("/api/experiments/{exp_id}")
 def patch_experiment_status(
-    exp_id: str, body: _PatchStatusBody, store: SqliteStore = Depends(get_store)
+    exp_id: str,
+    body: _PatchStatusBody,
+    store: SqliteStore = Depends(get_store),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> dict[str, Any]:
     """Set an experiment's status - this is how the front end flips the READY
     flag.
@@ -164,7 +176,7 @@ def patch_experiment_status(
         )
 
     try:
-        current = store.get(exp_id)
+        current = store.get(exp_id, tenant=principal.tenant)
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
 
@@ -178,7 +190,9 @@ def patch_experiment_status(
         )
 
     try:
-        exp = store.set_status(exp_id, new_status, force=body.force, error=body.error)
+        exp = store.set_status(
+            exp_id, new_status, force=body.force, error=body.error, tenant=principal.tenant
+        )
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
     except IllegalTransition as exc:
@@ -267,13 +281,14 @@ def run_experiment(
     force: bool = False,
     store: SqliteStore = Depends(get_store),
     lock_path: str | Path | None = Depends(get_lock_path),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> dict[str, Any]:
-    """Run one experiment now (`singleton.run_one`). The run always completes:
-    a zero-variance target (or any other analysis failure) lands the
-    experiment on FAILED with the actionable message at HTTP 200 - the run
-    itself did not error, the experiment did.
+    """Run one of the caller's experiments now (`singleton.run_one`). The run
+    always completes: a zero-variance target (or any other analysis failure)
+    lands the experiment on FAILED with the actionable message at HTTP 200 - the
+    run itself did not error, the experiment did.
     """
-    adapter = LocalStoreAdapter(store)
+    adapter = LocalStoreAdapter(store, tenant=principal.tenant)
     try:
         run_one(adapter, exp_id, force=force, lock_path=lock_path)
     except ExperimentNotFound:
@@ -281,20 +296,21 @@ def run_experiment(
     except (ValueError, RuntimeError) as exc:
         # Already DONE without force, or the Singleton lock is held elsewhere.
         raise HTTPException(status_code=409, detail=str(exc))
-    return store.get(exp_id).to_dict()
+    return store.get(exp_id, tenant=principal.tenant).to_dict()
 
 
 @router.post("/api/experiments/run-ready")
 def run_all_ready(
     store: SqliteStore = Depends(get_store),
     lock_path: str | Path | None = Depends(get_lock_path),
+    principal: Principal = Depends(require_scope(WRITE)),
 ) -> list[dict[str, Any]]:
-    """Run every READY experiment now (`singleton.run_ready`) and return a
-    per-experiment summary.
+    """Run every one of the caller's READY experiments now (`singleton.run_ready`)
+    and return a per-experiment summary.
 
     Synchronous by design for M2 (single-tenant local, deterministic) -
     see docs/M2_INTEGRATION.md, "Keep the run endpoints synchronous for M2".
     """
-    adapter = LocalStoreAdapter(store)
+    adapter = LocalStoreAdapter(store, tenant=principal.tenant)
     results = run_ready(adapter, lock_path=lock_path)
     return [dataclasses.asdict(r) for r in results]

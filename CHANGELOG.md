@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-07-22 (P1: experiments tenancy)
+
+### Fixed - production hardening P1: the experiments store is now tenant-scoped and auth-gated
+
+A progress review found that campaign + latest were tenant-scoped (Phase 1b) but the **experiments store was still global and its endpoints entirely ungated** - a live cross-tenant leak once multiple tenants exist. Closed:
+
+- `kalos/store/sqlite_store.py`: `experiments` gains a `tenant` column (with an index and a one-time `ALTER TABLE ... DEFAULT 'default'` backfill migration for pre-existing databases); every `get`/`list`/`set_status`/`save_result` filters by tenant and `create` records it. A cross-tenant id reads as not-found, so tenants can't probe each other's ids.
+- `kalos/portal/experiments.py`: every route now requires the `read` or `write` scope and passes `Principal.tenant` to the store.
+- `kalos/runner/adapter.py`: `LocalStoreAdapter` is bound to a tenant, so the Singleton runner only ever sees and mutates the calling tenant's experiments. (The remote-runner `/api/experiments/{id}/result` channel still operates on the `default` tenant - a documented follow-up.)
+- `tests/test_tenant_isolation.py`: +3 tests - experiments isolated per tenant (list/get/mutate), the legacy backfill to `default`, and HTTP proof that the endpoints require auth and one tenant never sees another's experiments. Existing M2/experiments suites green (default tenant unchanged).
+
 ## 2026-07-22 (even later still)
 
 ### Added - production hardening Phase 1c: CORS allowlist + startup security posture (`kalos/portal/config.py`)
