@@ -42,6 +42,18 @@ COLLAPSE_REL_TOL = 1e-3   # spread < 0.1% of the mean prediction -> collapsed
 COLLAPSE_ABS_FLOOR = 1e-9  # predictions centered on ~0: fall back to absolute spread
 
 
+def _collapsed_on_cohort(client_mean: np.ndarray) -> bool:
+    """True when the cohort predictions are near-constant (the model no longer
+    differentiates the wells). Measured relative to the predictions' own
+    magnitude so the test is invariant to titer units; falls back to an
+    absolute spread when the predictions are centered on ~0."""
+    spread = float(np.std(client_mean))
+    scale = float(np.abs(np.mean(client_mean)))
+    if scale > COLLAPSE_ABS_FLOOR:
+        return spread / scale < COLLAPSE_REL_TOL
+    return spread < COLLAPSE_ABS_FLOOR
+
+
 def _model_factories(cfg: dict, n_synthetic: int) -> dict:
     return {
         "point_gb": lambda cols, seed: GradientBoostingPointModel(cols, cfg, seed),
@@ -195,10 +207,7 @@ class PredictPipeline:
         results = []
         for fm in self.bundle["methods"]:
             client_mean, client_std = fm.model.score_client(cohort)
-            spread = float(np.std(client_mean))
-            scale = float(np.abs(np.mean(client_mean)))
-            collapsed = (spread / scale < COLLAPSE_REL_TOL if scale > COLLAPSE_ABS_FLOOR
-                         else spread < COLLAPSE_ABS_FLOOR)
+            collapsed = _collapsed_on_cohort(client_mean)
             results.append(MethodResult(
                 name=fm.name, n_train=fm.n_train, n_unique_groups=fm.n_unique_groups,
                 n_features=fm.n_features, cv_spearman=fm.cv_spearman, cv_p=fm.cv_p,

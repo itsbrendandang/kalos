@@ -77,6 +77,18 @@ def _report(results, reference):
                   cohort=None, reference=reference)
 
 
+def test_collapse_detection_is_scale_invariant():
+    """The collapse check must be titer-unit invariant: near-constant predictions
+    on a raw-titer scale (~1600) count as collapsed even though their absolute
+    spread dwarfs the old 1e-3 epsilon, while genuine differentiation on either a
+    large (SF) or small (MP) scale does not."""
+    from pipeline.pipeline import _collapsed_on_cohort
+
+    assert _collapsed_on_cohort(np.array([1600.0, 1600.1, 1600.2, 1600.05])) is True
+    assert _collapsed_on_cohort(np.array([1600.0, 1500.0, 1700.0, 1650.0])) is False
+    assert _collapsed_on_cohort(np.array([40.0, 55.0, 67.0, 48.0])) is False
+
+
 def test_analysis_does_not_claim_validated_when_reference_ci_includes_zero(tmp_path):
     """write_analysis must not print 'validated ranking signal' when the reference
     model's bootstrap CI includes 0, even when the blend differentiates the cohort
