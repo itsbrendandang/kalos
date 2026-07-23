@@ -1,0 +1,54 @@
+# ml-leadgene-pipeline configuration — the single control surface.
+# Copy this file and edit the paths / column names to match your data.
+#
+# Training data is a FOLDER of featurized CSVs (one row per well): a `titer`
+# target column, `well_id`, an optional group column, and any number of numeric
+# feature columns. Files may have DIFFERENT feature columns — they are unioned by
+# name and imputed. The prediction data is ONE CSV with the same feature columns
+# and no titer.
+
+seed: 20260712
+artifact_path: artifacts/model.joblib
+
+data:
+  train_dir: training_data             # every *.csv here is pooled for training
+  predict_csv: prediction_data/predict.csv
+  output_csv: outputs/predictions.csv  # manifest/analysis/figures follow this basename
+
+columns:
+  target: titer                        # column to predict (raw titer units)
+  id_col: well_id                      # per-row label carried into the output
+  group_col: clone                     # optional; omit -> each row is its own CV group
+  # source_col: source                 # column tagging each row's source (for hierarchical)
+  # reference_source: MP_24w_Passage   # add 'hierarchical' to models and name its reference pool
+
+features:
+  exclude: []                          # numeric columns to NOT use as features
+  exclude_duration_dependent: false    # true drops run-length/sampling-dependent features
+                                       # (needed when pooling different-duration cultures)
+
+# Base regressors to fit and blend. Any subset of the five. Add 'hierarchical'
+# (empirical-Bayes reference+correction) only if columns.reference_source is set.
+models: [point_gb, bootstrap_ensemble, gaussian_process, bayesian_ridge, copula_augmented]
+
+# The model whose fit + CV Spearman + permutation importance drive the figures.
+reference_model: point_gb
+
+outputs:
+  analysis: true
+  visualize: true
+  n_top: 5                             # top wells highlighted in the ranking figure
+  top_features: 7                      # features shown in the driver figure
+
+preprocess:
+  numeric_impute: median
+  categorical_impute: most_frequent
+  correlation_prune_threshold: 0.85    # drop one of any |r| > this feature pair
+  drop_low_variance: true
+  max_numeric_features: 25             # base cap; scaled down to n_train // 4 for small n
+
+# Optional cross-validation knobs (defaults shown):
+# cv:
+#   n_boot: 2000        # bootstrap resamples for the CV Spearman CI
+#   n_synthetic: 150    # copula-augmented synthetic rows
+#   use_loo: false      # leave-one-group-out instead of 5-fold GroupKFold

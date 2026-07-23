@@ -1,0 +1,61 @@
+# Leadgene config -- WITH SF (MP_24w_Passage + SF_FedBatch pooled), the comparison
+# run for config.leadgene.yaml (MP-only). Identical in every other respect (same
+# duration-normalized target, same exclude list, same reference model) so the only
+# variable between the two runs is whether the SF fed-batch row is included.
+seed: 20260712
+artifact_path: artifacts/leadgene_with_sf.joblib
+
+data:
+  train_dir: training_data           # all *.csv here are pooled for training
+  predict_csv: prediction_data/predict.csv
+  output_csv: outputs/with_sf/predictions.csv  # manifest/analysis/figures follow this basename
+  # No include_sources -- both MP_24w_Passage and SF_FedBatch are pooled. This is
+  # the "before" comparison: see config.leadgene.yaml for why MP-only is preferred.
+
+columns:
+  target: titer_per_day_mg_L         # duration-normalized target (titer_final_mg_L /
+                                      # culture_duration_days) -- see TODO.md duration item.
+                                      # Comparable across sources of different cultivation length.
+  id_col: run_id                     # per-row label carried into the output (training table's
+                                      # id column; prediction_data/predict.csv already has well_id)
+  # group_col not set: no repeated measurements of the same clone yet, so each
+  # row is its own CV group (the safe default -- see TrainingPool.from_dir)
+  source_col: source_dataset         # column tagging each row's source (used by
+                                      # data.include_sources above; also needed for 'hierarchical')
+  # reference_source: MP_24w_Passage # enable 'hierarchical' by naming the reference-pool source
+
+features:
+  # Target-derived columns from pipeline.ingest -- excluded because they are
+  # computed FROM titer (using them as features would leak the target: with
+  # target=titer_per_day_mg_L, titer_final_mg_L itself is now a near-perfect leak
+  # once combined with culture_duration_days), or (culture_duration_days) because
+  # it's the divisor in the target's own definition, which exclude_duration_dependent
+  # below is trying to keep the model from just memorizing in place of real signal.
+  exclude: [titer_final_mg_L, titer_first_measured_day, titer_first_measured_mg_L,
+           titer_final_day, titer_accumulation_rate_mg_L_per_day,
+           specific_productivity_qp, culture_duration_days]
+  # Duration robustness: MP cultures are ~4 days, SF ~10-14 days. Drop features
+  # whose value scales with run length / sampling so they don't just encode duration.
+  exclude_duration_dependent: true
+
+models: [point_gb, bootstrap_ensemble, gaussian_process, bayesian_ridge, copula_augmented]
+
+# The single model whose fit + CV Spearman + permutation importance drive the
+# ranking / driver figures (must also appear in `models`).
+# NOTE: point_gb (HistGradientBoosting, needs >=20 samples/leaf) collapses to a
+# constant on this small a training set. copula_augmented trains on synthetic rows
+# so it actually fits + differentiates here -- switch back to point_gb once n grows.
+reference_model: copula_augmented
+
+outputs:
+  analysis: true       # write <output>_analysis.md diagnosing the prediction
+  visualize: true      # write <output>_figures/*.png (needs matplotlib)
+  n_top: 5             # how many top wells to highlight in the ranking figure
+  top_features: 7      # how many features in the driver / contrast figure
+
+preprocess:
+  numeric_impute: median
+  categorical_impute: most_frequent
+  correlation_prune_threshold: 0.85
+  drop_low_variance: true
+  max_numeric_features: 25

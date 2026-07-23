@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Purely derived -- no reason to keep the empty folder tracked; pipeline
+# train/predict create it on demand.
+artifacts/
+outputs/
+
+# Data input folders ARE tracked (so a fresh clone has them ready to use) but
+# their contents never are -- everything gets regenerated locally.
+raw_training_data/*
+!raw_training_data/.gitkeep
+raw_prediction_data/*
+!raw_prediction_data/.gitkeep
+training_data/*
+!training_data/.gitkeep
+prediction_data/*
+!prediction_data/.gitkeep
