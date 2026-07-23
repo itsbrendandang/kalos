@@ -33,16 +33,19 @@ import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
 from kalos.portal.auth import READ, WRITE, Principal, get_authenticator, require_scope
+from kalos.portal.campaign import CampaignStore, get_campaign_store
 from kalos.portal.config import cors_config, log_security_posture
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
+from kalos.portal.observability import RequestLogMiddleware, metrics_text
+from kalos.store import SqliteStore
 from kalos.portal.uploads import (
     MAX_COLUMNS,
     MAX_CSV_ROWS,
@@ -80,12 +83,56 @@ def _ensure_torch_threads() -> None:
 
 app = FastAPI(title="Kalos Engine API")
 
+# Structured access logging + request ids, wrapping everything (added last =
+# outermost), so every request is timed and logged without bodies/tokens.
+app.add_middleware(RequestLogMiddleware)
+
 # CORS policy: an explicit allowlist when `KALOS_CORS_ORIGINS` is set (production),
 # else the permissive localhost default (dev/pilot). See kalos.portal.config.
 app.add_middleware(CORSMiddleware, **cors_config())
 
 # Log the effective security posture (auth + CORS) once at import/startup.
 log_security_posture(auth_enforced=get_authenticator().is_configured())
+
+
+# --- operability endpoints (docs/HARDENING.md, Phase 2) ---------------------- #
+# Unauthenticated by design: orchestrators and load balancers must be able to
+# probe liveness/readiness without a token, and they expose no client data.
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """Liveness: the process is up and serving. Always 200 unless the app is down."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz(
+    campaign: CampaignStore = Depends(get_campaign_store),
+    experiments: SqliteStore = Depends(get_store),
+) -> JSONResponse:
+    """Readiness: the durable stores are reachable (a trivial query per DB).
+    503 when a store is down, so an orchestrator stops routing traffic to a
+    replica that can't serve."""
+    checks: dict[str, bool] = {}
+    for name, store in (("portal_db", campaign), ("experiments_db", experiments)):
+        try:
+            store.ping()
+            checks[name] = True
+        except Exception:  # noqa: BLE001 - any failure means not-ready
+            log.exception("readiness check failed for %s", name)
+            checks[name] = False
+    ok = all(checks.values())
+    return JSONResponse(
+        {"status": "ready" if ok else "not_ready", "checks": checks},
+        status_code=200 if ok else 503,
+    )
+
+
+@app.get("/metrics")
+def metrics() -> PlainTextResponse:
+    """Prometheus-style text: process uptime + request counts by status class."""
+    return PlainTextResponse(metrics_text(), media_type="text/plain; version=0.0.4")
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)
