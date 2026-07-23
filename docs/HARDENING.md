@@ -101,4 +101,5 @@ A review of progress against the readiness scorecard surfaced that campaign + la
 - Phase 1b tenant-scoped persistence: **done** (merged) - campaign -> SQLite rows per tenant; `/api/latest` per tenant; every store call keyed by `Principal.tenant`.
 - Phase 1c transport/CORS: **done** on `feat/hardening-1c` - CORS allowlist via `KALOS_CORS_ORIGINS`, startup security-posture logging, TLS-via-proxy deployment note. Secrets-provider abstraction deferred.
 - P1 experiments store tenant-scope + auth-gate: **done** on `feat/hardening-experiments-tenancy` - closes the cross-tenant leak the review found; the tenancy guarantee now covers all three stores (campaign, latest, experiments).
-- P2 observability, P3 async job queue, P4 latest->SQLite, P5 backups: planned, not started (see "Next backbone" above).
+- P2 observability: **done** on `feat/hardening-observability` - `RequestLogMiddleware` (structured JSON access line + `X-Request-ID`), `/healthz`, `/readyz` (`SELECT 1` per store, 503 when down), `/metrics` (uptime + request counts).
+- P3 async job queue, P4 latest->SQLite, P5 backups: planned, not started (see "Next backbone" above).
