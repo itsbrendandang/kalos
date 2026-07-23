@@ -126,6 +126,12 @@ class SqliteStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def ping(self) -> None:
+        """Readiness probe: a trivial query proving the DB is reachable
+        (docs/HARDENING.md, Phase 2). Raises on failure."""
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute("SELECT 1").fetchone()
+
     # --- CRUD ------------------------------------------------------------ #
 
     def create(

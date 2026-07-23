@@ -94,6 +94,12 @@ class CampaignStore:
 
     # --- persistence -------------------------------------------------------- #
 
+    def ping(self) -> None:
+        """Readiness probe: a trivial query proving the SQLite backing is
+        reachable (docs/HARDENING.md, Phase 2). Raises on failure."""
+        with self._lock:
+            self._conn.execute("SELECT 1").fetchone()
+
     def _read_locked(self, tenant: str) -> dict[str, Any] | None:
         """Read the campaign row for `tenant`. Caller must hold `self._lock`."""
         row = self._conn.execute(

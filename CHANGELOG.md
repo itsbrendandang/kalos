@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-07-22 (P2: observability)
+
+### Added - production hardening P2: health/readiness, structured logging, metrics (`kalos/portal/observability.py`)
+
+Moves the operational-maturity gap forward: the portal is now probeable, observable, and logs safely.
+
+- `kalos/portal/observability.py` (new): a `RequestLogMiddleware` that assigns/propagates a request id (`X-Request-ID`) and emits one structured JSON access line per request - method, path, status, duration only, **never** bodies, headers, query strings, or tokens - plus thread-safe in-process request counters.
+- `kalos/portal/app.py`: `GET /healthz` (liveness), `GET /readyz` (readiness - a `SELECT 1` against `portal.db` and `experiments.db`; 503 when a store is down so an orchestrator stops routing to a bad replica), `GET /metrics` (Prometheus text: uptime + request counts by status class). Probe endpoints are unauthenticated by design (LB/orchestrator reachability) and counted but not access-logged to avoid probe spam.
+- `kalos/portal/campaign.py`, `kalos/store/sqlite_store.py`: a `ping()` readiness probe on each store.
+- `tests/test_observability.py` (new): 7 tests - liveness, readiness ok/503, request-id propagation, a token is never logged in the access line, and the metrics text/counters.
+
 ## 2026-07-22 (P1: experiments tenancy)
 
 ### Fixed - production hardening P1: the experiments store is now tenant-scoped and auth-gated
