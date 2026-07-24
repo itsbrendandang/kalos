@@ -40,6 +40,12 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 - `pipeline/propose.py` — `propose_batch`: acquisition over scored candidates
   (UCB `mean + beta*uncertainty` when validated, uncertainty-only space-filling
   when not) → a diversified next batch. Verdict-gated. Stand-in for kalos/BoTorch BO.
+- `pipeline/sim.py` — clean-room mechanistic CHO fed-batch simulator (Monod growth,
+  lactate inhibition/diauxie, Luedeking-Piret growth-decoupled production). Maps
+  controllable process params → endpoint titer; `sample_doe` (LHS), `true_optimum`.
+  Synthetic-data + benchmark surface, NOT a validated predictor.
+- `examples/closed_loop_benchmark.py` — in-silico validation of the loop: train →
+  `propose` → simulate → measure → repeat, BO vs random over a fixed candidate library.
 - `pipeline/pipeline.py` — `TrainPipeline` (fit + build reference block) /
   `PredictPipeline` (score + carry cohort/reference into `Report`).
 - `pipeline/analysis.py` — compute (`diagnose`, `within_plate_contrast`, `novelty`)

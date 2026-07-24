@@ -67,3 +67,17 @@ batch acquisition (qEI / qNEI / qUCB) with joint-batch diversity, instead of the
 hand-rolled UCB + greedy-distance heuristic.
 A complementary piece is a proper space-filling candidate generator (Sobol /
 Latin-hypercube over the tunable process parameters) rather than ad-hoc pools.
+
+# Synthetic-data engine (mechanistic simulator)
+
+`pipeline/sim.py` is a clean-room mechanistic CHO fed-batch simulator (Monod +
+lactate inhibition/diauxie + Luedeking-Piret production), and
+`examples/closed_loop_benchmark.py` is the in-silico validation of the acquisition
+loop (BO/`propose` vs random over a fixed library). Next steps:
+- Feed the simulator's time-course output through the real `ingest` +
+  `feature_extraction` path (currently the benchmark uses the controllable process
+  params directly as features), so the whole pipeline is exercised end to end.
+- Add measurement noise + replicate structure to the benchmark to exercise the
+  ICC / signal-vs-noise honesty layer under realistic assay noise.
+- Promote the simulator into a shared benchmark once kalos/BoTorch qEI lands, so BO
+  and the hand-rolled UCB are compared on the same surface.

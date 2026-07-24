@@ -167,6 +167,22 @@ This is a deliberately simple stand-in for a real Bayesian-optimization
 acquisition; wiring it to kalos / BoTorch qEI is the next step (see
 [TODO.md](TODO.md)).
 
+### Synthetic data + closed-loop benchmark
+
+`pipeline/sim.py` is a clean-room mechanistic CHO fed-batch simulator (Monod growth,
+lactate inhibition and diauxie, Luedeking-Piret growth-decoupled production) that
+maps controllable process parameters to an endpoint titer.
+It is a synthetic-data and benchmark surface, not a validated predictor of any real
+process, and must never be presented as one.
+
+`examples/closed_loop_benchmark.py` uses it to validate the acquisition loop in
+silico - train, `propose`, "run" the batch against the simulator, measure, repeat -
+comparing `propose` against random selection over a fixed candidate library:
+
+```bash
+python -m examples.closed_loop_benchmark
+```
+
 ### Config surface
 
 ```yaml
