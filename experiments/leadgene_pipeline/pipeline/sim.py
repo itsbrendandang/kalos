@@ -15,7 +15,8 @@ Model structure (textbook bioprocess kinetics, not any vendor's parameterization
 States (y): VCD [1e6 cells/mL], Glc [mM], Lac [mM], Titer [mg/L]; time in hours.
 
 The kinetic constants below are our own, chosen for plausible CHO fed-batch
-dynamics (14-day culture, peak VCD ~10-20e6 cells/mL, titer O(1000) mg/L), and
+dynamics (14-day culture, peak VCD ~40e6 cells/mL for an intensified fed-batch,
+titer O(1000) mg/L), and
 tuned so endpoint titer has an INTERIOR optimum in the design space: too little
 glucose feed starves growth, too much drives lactate overflow that inhibits and
 kills, and growth/product formation peak near pH 7.0. This is a benchmark tool,

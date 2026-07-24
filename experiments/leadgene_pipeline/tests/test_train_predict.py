@@ -119,6 +119,20 @@ def test_include_sources_filters_training_pool(tmp_path):
     assert unfiltered.n_rows == 3
 
 
+def test_load_predict_cohort_rejects_duplicate_well_id(tmp_path):
+    """A duplicate row key silently misaligns per-well predictions and the propose
+    diversity batch, so the cohort loader must reject it up front."""
+    import pytest
+
+    from pipeline.data import load_predict_cohort
+
+    csv = tmp_path / "predict.csv"
+    pd.DataFrame({"well_id": ["a", "b", "a"], "f1": [1.0, 2.0, 3.0]}).to_csv(csv, index=False)
+    cfg = {"columns": {"id_col": "well_id"}, "data": {"predict_csv": str(csv)}}
+    with pytest.raises(ValueError, match="duplicate well_id"):
+        load_predict_cohort(cfg)
+
+
 def test_predict_is_deterministic(tmp_path):
     config = _write_dataset(tmp_path)
     cli.main(["train", "--config", str(config)])

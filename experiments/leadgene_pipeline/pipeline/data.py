@@ -38,6 +38,11 @@ def load_predict_cohort(cfg: dict) -> pd.DataFrame:
         df = df.rename(columns={id_col: "well_id"})
     elif "well_id" not in df.columns:
         df["well_id"] = [f"row{i}" for i in range(len(df))]
+    # well_id is a row key: downstream scoring/blend/propose index by it, and a
+    # duplicate silently misaligns per-well predictions and the diversity batch.
+    dupes = df["well_id"][df["well_id"].duplicated()].unique()
+    if len(dupes):
+        raise ValueError(f"prediction cohort has duplicate well_id(s): {list(dupes)[:5]}")
     return df.reset_index(drop=True)
 
 

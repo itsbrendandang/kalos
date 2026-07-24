@@ -18,3 +18,5 @@ training_data/*
 !training_data/.gitkeep
 prediction_data/*
 !prediction_data/.gitkeep
+.coverage
+htmlcov/
