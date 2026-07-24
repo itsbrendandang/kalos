@@ -37,6 +37,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 - `pipeline/evaluation.py` — group-aware CV + bootstrap-CI Spearman trust metric
   (`fit_method`, `fit_hierarchical`), `permutation_importance_spearman`.
 - `pipeline/blend.py` — CV-weighted blend → `predicted_titer` + confidence tier.
+- `pipeline/propose.py` — `propose_batch`: acquisition over scored candidates
+  (UCB `mean + beta*uncertainty` when validated, uncertainty-only space-filling
+  when not) → a diversified next batch. Verdict-gated. Stand-in for kalos/BoTorch BO.
 - `pipeline/pipeline.py` — `TrainPipeline` (fit + build reference block) /
   `PredictPipeline` (score + carry cohort/reference into `Report`).
 - `pipeline/analysis.py` — compute (`diagnose`, `within_plate_contrast`, `novelty`)

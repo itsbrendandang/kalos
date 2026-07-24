@@ -140,11 +140,32 @@ Everything is driven by [config/config.leadgene.yaml](config/config.leadgene.yam
 
 # load the artifact and predict titer for the cohort
 .venv/bin/python -m pipeline predict --config config/config.leadgene.yaml
+
+# rank a pool of untested conditions and pick the next batch to run
+.venv/bin/python -m pipeline propose --config config/config.leadgene.yaml \
+  --candidates prediction_data/candidates.csv --q 5
 ```
 
 `train` prints each model's CV Spearman + bootstrap 95% CI + verdict and writes
 `artifact_path`. `predict` prints the blend weights + top wells and writes the
 outputs below. Overrides: `--train-dir`, `--predict-csv`, `--artifact`, `--output`.
+
+`propose` is the active-learning step: it scores a candidate pool (untested
+conditions in the same feature schema, no `titer`) and ranks them by an
+acquisition score, then selects a diversified next batch.
+The strategy is gated on the honest verdict.
+When at least one model validated, it ranks by an upper-confidence bound
+(`mean + beta * uncertainty`) to climb toward the optimum (exploit).
+When nothing validated, the predicted titers are not trustworthy, so it ranks by
+uncertainty alone for space-filling to gather data that can validate the model
+(explore).
+It writes `<output>_proposals.csv` (per-candidate `pred_titer`, `uncertainty`,
+`acq_score`, `selected`).
+Knobs live under `propose:` in the config (`q`, `beta`, `diversity`) or via
+`--q` / `--beta`.
+This is a deliberately simple stand-in for a real Bayesian-optimization
+acquisition; wiring it to kalos / BoTorch qEI is the next step (see
+[TODO.md](TODO.md)).
 
 ### Config surface
 

@@ -108,6 +108,36 @@ def cmd_predict(args) -> None:
         print(f"  {label}: {path}")
 
 
+def cmd_propose(args) -> None:
+    from . import propose as _propose
+
+    cfg = load_config(args.config)
+    _apply_overrides(cfg, args)
+    if getattr(args, "candidates", None):
+        cfg["data"]["predict_csv"] = args.candidates
+
+    bundle = artifact.load(_artifact_path(cfg))
+    report = PredictPipeline(bundle, cfg).run()
+
+    pcfg = cfg.get("propose", {})
+    q = args.q if args.q is not None else int(pcfg.get("q", 5))
+    beta = args.beta if args.beta is not None else float(pcfg.get("beta", 1.5))
+    diversity = float(pcfg.get("diversity", 1.5))
+    result = _propose.propose_batch(report, q=q, beta=beta, diversity=diversity)
+
+    out = Path(getattr(args, "output", None) or cfg["data"].get("output_csv", "outputs/predictions.csv"))
+    proposals_csv = out.parent / f"{out.stem}_proposals.csv"
+    proposals_csv.parent.mkdir(parents=True, exist_ok=True)
+    result.table.to_csv(proposals_csv, index=False)
+
+    print(f"Acquisition mode: {result.mode.upper()} - {result.note}")
+    print(f"\nCandidates ranked by acquisition (top {max(10, q)}):")
+    print(result.table.head(max(10, q)).to_string(index=False))
+    batch = result.table[result.table["selected"]]["well_id"].tolist()
+    print(f"\nNext batch to run (q={q}): {batch}")
+    print(f"Wrote: {proposals_csv}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pipeline",
                                      description="Train on a folder of CSVs / predict titer for a cohort.")
@@ -132,6 +162,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", help="override artifact_path")
     p.add_argument("--output", help="override data.output_csv")
     p.set_defaults(func=cmd_predict)
+
+    pp = sub.add_parser("propose", help="rank candidate conditions and pick the next batch to run")
+    pp.add_argument("--config", required=True, help="path to the YAML config")
+    pp.add_argument("--candidates", help="override data.predict_csv (the candidate-pool CSV)")
+    pp.add_argument("--artifact", help="override artifact_path")
+    pp.add_argument("--output", help="override data.output_csv (proposals follow its basename)")
+    pp.add_argument("--q", type=int, help="batch size (default from config propose.q)")
+    pp.add_argument("--beta", type=float, help="UCB explore weight (default from config propose.beta)")
+    pp.set_defaults(func=cmd_propose)
 
     return parser
 

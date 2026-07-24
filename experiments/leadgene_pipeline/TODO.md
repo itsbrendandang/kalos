@@ -55,3 +55,15 @@ selection are fold-safe). The following lower-severity items were deferred:
    VCD Day 0/Day 4 measurement.
 6. **Out-of-fold permutation importance** (also item 5 above) would make the
    driver figure an honest generalization signal rather than an in-sample one.
+
+# Next-experiment proposal (active learning)
+
+`pipeline propose` (in `pipeline/propose.py`) turns scored candidates into the
+next batch to run: an upper-confidence-bound acquisition when a model validated,
+uncertainty-only space-filling when not, with a diversified batch pick.
+It is a deliberately simple, dependency-free stand-in. The next step is to wire it
+to kalos / BoTorch so the acquisition uses a real GP surrogate and principled
+batch acquisition (qEI / qNEI / qUCB) with joint-batch diversity, instead of the
+hand-rolled UCB + greedy-distance heuristic.
+A complementary piece is a proper space-filling candidate generator (Sobol /
+Latin-hypercube over the tunable process parameters) rather than ad-hoc pools.

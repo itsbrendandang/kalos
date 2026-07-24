@@ -46,6 +46,11 @@ def _fill_defaults(cfg: dict) -> None:
     cfg["outputs"].setdefault("visualize", True)
     cfg["outputs"].setdefault("n_top", 5)
     cfg["outputs"].setdefault("top_features", 7)
+    cfg.setdefault("propose", {})
+    pr = cfg["propose"]
+    pr.setdefault("q", 5)                     # batch size for `propose`
+    pr.setdefault("beta", 1.5)                # UCB explore weight (mean + beta*uncertainty)
+    pr.setdefault("diversity", 1.5)           # min standardized distance between picks
     cfg.setdefault("preprocess", {})
     pp = cfg["preprocess"]
     pp.setdefault("numeric_impute", "median")
