@@ -11,6 +11,8 @@ jobs:
       # portal tests actually run (they importorskip fastapi) and mypy checks them
       # against real FastAPI types; dev brings ruff, mypy, and the type stubs.
       - run: python -m pip install -e ".[ml,portal,dev]"
-      - run: ruff check kalos/
+      # Lint the whole tree, not just kalos/: an unused import and a dead local
+      # sat in examples/ for months because CI only ever looked at the package.
+      - run: ruff check kalos/ tests/ examples/
       - run: mypy   # config in pyproject [tool.mypy]
       - run: python -m pytest -q   # ESM-2 test skipped unless KALOS_TEST_ESM is set
