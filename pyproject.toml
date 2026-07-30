@@ -39,6 +39,17 @@ include = ["kalos*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff.lint]
+# Pin the ruleset explicitly. With no [tool.ruff] section ruff applies whatever
+# its current release defaults to, so a ruff upgrade CI never asked for can turn
+# the build red on untouched code: 0.16.0 widened the defaults and put 217 new
+# findings in kalos/ alone (UP/B/SIM/FURB/PL/RUF/I), which is what broke CI on
+# 2026-07-24. These four are ruff's classic defaults and the set this codebase
+# was written against; both 0.15 and 0.16 are clean under them.
+# Adopting the wider set is a real cleanup worth doing on its own branch -- most
+# of it is `ruff check --fix`-able -- but it is not a lint-config change.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.mypy]
 python_version = "3.12"
 packages = ["kalos"]
