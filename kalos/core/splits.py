@@ -57,7 +57,17 @@ def make_splits(
     stratify: Optional[bool] = None,
     random_state: int = 42,
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Group-aware CV splits with small-data guards, verified leakage-free."""
+    """Group-aware CV splits with small-data guards, verified leakage-free.
+
+    `random_state` only bites on the stratified path, which needs a discrete `y`
+    (`dtype.kind in "iubO"`). A continuous target always takes the unshuffled
+    `GroupKFold` branch below, where the split is fully determined by the group
+    labels: seeds 1 and 999 return identical folds. That is deterministic, not
+    broken, but it means a bootstrap CI computed on these folds is conditional on
+    one fixed partition and will understate how much the estimate moves with
+    `n_splits` (on the real media DoE, 0.44 to 0.71 across n_splits 3 to 8).
+    Quote the CI alongside a sensitivity sweep, not on its own.
+    """
     y_arr = np.asarray(pd.Series(y).values)
     g_arr = np.asarray(pd.Series(groups).astype(str).values)
     n = len(g_arr)
