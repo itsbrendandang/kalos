@@ -10,7 +10,7 @@
     <style>
       :root {
         --bg: #fafaf9; --card: #ffffff; --fg: #202123; --muted: #6c6f6c;
-        --accent: #10a37f; --accent-hover: #0d8a6a; --accent-soft: #e7f5f0;
+        --accent: #2563eb; --accent-hover: #1d4ed8; --accent-soft: #eaf1ff;
         --explore: #a86525; --explore-soft: #f8ecdf; --border: #e5e5e2;
         --sidebar: #f4f4f2; --sidebar-raised: #e9e9e6; --surface-soft: #f7f7f5;
         --head: "Sora", system-ui, sans-serif;
@@ -80,10 +80,9 @@
       .rail nav svg { flex:none; }
       .rail-status { margin-top:auto; padding:12px; border:1px solid var(--border); border-radius:9px; background:rgba(255,255,255,.5); color:var(--muted); font-size:11px; }
       .rail-status strong { display:flex; align-items:center; gap:8px; color:var(--fg); font-size:11px; }
-      .status-dot { width:8px; height:8px; border-radius:50%; background:#5bd3a5; box-shadow:0 0 0 4px rgba(91,211,165,.12); }
+      .status-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 4px rgba(37,99,235,.12); }
       .rail-status code { display:block; margin-top:8px; font:500 10px var(--mono); }
       .workspace { min-width:0; }
-      .workspace header .context { color:var(--muted); font-size:12px; }
       .hero { max-width:1240px; margin:0 auto; padding:30px 32px 20px; }
       .hero .eyebrow { margin-bottom:9px; color:var(--accent-hover); font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
       .hero h1 { max-width:720px; margin:0; font:600 clamp(28px,3vw,38px)/1.1 var(--head); letter-spacing:-.04em; }
@@ -140,8 +139,7 @@
       </aside>
       <div class="workspace">
         <header>
-          <span class="mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#70cda8"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#159a6e"/></svg><h1>Bioqore</h1></span>
-          <span class="context" title="Built on BoTorch + ESM-2">Bayesian optimization engine</span>
+          <span class="mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#93c5fd"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#2563eb"/></svg><h1>Bioqore</h1></span>
           <span class="live">local · live</span>
         </header>
         <section class="hero" id="overview">
@@ -184,7 +182,7 @@
           <div class="kpi"><div class="k">Best purity (%)</div><div class="v" id="s2p">—</div></div>
         </div>
         <div class="row">
-          <div><div class="label">Titer vs purity <span style="color: var(--muted)">· gray = all runs, emerald = Pareto front</span></div><div id="pareto" class="chart"></div></div>
+          <div><div class="label">Titer vs purity <span style="color: var(--muted)">· gray = all runs, blue = Pareto front</span></div><div id="pareto" class="chart"></div></div>
           <div><div class="label">Next batch proposed</div><div id="prop2"></div></div>
         </div>
       </section>
@@ -218,7 +216,7 @@
         live.style.color = ready ? "var(--accent-hover)" : "#8f5418";
         live.style.background = ready ? "var(--accent-soft)" : "var(--explore-soft)";
       }
-      const accent = "#10a37f", explore = "#b86b24", grid = "#dedfdb", ink = "#686b68", dot = "#a9ada9";
+      const accent = "#2563eb", explore = "#a86525", grid = "#e5e5e2", ink = "#6c6f6c", dot = "#a9ada9";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
         font: { color: ink, family: "JetBrains Mono, monospace", size: 11 },
@@ -262,7 +260,7 @@
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
           line: { color: accent, width: 2.5 }, marker: { color: accent, size: 6 },
-          fill: "tozeroy", fillcolor: "rgba(16,163,127,0.10)",
+          fill: "tozeroy", fillcolor: "rgba(37,99,235,0.09)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer (mg/L)" } }, { displayModeBar: false, responsive: true });
         document.getElementById("conv").setAttribute("aria-label", `Best titer rose to ${d.best_value.toFixed(1)} mg/L over ${t[t.length - 1].n} experiments.`);
         document.getElementById("s1best").textContent = d.best_value.toFixed(1);
@@ -310,7 +308,7 @@
 
     <script>
       (function () {
-        const accent = "#10a37f", explore = "#b86b24", grid = "#dedfdb", ink = "#686b68", dot = "#a9ada9";
+        const accent = "#2563eb", explore = "#a86525", grid = "#e5e5e2", ink = "#6c6f6c", dot = "#a9ada9";
         const drop = document.getElementById("drop"), inp = document.getElementById("rfile"), out = document.getElementById("runresult");
         let curFile = null;
         const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
