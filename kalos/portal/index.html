@@ -9,33 +9,33 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
       :root {
-        --bg: #f1f2eb; --card: #fcfdf9; --fg: #14231c; --muted: #59685f;
-        --accent: #159a6e; --accent-hover: #0e7653; --accent-soft: #dff1e9;
-        --explore: #b96f2b; --explore-soft: #f7e9d7; --border: #dde3da;
-        --sidebar: #13271f; --surface-soft: #f5f7f1;
+        --bg: #f7f7f5; --card: #ffffff; --fg: #202123; --muted: #686b68;
+        --accent: #10a37f; --accent-hover: #0d8a6a; --accent-soft: #e7f5f0;
+        --explore: #b86b24; --explore-soft: #f8ecdf; --border: #dedfdb;
+        --sidebar: #171918; --sidebar-raised: #222523; --surface-soft: #f3f4f1;
         --head: "Sora", system-ui, sans-serif;
         --sans: "Plus Jakarta Sans", system-ui, sans-serif;
         --mono: "JetBrains Mono", ui-monospace, monospace;
       }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
-      header { padding: 18px 34px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); background: rgba(252,253,249,.9); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 10; }
+      header { min-height: 58px; padding: 12px 28px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.92); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 10; }
       header .mark { display: flex; align-items: center; gap: 9px; }
       header h1 { margin: 0; font-family: var(--head); font-weight: 700; font-size: 19px; letter-spacing: -0.01em; }
       header .sub { color: var(--muted); font-family: var(--sans); font-size: 12.5px; }
       header .live { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent-hover);
         background: var(--accent-soft); padding: 5px 11px; border-radius: 999px; }
-      main { max-width: 1240px; margin: 0 auto; padding: 28px 34px 72px; display: grid; gap: 24px; }
-      .panel { background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 24px 26px;
-        box-shadow: 0 1px 2px rgba(20,35,28,.04), 0 16px 36px rgba(20,35,28,.055); }
+      main { max-width: 1240px; margin: 0 auto; padding: 22px 28px 72px; display: grid; gap: 18px; }
+      .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px;
+        box-shadow: 0 1px 2px rgba(32,33,35,.035); }
       .panel h2 { margin: 0 0 4px; font-family: var(--head); font-weight: 600; font-size: 18px; letter-spacing: -.02em; }
       .panel p.note { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; max-width: 68ch; }
       .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
       @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
       .chart { width: 100%; height: 300px; }
       .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 4px 0 16px; }
-      .kpi { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
-      .kpi.hero { background: var(--accent-hover); box-shadow: 0 8px 20px rgba(14,124,87,.30); }
+      .kpi { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+      .kpi.hero { background: #222523; border-color: #222523; box-shadow: none; }
       .kpi .k { font-size: 11px; color: var(--muted); font-weight: 500; }
       .kpi.hero .k { color: #ffffff; }
       .kpi .v { font-family: var(--mono); font-size: 22px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
@@ -44,10 +44,10 @@
       th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
       th { color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
       td:first-child, th:first-child { text-align: left; color: var(--muted); }
-      button { min-height: 44px; font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: var(--accent);
-        border: 1px solid var(--accent); border-radius: 10px; padding: 10px 16px; cursor: pointer; box-shadow: 0 5px 14px rgba(21,154,110,.22);
+      button { min-height: 44px; font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: #222523;
+        border: 1px solid #222523; border-radius: 9px; padding: 10px 16px; cursor: pointer; box-shadow: none;
         display: inline-flex; align-items: center; gap: 7px; transition: background .15s ease, transform .15s ease; }
-      button:hover { background: var(--accent-hover); }
+      button:hover { background: #0f1110; border-color: #0f1110; }
       button:active { transform: translateY(1px); }
       button:disabled { opacity: 0.55; cursor: wait; }
       .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -59,36 +59,41 @@
       .tag.explore { color: #8f5418; background: #fbefdd; }
       .intro { max-width: 1080px; margin: -2px auto 0; padding: 0 30px; color: var(--muted); font-size: 13px; }
       .intro b { color: var(--fg); font-weight: 600; }
-      .demo-badge { font-family: var(--sans); font-size: 10px; font-weight: 600; color: #8f5418;
-        background: #fbefdd; padding: 3px 9px; border-radius: 999px; }
+      .demo-badge { font-family: var(--sans); font-size: 10px; font-weight: 600; color: #81501e;
+        background: var(--explore-soft); padding: 3px 9px; border-radius: 999px; }
       .hint { cursor: help; border-bottom: 1px dotted var(--muted); }
-      .app-frame { min-height: 100svh; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
-      .rail { position: sticky; top: 0; height: 100svh; padding: 22px 14px; background: var(--sidebar); color: #fff; display: flex; flex-direction: column; }
+      .app-frame { min-height: 100svh; display: grid; grid-template-columns: 228px minmax(0, 1fr); }
+      .rail { position: sticky; top: 0; height: 100svh; padding: 18px 12px; background: var(--sidebar); color: #fff; display: flex; flex-direction: column; border-right: 1px solid #2a2d2b; }
       .rail-brand { display: flex; align-items: center; gap: 10px; padding: 0 9px 24px; }
-      .rail-brand .brand-mark { width: 40px; height: 40px; border-radius: 12px; background: var(--accent); display: grid; place-items: center; box-shadow: 0 8px 20px rgba(0,0,0,.2); }
+      .rail-brand .brand-mark { width: 36px; height: 36px; border-radius: 9px; background: var(--accent); display: grid; place-items: center; box-shadow: none; }
       .rail-brand strong { display:block; font: 700 18px/1 var(--head); letter-spacing: -.02em; }
-      .rail-brand small { display:block; margin-top: 5px; color:#8da197; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; }
-      .rail-label { padding: 0 12px 7px; color:#789083; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
+      .rail-brand small { display:block; margin-top: 5px; color:#8d918e; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; }
+      .rail-label { padding: 0 12px 7px; color:#777b78; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
       .rail nav { display:grid; gap:5px; }
-      .rail nav a { min-height:46px; display:flex; align-items:center; gap:11px; padding:8px 12px; border:1px solid transparent; border-radius:11px; color:#c2d0c8; text-decoration:none; font-size:12.5px; font-weight:600; transition: .15s ease; }
-      .rail nav a:hover, .rail nav a:first-child { color:#fff; border-color:rgba(255,255,255,.11); background:rgba(255,255,255,.07); }
+      .rail nav a { min-height:42px; display:flex; align-items:center; gap:11px; padding:8px 12px; border:1px solid transparent; border-radius:8px; color:#b8bcb9; text-decoration:none; font-size:12.5px; font-weight:600; transition: .15s ease; }
+      .rail nav a:hover { color:#fff; background:var(--sidebar-raised); }
+      body:not(:has(:target)) .rail nav a:first-child,
+      body:has(#overview:target) .rail nav a[href="#overview"],
+      body:has(#single:target) .rail nav a[href="#single"],
+      body:has(#multi:target) .rail nav a[href="#multi"],
+      body:has(#upload:target) .rail nav a[href="#upload"] { color:#fff; border-color:#343835; background:var(--sidebar-raised); box-shadow:inset 3px 0 0 var(--accent); }
       .rail nav svg { flex:none; }
-      .rail-status { margin-top:auto; padding:13px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(0,0,0,.12); color:#a9bcb1; font-size:11px; }
+      .rail-status { margin-top:auto; padding:13px; border:1px solid #303431; border-radius:10px; background:#111312; color:#999e9a; font-size:11px; }
       .rail-status strong { display:flex; align-items:center; gap:8px; color:#fff; font-size:11px; }
       .status-dot { width:8px; height:8px; border-radius:50%; background:#5bd3a5; box-shadow:0 0 0 4px rgba(91,211,165,.12); }
       .rail-status code { display:block; margin-top:8px; font:500 10px var(--mono); }
       .workspace { min-width:0; }
       .workspace header .context { color:var(--muted); font-size:12px; }
-      .hero { max-width:1240px; margin:0 auto; padding:44px 34px 20px; }
+      .hero { max-width:1240px; margin:0 auto; padding:34px 28px 16px; }
       .hero .eyebrow { margin-bottom:9px; color:var(--accent-hover); font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-      .hero h1 { max-width:760px; margin:0; font:600 clamp(30px,4vw,48px)/1.06 var(--head); letter-spacing:-.04em; }
-      .hero p { max-width:690px; margin:14px 0 0; color:var(--muted); font-size:15px; line-height:1.65; }
+      .hero h1 { max-width:760px; margin:0; font:600 clamp(30px,3.5vw,42px)/1.08 var(--head); letter-spacing:-.04em; }
+      .hero p { max-width:690px; margin:12px 0 0; color:var(--muted); font-size:15px; line-height:1.65; }
       .hero-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
       .hero-meta span { padding:6px 10px; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--muted); font-size:11px; font-weight:600; }
       .hero-meta span:first-child { border-color:#b9dccc; background:var(--accent-soft); color:var(--accent-hover); }
       .panel-anchor { scroll-margin-top:84px; }
       #prop1, #prop2, #rtbl { overflow-x:auto; }
-      footer { max-width:1240px; margin:0 auto; padding:0 34px 36px; color:var(--muted); font-size:11px; }
+      footer { max-width:1240px; margin:0 auto; padding:0 28px 36px; color:var(--muted); font-size:11px; }
       @media (max-width: 920px) {
         .app-frame { grid-template-columns:1fr; }
         .rail { position:static; height:auto; padding:12px 14px; flex-direction:row; align-items:center; gap:12px; overflow-x:auto; }
@@ -203,7 +208,7 @@
     </div>
 
     <script>
-      const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#aab6ae";
+      const accent = "#10a37f", explore = "#b86b24", grid = "#dedfdb", ink = "#686b68", dot = "#a9ada9";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
         font: { color: ink, family: "JetBrains Mono, monospace", size: 11 },
@@ -236,7 +241,7 @@
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
           line: { color: accent, width: 2.5 }, marker: { color: accent, size: 6 },
-          fill: "tozeroy", fillcolor: "rgba(21,154,110,0.10)",
+          fill: "tozeroy", fillcolor: "rgba(16,163,127,0.10)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer (mg/L)" } }, { displayModeBar: false, responsive: true });
         document.getElementById("conv").setAttribute("aria-label", `Best titer rose to ${d.best_value.toFixed(1)} mg/L over ${t[t.length - 1].n} experiments.`);
         document.getElementById("s1best").textContent = d.best_value.toFixed(1);
@@ -252,7 +257,7 @@
         const d = await (await fetch("/api/multi")).json();
         Plotly.newPlot("pareto", [
           { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers", name: "all runs",
-            marker: { color: "#8a948c", size: 7, symbol: "circle-open" } },
+            marker: { color: "#949894", size: 7, symbol: "circle-open" } },
           { x: d.pareto.map((p) => p.titer), y: d.pareto.map((p) => p.purity), mode: "lines+markers", name: "Pareto front",
             line: { color: accent, width: 2.5 }, marker: { color: accent, size: 9 } },
         ], { ...base, showlegend: true, legend: { orientation: "h", y: 1.14, x: 0, font: { size: 10 } }, xaxis: { ...ax, title: "titer (mg/L) →" }, yaxis: { ...ax, title: "purity (%) →" } }, { displayModeBar: false, responsive: true });
@@ -273,7 +278,7 @@
 
     <script>
       (function () {
-        const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#aab6ae";
+        const accent = "#10a37f", explore = "#b86b24", grid = "#dedfdb", ink = "#686b68", dot = "#a9ada9";
         const drop = document.getElementById("drop"), inp = document.getElementById("rfile"), out = document.getElementById("runresult");
         let curFile = null;
         const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
@@ -329,7 +334,7 @@
 
           const dn = d.drivers.map((x) => x.name).reverse(), dv = d.drivers.map((x) => x.rho).reverse();
           Plotly.newPlot("rdrv", [{ type: "bar", orientation: "h", x: dv, y: dn, marker: { color: dv.map((v) => (v >= 0 ? accent : explore)) } }],
-            { ...pbase, margin: { l: 134, r: 12, t: 6, b: 28 }, xaxis: { gridcolor: grid, zeroline: true, zerolinecolor: "#cfd6cd" }, yaxis: { automargin: true } },
+            { ...pbase, margin: { l: 134, r: 12, t: 6, b: 28 }, xaxis: { gridcolor: grid, zeroline: true, zerolinecolor: "#cfd1cd" }, yaxis: { automargin: true } },
             { displayModeBar: false, responsive: true });
           const topUp = d.drivers.filter((x) => x.rho > 0)[0], topDn = d.drivers.filter((x) => x.rho < 0)[0];
           document.getElementById("rdrv").setAttribute("aria-label",
@@ -339,7 +344,7 @@
           const lo = Math.min(...a, ...pr), hi = Math.max(...a, ...pr);
           Plotly.newPlot("rpvm", [
             { x: a, y: pr, mode: "markers", name: "held-out runs", marker: { color: accent, size: 6 } },
-            { x: [lo, hi], y: [lo, hi], mode: "lines", name: "perfect (y=x)", line: { color: "#8a948c", width: 1.5, dash: "dash" } }],
+            { x: [lo, hi], y: [lo, hi], mode: "lines", name: "perfect (y=x)", line: { color: "#949894", width: 1.5, dash: "dash" } }],
             { ...pbase, showlegend: true, legend: { orientation: "h", y: 1.16, x: 0, font: { size: 9 } }, margin: { l: 48, r: 12, t: 6, b: 34 }, xaxis: { title: "measured", gridcolor: grid }, yaxis: { title: "predicted", gridcolor: grid } },
             { displayModeBar: false, responsive: true });
 
