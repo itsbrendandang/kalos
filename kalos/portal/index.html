@@ -9,31 +9,32 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
       :root {
-        --bg: #eff1ea; --card: #ffffff; --fg: #15241c; --muted: #586a5e;
-        --accent: #15a375; --accent-hover: #0e7c57; --accent-soft: #e4f4ed;
-        --explore: #c77e2e; --border: #e8ece3;
+        --bg: #f1f2eb; --card: #fcfdf9; --fg: #14231c; --muted: #59685f;
+        --accent: #159a6e; --accent-hover: #0e7653; --accent-soft: #dff1e9;
+        --explore: #b96f2b; --explore-soft: #f7e9d7; --border: #dde3da;
+        --sidebar: #13271f; --surface-soft: #f5f7f1;
         --head: "Sora", system-ui, sans-serif;
         --sans: "Plus Jakarta Sans", system-ui, sans-serif;
         --mono: "JetBrains Mono", ui-monospace, monospace;
       }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
-      header { padding: 20px 30px; display: flex; align-items: center; gap: 11px; }
+      header { padding: 18px 34px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); background: rgba(252,253,249,.9); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 10; }
       header .mark { display: flex; align-items: center; gap: 9px; }
       header h1 { margin: 0; font-family: var(--head); font-weight: 700; font-size: 19px; letter-spacing: -0.01em; }
       header .sub { color: var(--muted); font-family: var(--sans); font-size: 12.5px; }
       header .live { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent-hover);
         background: var(--accent-soft); padding: 5px 11px; border-radius: 999px; }
-      main { max-width: 1080px; margin: 0 auto; padding: 8px 30px 64px; display: grid; gap: 22px; }
-      .panel { background: var(--card); border-radius: 16px; padding: 20px 22px;
-        box-shadow: 0 1px 2px rgba(20,40,30,.04), 0 10px 26px rgba(20,40,30,.05); }
-      .panel h2 { margin: 0 0 2px; font-family: var(--head); font-weight: 600; font-size: 16px; }
-      .panel p.note { margin: 0 0 14px; color: var(--muted); font-size: 13px; max-width: 62ch; }
+      main { max-width: 1240px; margin: 0 auto; padding: 28px 34px 72px; display: grid; gap: 24px; }
+      .panel { background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 24px 26px;
+        box-shadow: 0 1px 2px rgba(20,35,28,.04), 0 16px 36px rgba(20,35,28,.055); }
+      .panel h2 { margin: 0 0 4px; font-family: var(--head); font-weight: 600; font-size: 18px; letter-spacing: -.02em; }
+      .panel p.note { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; max-width: 68ch; }
       .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
       @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
       .chart { width: 100%; height: 300px; }
       .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 4px 0 16px; }
-      .kpi { background: var(--bg); border-radius: 12px; padding: 14px 16px; }
+      .kpi { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
       .kpi.hero { background: var(--accent-hover); box-shadow: 0 8px 20px rgba(14,124,87,.30); }
       .kpi .k { font-size: 11px; color: var(--muted); font-weight: 500; }
       .kpi.hero .k { color: #ffffff; }
@@ -43,10 +44,11 @@
       th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
       th { color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
       td:first-child, th:first-child { text-align: left; color: var(--muted); }
-      button { font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: var(--accent);
-        border: 0; border-radius: 10px; padding: 9px 16px; cursor: pointer; box-shadow: 0 2px 8px rgba(21,163,117,.28);
-        display: inline-flex; align-items: center; gap: 7px; transition: background .15s ease; }
+      button { min-height: 44px; font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: var(--accent);
+        border: 1px solid var(--accent); border-radius: 10px; padding: 10px 16px; cursor: pointer; box-shadow: 0 5px 14px rgba(21,154,110,.22);
+        display: inline-flex; align-items: center; gap: 7px; transition: background .15s ease, transform .15s ease; }
       button:hover { background: var(--accent-hover); }
+      button:active { transform: translateY(1px); }
       button:disabled { opacity: 0.55; cursor: wait; }
       .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
       .label { font-size: 12.5px; color: var(--fg); font-weight: 600; margin-bottom: 8px; }
@@ -60,24 +62,93 @@
       .demo-badge { font-family: var(--sans); font-size: 10px; font-weight: 600; color: #8f5418;
         background: #fbefdd; padding: 3px 9px; border-radius: 999px; }
       .hint { cursor: help; border-bottom: 1px dotted var(--muted); }
+      .app-frame { min-height: 100svh; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+      .rail { position: sticky; top: 0; height: 100svh; padding: 22px 14px; background: var(--sidebar); color: #fff; display: flex; flex-direction: column; }
+      .rail-brand { display: flex; align-items: center; gap: 10px; padding: 0 9px 24px; }
+      .rail-brand .brand-mark { width: 40px; height: 40px; border-radius: 12px; background: var(--accent); display: grid; place-items: center; box-shadow: 0 8px 20px rgba(0,0,0,.2); }
+      .rail-brand strong { display:block; font: 700 18px/1 var(--head); letter-spacing: -.02em; }
+      .rail-brand small { display:block; margin-top: 5px; color:#8da197; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; }
+      .rail-label { padding: 0 12px 7px; color:#789083; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
+      .rail nav { display:grid; gap:5px; }
+      .rail nav a { min-height:46px; display:flex; align-items:center; gap:11px; padding:8px 12px; border:1px solid transparent; border-radius:11px; color:#c2d0c8; text-decoration:none; font-size:12.5px; font-weight:600; transition: .15s ease; }
+      .rail nav a:hover, .rail nav a:first-child { color:#fff; border-color:rgba(255,255,255,.11); background:rgba(255,255,255,.07); }
+      .rail nav svg { flex:none; }
+      .rail-status { margin-top:auto; padding:13px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(0,0,0,.12); color:#a9bcb1; font-size:11px; }
+      .rail-status strong { display:flex; align-items:center; gap:8px; color:#fff; font-size:11px; }
+      .status-dot { width:8px; height:8px; border-radius:50%; background:#5bd3a5; box-shadow:0 0 0 4px rgba(91,211,165,.12); }
+      .rail-status code { display:block; margin-top:8px; font:500 10px var(--mono); }
+      .workspace { min-width:0; }
+      .workspace header .context { color:var(--muted); font-size:12px; }
+      .hero { max-width:1240px; margin:0 auto; padding:44px 34px 20px; }
+      .hero .eyebrow { margin-bottom:9px; color:var(--accent-hover); font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
+      .hero h1 { max-width:760px; margin:0; font:600 clamp(30px,4vw,48px)/1.06 var(--head); letter-spacing:-.04em; }
+      .hero p { max-width:690px; margin:14px 0 0; color:var(--muted); font-size:15px; line-height:1.65; }
+      .hero-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
+      .hero-meta span { padding:6px 10px; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--muted); font-size:11px; font-weight:600; }
+      .hero-meta span:first-child { border-color:#b9dccc; background:var(--accent-soft); color:var(--accent-hover); }
+      .panel-anchor { scroll-margin-top:84px; }
+      #prop1, #prop2, #rtbl { overflow-x:auto; }
+      footer { max-width:1240px; margin:0 auto; padding:0 34px 36px; color:var(--muted); font-size:11px; }
+      @media (max-width: 920px) {
+        .app-frame { grid-template-columns:1fr; }
+        .rail { position:static; height:auto; padding:12px 14px; flex-direction:row; align-items:center; gap:12px; overflow-x:auto; }
+        .rail-brand { padding:0; flex:none; }
+        .rail-brand small, .rail-label, .rail-status { display:none; }
+        .rail nav { display:flex; gap:4px; }
+        .rail nav a { white-space:nowrap; min-height:42px; }
+        header { top:0; }
+      }
+      @media (max-width: 620px) {
+        header { padding:14px 18px; }
+        header .sub { display:none; }
+        .hero { padding:32px 18px 14px; }
+        .hero h1 { font-size:31px; }
+        .hero p { font-size:14px; }
+        main { padding:20px 14px 52px; gap:16px; }
+        .panel { padding:20px 16px; border-radius:16px; }
+        .head { align-items:flex-start; }
+        .stats { grid-template-columns:1fr; }
+        .chart { height:260px; }
+        footer { padding:0 18px 28px; }
+      }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
     </style>
   </head>
   <body>
-    <header>
-      <span class="mark">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#5bd39b"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#15a375"/></svg>
-        <h1>Kalos</h1>
-      </span>
-      <span class="sub" title="Built on BoTorch + ESM-2">powered by BoTorch</span>
-      <span class="live">live optimization</span>
-    </header>
-    <p class="intro"><b>Kalos suggests which experiment to run next</b> to reach your target with fewer experiments. Drop your own data below, or explore the live examples.</p>
-    <main>
-      <section class="panel">
+    <div class="app-frame">
+      <aside class="rail">
+        <div class="rail-brand">
+          <span class="brand-mark"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#fff" opacity=".55"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#fff"/></svg></span>
+          <span><strong>Kalos</strong><small>Engine console</small></span>
+        </div>
+        <div class="rail-label">Workspace</div>
+        <nav aria-label="Engine sections">
+          <a href="#overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 13h6V4H4v9Zm10 7h6V11h-6v9ZM4 20h6v-3H4v3Zm10-13h6V4h-6v3Z"/></svg>Overview</a>
+          <a href="#single"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2"/></svg>Single objective</a>
+          <a href="#multi"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="15" r="2"/><circle cx="12" cy="9" r="2"/><circle cx="18" cy="6" r="2"/><path d="m8.5 13.5 2-2.5 5.5-4"/></svg>Multi-objective</a>
+          <a href="#upload"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m-5 5 5-5 5 5M5 20h14"/></svg>Analyze run sheet</a>
+          <a href="/docs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h6"/></svg>API reference</a>
+        </nav>
+        <div class="rail-status"><strong><span class="status-dot"></span>Local engine ready</strong><code>127.0.0.1:8050</code></div>
+      </aside>
+      <div class="workspace">
+        <header>
+          <span class="mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#70cda8"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#159a6e"/></svg><h1>Kalos</h1></span>
+          <span class="context" title="Built on BoTorch + ESM-2">Bayesian optimization engine</span>
+          <span class="live">local · live</span>
+        </header>
+        <section class="hero" id="overview">
+          <div class="eyebrow">Local optimization workspace</div>
+          <h1>Find the next experiment worth running.</h1>
+          <p>Kalos fits honest models to measured runs, shows the evidence behind them, and proposes the next batch with uncertainty attached.</p>
+          <div class="hero-meta"><span>Engine ready</span><span>BoTorch GP</span><span>Leakage-controlled evaluation</span><span>Data stays local</span></div>
+        </section>
+        <main>
+      <section class="panel panel-anchor" id="single">
         <div class="head">
           <div>
-            <h2>Optimize one outcome <span class="demo-badge">Example data</span></h2>
-            <p class="note">Maximize titer over a 3-input recipe. Best-so-far should climb as the loop proposes and measures. (single-objective)</p>
+            <h2>Single-objective benchmark <span class="demo-badge">Example data</span></h2>
+            <p class="note">Follow best titer as the model learns a three-input recipe, then inspect the next batch and its uncertainty.</p>
           </div>
           <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
         </div>
@@ -92,11 +163,11 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel-anchor" id="multi">
         <div class="head">
           <div>
-            <h2>Optimize two outcomes at once <span class="demo-badge">Example data</span></h2>
-            <p class="note">Maximize titer and purity together (they peak at different recipes). The emerald line is the Pareto front: the achievable tradeoffs you can pick from. (multi-objective)</p>
+            <h2>Multi-objective tradeoffs <span class="demo-badge">Example data</span></h2>
+            <p class="note">Compare titer and purity when they peak at different recipes. The Pareto front shows the achievable choices without pretending there is one perfect answer.</p>
           </div>
           <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
         </div>
@@ -111,11 +182,11 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel-anchor" id="upload">
         <div class="head">
           <div>
-            <h2>Run your own data</h2>
-            <p class="note">Drop a CSV, TSV, or Excel run sheet — one experiment per row, with a measured output column. The engine fits, cross-validates honestly (grouped, leakage-controlled), ranks the drivers, and proposes the next batch. Parsed by this local server only.</p>
+            <h2>Analyze your run sheet</h2>
+            <p class="note">Upload CSV, TSV, or Excel data with one measured experiment per row. Kalos validates the model, ranks the drivers, and proposes a next batch. Files are parsed by this local server only.</p>
           </div>
         </div>
         <div id="drop" style="display:flex; flex-direction:column; align-items:center; gap:10px; border:2px dashed var(--border); border-radius:14px; background:var(--bg); padding:34px 20px; text-align:center; cursor:pointer; transition:border-color .15s, background .15s;">
@@ -126,10 +197,13 @@
         <input id="rfile" type="file" accept=".csv,.tsv,.xlsx,.xls" style="display:none" />
         <div id="runresult" style="margin-top:18px;"></div>
       </section>
-    </main>
+        </main>
+        <footer>Kalos Engine · local-first scientific optimization · model evidence stays attached to every recommendation</footer>
+      </div>
+    </div>
 
     <script>
-      const accent = "#15a375", explore = "#c77e2e", grid = "#e8ece3", ink = "#586a5e", dot = "#b9c2ba";
+      const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#aab6ae";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
         font: { color: ink, family: "JetBrains Mono, monospace", size: 11 },
@@ -162,7 +236,7 @@
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
           line: { color: accent, width: 2.5 }, marker: { color: accent, size: 6 },
-          fill: "tozeroy", fillcolor: "rgba(21,163,117,0.10)",
+          fill: "tozeroy", fillcolor: "rgba(21,154,110,0.10)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer (mg/L)" } }, { displayModeBar: false, responsive: true });
         document.getElementById("conv").setAttribute("aria-label", `Best titer rose to ${d.best_value.toFixed(1)} mg/L over ${t[t.length - 1].n} experiments.`);
         document.getElementById("s1best").textContent = d.best_value.toFixed(1);
@@ -199,7 +273,7 @@
 
     <script>
       (function () {
-        const accent = "#15a375", explore = "#c77e2e", grid = "#e8ece3", ink = "#586a5e", dot = "#b9c2ba";
+        const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#aab6ae";
         const drop = document.getElementById("drop"), inp = document.getElementById("rfile"), out = document.getElementById("runresult");
         let curFile = null;
         const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
