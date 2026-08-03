@@ -73,7 +73,7 @@ def _ensure_torch_threads() -> None:
     torch.set_num_threads(max(1, _TORCH_THREADS))
     _torch_threads_configured = True
 
-app = FastAPI(title="Kalos Engine API")
+app = FastAPI(title="Bioqore Engine API")
 
 # Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
 app.add_middleware(
