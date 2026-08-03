@@ -9,192 +9,245 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
       :root {
-        --bg: #fafaf9; --card: #ffffff; --fg: #202123; --muted: #6c6f6c;
-        --accent: #2563eb; --accent-hover: #1d4ed8; --accent-soft: #eaf1ff;
-        --explore: #a86525; --explore-soft: #f8ecdf; --border: #e5e5e2;
-        --sidebar: #f4f4f2; --sidebar-raised: #e9e9e6; --surface-soft: #f7f7f5;
-        --head: "Sora", system-ui, sans-serif;
-        --sans: "Plus Jakarta Sans", system-ui, sans-serif;
-        --mono: "JetBrains Mono", ui-monospace, monospace;
+        --bg: #f1f2eb; --card: #fcfdf9; --raised: #ffffff; --fg: #14231c; --muted: #59685f;
+        --accent: #159a6e; --accent-hover: #0e7653; --accent-soft: #dff1e9;
+        --explore: #b96f2b; --explore-soft: #f7e9d7; --danger: #a5483f;
+        --border: #dde3da; --border-strong: #c8d1c8; --rail: #13271f; --rail-ink: #eef5f0; --rail-muted: #a9b9af;
+        --head: "Sora", sans-serif; --sans: "Plus Jakarta Sans", sans-serif; --mono: "JetBrains Mono", monospace;
+        --shadow: 0 18px 44px rgba(19, 39, 31, .07);
       }
       * { box-sizing: border-box; }
-      body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
-      header { min-height: 58px; padding: 12px 28px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); background: #fff; position: sticky; top: 0; z-index: 10; }
-      header .mark { display: flex; align-items: center; gap: 9px; }
-      header h1 { margin: 0; font-family: var(--head); font-weight: 700; font-size: 19px; letter-spacing: -0.01em; }
-      header .sub { color: var(--muted); font-family: var(--sans); font-size: 12.5px; }
-      header .live { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent-hover);
-        background: var(--accent-soft); padding: 5px 11px; border-radius: 999px; }
-      main { max-width: 1240px; margin: 0 auto; padding: 10px 32px 72px; display: grid; gap: 0; }
-      .panel { background: transparent; border: 0; border-top: 1px solid var(--border); border-radius: 0; padding: 28px 0; box-shadow: none; }
-      .panel h2 { margin: 0 0 4px; font-family: var(--head); font-weight: 600; font-size: 18px; letter-spacing: -.02em; }
-      .panel p.note { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; max-width: 68ch; }
-      .row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
-      @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
-      .chart { width: 100%; height: 300px; }
-      .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin: 8px 0 22px; border-block: 1px solid var(--border); }
-      .kpi { background: transparent; border: 0; border-left: 1px solid var(--border); border-radius: 0; padding: 16px 18px; }
-      .kpi:first-child { border-left: 0; }
-      .kpi.hero { background: transparent; border-color: var(--border); box-shadow: none; }
-      .kpi .k { font-size: 11px; color: var(--muted); font-weight: 500; }
-      .kpi.hero .k { color: var(--muted); }
-      .kpi .v { font-family: var(--mono); font-size: 22px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
-      .kpi.hero .v { color: var(--fg); }
-      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
-      th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-      th { color: var(--muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
-      td:first-child, th:first-child { text-align: left; color: var(--muted); }
-      button { min-height: 44px; font-family: var(--sans); font-weight: 600; font-size: 12.5px; color: #fff; background: #222523;
-        border: 1px solid #222523; border-radius: 9px; padding: 10px 16px; cursor: pointer; box-shadow: none;
-        display: inline-flex; align-items: center; gap: 7px; transition: background .15s ease, transform .15s ease; }
-      button:hover { background: #0f1110; border-color: #0f1110; }
-      button:active { transform: translateY(1px); }
-      button:disabled { opacity: 0.55; cursor: wait; }
-      .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-      .label { font-size: 12.5px; color: var(--fg); font-weight: 600; margin-bottom: 8px; }
-      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 10px; }
-      .tag { display: inline-block; font-family: var(--sans); font-size: 10px; font-weight: 600;
-        padding: 2px 8px; border-radius: 999px; }
+      html { background: var(--bg); scroll-behavior: smooth; }
+      body { margin: 0; min-width: 320px; background: var(--bg); color: var(--fg); font: 15px/1.55 var(--sans); }
+      ::selection { background: var(--accent-soft); color: var(--fg); }
+      a:visited { color: inherit; }
+      .app-frame { min-height: 100svh; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+      .workspace { min-width: 0; }
+      .rail { position: sticky; top: 0; height: 100svh; padding: 24px 16px 18px; background: var(--rail); color: var(--rail-ink); display: flex; flex-direction: column; }
+      .rail-brand { display: flex; align-items: center; gap: 11px; padding: 0 8px 30px; }
+      .rail-brand .brand-mark { width: 36px; height: 36px; flex: none; border: 1px solid rgba(255,255,255,.15); border-radius: 9px; background: rgba(255,255,255,.08); display: grid; place-items: center; }
+      .rail-brand strong { display: block; font: 700 18px/1 var(--head); letter-spacing: -.025em; }
+      .rail-brand small { display: block; margin-top: 5px; color: var(--rail-muted); font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+      .rail-label { padding: 0 12px 8px; color: var(--rail-muted); font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+      .rail nav { display: grid; gap: 4px; }
+      .rail nav a { min-height: 46px; display: flex; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid transparent; border-radius: 9px; color: var(--rail-muted); text-decoration: none; font-size: 13px; font-weight: 600; transition: background-color .16s ease, color .16s ease, transform .16s ease; }
+      .rail nav a:hover { color: var(--rail-ink); background: rgba(255,255,255,.07); }
+      .rail nav a:active { transform: translateY(1px); }
+      .rail nav a[aria-current="page"] { color: #fff; background: rgba(76,199,154,.15); border-color: rgba(76,199,154,.18); }
+      .rail nav a[aria-current="page"] svg { color: #4cc79a; }
+      .rail nav svg { flex: none; }
+      .rail-status { margin-top: auto; padding: 14px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; background: rgba(255,255,255,.045); color: var(--rail-muted); font-size: 11px; }
+      .rail-status strong { display: flex; align-items: center; gap: 9px; color: var(--rail-ink); font-size: 11.5px; }
+      .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4cc79a; box-shadow: 0 0 0 4px rgba(76,199,154,.13); }
+      .rail-status code { display: block; margin-top: 8px; color: var(--rail-muted); font: 500 10px var(--mono); }
+      header { min-height: 68px; padding: 12px clamp(20px, 3vw, 40px); display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); background: rgba(252,253,249,.94); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(10px); }
+      .header-context { display: flex; align-items: center; gap: 9px; min-width: 0; }
+      .header-context svg { color: var(--accent); flex: none; }
+      .header-copy { display: grid; min-width: 0; }
+      .header-copy small { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+      .header-copy strong { overflow: hidden; font: 600 14px/1.4 var(--head); text-overflow: ellipsis; white-space: nowrap; }
+      header .live { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover); font-size: 11px; font-weight: 700; }
+      header .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+      main { width: min(100%, 1320px); margin: 0 auto; padding: 0 clamp(20px, 3vw, 40px) 80px; }
+      main .panel { display: none; }
+      .panel { padding: 38px 0 0; }
+      .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+      .page-kicker, .section-kicker { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+      .panel h2 { margin: 0 0 7px; font: 600 clamp(24px, 2.4vw, 32px)/1.15 var(--head); letter-spacing: -.035em; text-wrap: balance; }
+      .panel p.note { margin: 0; color: var(--muted); font-size: 14px; max-width: 72ch; text-wrap: pretty; }
+      .demo-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 8px; border-radius: 6px; background: var(--explore-soft); color: #8b511d; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; vertical-align: middle; }
+      button { min-height: 46px; flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 17px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent); color: #fff; font: 700 12.5px var(--sans); cursor: pointer; box-shadow: 0 8px 20px rgba(21,154,110,.16); transition: background-color .16s ease, border-color .16s ease, transform .16s ease, box-shadow .16s ease; }
+      button:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 0 10px 24px rgba(14,118,83,.2); }
+      button:active { transform: translateY(1px); box-shadow: 0 3px 8px rgba(14,118,83,.18); }
+      button:disabled { opacity: .55; cursor: wait; box-shadow: none; }
+      :focus-visible { outline: 3px solid rgba(21,154,110,.28); outline-offset: 3px; }
+      .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 28px 0 24px; border-block: 1px solid var(--border-strong); }
+      .kpi { min-width: 0; padding: 17px 22px; border-left: 1px solid var(--border); }
+      .kpi:first-child { border-left: 0; padding-left: 0; }
+      .kpi .k { color: var(--muted); font-size: 11px; font-weight: 600; }
+      .kpi .v { margin-top: 5px; color: var(--fg); font: 600 24px/1.35 var(--mono); font-variant-numeric: tabular-nums; }
+      .kpi.hero .v { color: var(--accent-hover); }
+      .row { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(360px, .8fr); gap: 20px; align-items: stretch; }
+      .row > div { min-width: 0; }
+      .work-surface { min-width: 0; overflow: hidden; padding: 20px; border: 1px solid var(--border); background: var(--card); box-shadow: var(--shadow); }
+      .work-surface:first-child { border-radius: 16px 8px 8px 16px; }
+      .work-surface:last-child { border-radius: 8px 16px 16px 8px; }
+      .label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--fg); font: 600 13px var(--head); }
+      .label span { color: var(--muted); font: 500 10px var(--sans); }
+      .chart { width: 100%; height: 320px; }
+      #prop1, #prop2, #rtbl { width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+      table { width: 100%; min-width: 480px; border-collapse: collapse; font: 500 11px/1.45 var(--mono); font-variant-numeric: tabular-nums; }
+      th, td { padding: 10px 8px; border-bottom: 1px solid var(--border); text-align: right; vertical-align: top; }
+      th { color: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+      td:first-child, th:first-child { padding-left: 0; color: var(--muted); text-align: left; }
+      td:last-child, th:last-child { min-width: 138px; padding-right: 0; text-align: left; white-space: normal; }
+      .tag { display: inline-block; margin-bottom: 3px; padding: 2px 7px; border-radius: 6px; font: 700 9px var(--sans); letter-spacing: .04em; text-transform: uppercase; }
       .tag.exploit { color: var(--accent-hover); background: var(--accent-soft); }
-      .tag.explore { color: #8f5418; background: #fbefdd; }
-      .intro { max-width: 1080px; margin: -2px auto 0; padding: 0 30px; color: var(--muted); font-size: 13px; }
-      .intro b { color: var(--fg); font-weight: 600; }
-      .demo-badge { font-family: var(--sans); font-size: 10px; font-weight: 600; color: #81501e;
-        background: var(--explore-soft); padding: 3px 9px; border-radius: 999px; }
+      .tag.explore { color: #8b511d; background: var(--explore-soft); }
       .hint { cursor: help; border-bottom: 1px dotted var(--muted); }
-      .app-frame { min-height: 100svh; display: grid; grid-template-columns: 220px minmax(0, 1fr); }
-      .rail { position: sticky; top: 0; height: 100svh; padding: 18px 12px; background: var(--sidebar); color: var(--fg); display: flex; flex-direction: column; border-right: 1px solid var(--border); }
-      .rail-brand { display: flex; align-items: center; gap: 10px; padding: 0 9px 24px; }
-      .rail-brand .brand-mark { width: 34px; height: 34px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; box-shadow: none; }
-      .rail-brand strong { display:block; font: 700 18px/1 var(--head); letter-spacing: -.02em; }
-      .rail-brand small { display:block; margin-top: 5px; color:#898c89; font-size:10px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; }
-      .rail-label { padding: 0 12px 7px; color:#898c89; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-      .rail nav { display:grid; gap:5px; }
-      .rail nav a { min-height:42px; display:flex; align-items:center; gap:11px; padding:8px 12px; border:1px solid transparent; border-radius:8px; color:#5f625f; text-decoration:none; font-size:12.5px; font-weight:600; transition: .15s ease; }
-      .rail nav a:hover { color:var(--fg); background:var(--sidebar-raised); }
-      body:not(:has(:target)) .rail nav a:first-child,
-      body:has(#overview:target) .rail nav a[href="#overview"],
-      body:has(#single:target) .rail nav a[href="#single"],
-      body:has(#multi:target) .rail nav a[href="#multi"],
-      body:has(#upload:target) .rail nav a[href="#upload"] { color:var(--fg); border-color:transparent; background:var(--sidebar-raised); box-shadow:none; }
-      .rail nav svg { flex:none; }
-      .rail-status { margin-top:auto; padding:12px; border:1px solid var(--border); border-radius:9px; background:rgba(255,255,255,.5); color:var(--muted); font-size:11px; }
-      .rail-status strong { display:flex; align-items:center; gap:8px; color:var(--fg); font-size:11px; }
-      .status-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 4px rgba(37,99,235,.12); }
-      .rail-status code { display:block; margin-top:8px; font:500 10px var(--mono); }
-      .workspace { min-width:0; }
-      .hero { max-width:1240px; margin:0 auto; padding:30px 32px 20px; }
-      .hero .eyebrow { margin-bottom:9px; color:var(--accent-hover); font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-      .hero h1 { max-width:720px; margin:0; font:600 clamp(28px,3vw,38px)/1.1 var(--head); letter-spacing:-.04em; }
-      .hero p { max-width:690px; margin:12px 0 0; color:var(--muted); font-size:15px; line-height:1.65; }
-      .hero-meta { display:flex; flex-wrap:wrap; gap:16px; margin-top:17px; }
-      .hero-meta span { padding:0; border:0; border-radius:0; background:transparent; color:var(--muted); font-size:11px; font-weight:600; }
-      .hero-meta span:first-child { padding:3px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent-hover); }
-      .overview-actions { display:none; max-width:1240px; margin:0 auto; padding:8px 32px 72px; }
-      .overview-head { padding:22px 0 16px; border-top:1px solid var(--border); }
-      .overview-head h2 { margin:0; font:600 18px/1.3 var(--head); letter-spacing:-.02em; }
-      .overview-head p { margin:5px 0 0; color:var(--muted); font-size:13.5px; }
-      .workflow-list { border-top:1px solid var(--border); }
-      .workflow-link { min-height:82px; display:grid; grid-template-columns:34px minmax(0,1fr) auto; align-items:center; gap:16px; padding:16px 4px; border-bottom:1px solid var(--border); color:var(--fg); text-decoration:none; }
-      .workflow-link:hover strong { color:var(--accent-hover); }
-      .workflow-index { font:600 11px var(--mono); color:var(--muted); }
-      .workflow-copy strong { display:block; font:600 15px/1.35 var(--head); }
-      .workflow-copy small { display:block; margin-top:4px; color:var(--muted); font-size:12.5px; }
-      .workflow-arrow { color:var(--muted); font-size:19px; transition:transform .15s ease, color .15s ease; }
-      .workflow-link:hover .workflow-arrow { color:var(--accent); transform:translateX(3px); }
-      main .panel { display:none; }
-      body:not(:has(:target)) .overview-actions,
-      body:has(#overview:target) .overview-actions { display:block; }
-      body:not(:has(:target)) main,
-      body:has(#overview:target) main { display:none; }
-      body:has(#single:target) section.hero,
-      body:has(#multi:target) section.hero,
-      body:has(#upload:target) section.hero,
-      body:has(#single:target) .overview-actions,
-      body:has(#multi:target) .overview-actions,
-      body:has(#upload:target) .overview-actions { display:none; }
-      body:has(#single:target) #single,
-      body:has(#multi:target) #multi,
-      body:has(#upload:target) #upload { display:block; }
-      .panel-anchor { scroll-margin-top:84px; }
-      #prop1, #prop2, #rtbl { overflow-x:auto; }
-      footer { max-width:1240px; margin:0 auto; padding:0 32px 36px; color:var(--muted); font-size:11px; }
-      @media (max-width: 920px) {
-        .app-frame { grid-template-columns:1fr; }
-        .rail { position:static; height:auto; padding:12px 14px; flex-direction:row; align-items:center; gap:12px; overflow-x:auto; }
-        .rail-brand { padding:0; flex:none; }
-        .rail-brand small, .rail-label, .rail-status { display:none; }
-        .rail nav { display:flex; gap:4px; }
-        .rail nav a { white-space:nowrap; min-height:42px; }
-        header { top:0; }
+      .hero { width: min(100%, 1320px); margin: 0 auto; padding: clamp(40px, 6vw, 74px) clamp(20px, 3vw, 40px) 28px; }
+      .hero .eyebrow { margin-bottom: 12px; color: var(--accent-hover); font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
+      .hero h1 { max-width: 780px; margin: 0; font: 600 clamp(36px, 5vw, 62px)/1.04 var(--head); letter-spacing: -.055em; text-wrap: balance; }
+      .hero p { max-width: 680px; margin: 18px 0 0; color: var(--muted); font-size: 16px; line-height: 1.65; text-wrap: pretty; }
+      .hero-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; margin-top: 24px; }
+      .hero-meta span { color: var(--muted); font-size: 11px; font-weight: 600; }
+      .hero-meta span:first-child { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover); }
+      .hero-meta span:first-child::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+      .loopbar { display: grid; grid-template-columns: repeat(5, 1fr); width: min(100%, 840px); margin-top: 38px; padding: 14px 0; border-block: 1px solid var(--border-strong); }
+      .loopbar span { position: relative; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      .loopbar span:not(:last-child)::after { content: "→"; position: absolute; right: 16px; color: var(--border-strong); }
+      .overview-actions { display: none; width: min(100%, 1320px); margin: 0 auto; padding: 18px clamp(20px, 3vw, 40px) 80px; }
+      .overview-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 22px 0 16px; }
+      .overview-head h2 { margin: 0; font: 600 20px/1.3 var(--head); letter-spacing: -.025em; }
+      .overview-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+      .overview-head .workspace-mode { color: var(--accent-hover); font: 600 10px var(--mono); }
+      .workflow-list { border-top: 1px solid var(--border-strong); }
+      .workflow-link { min-height: 92px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto auto; align-items: center; gap: 18px; padding: 18px 6px; border-bottom: 1px solid var(--border); color: var(--fg); text-decoration: none; transition: background-color .16s ease; }
+      .workflow-link:hover { background: rgba(255,255,255,.38); }
+      .workflow-index { font: 600 11px var(--mono); color: var(--muted); }
+      .workflow-copy strong { display: block; font: 600 16px/1.35 var(--head); }
+      .workflow-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 13px; }
+      .workflow-type { padding: 4px 7px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+      .workflow-link:last-child .workflow-type { border-color: rgba(21,154,110,.25); background: var(--accent-soft); color: var(--accent-hover); }
+      .workflow-arrow { color: var(--muted); font-size: 20px; transition: transform .16s ease, color .16s ease; }
+      .workflow-link:hover .workflow-arrow { color: var(--accent); transform: translateX(3px); }
+      .upload-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, .65fr); gap: 20px; margin-top: 28px; }
+      #drop { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px 22px; border: 1.5px dashed var(--border-strong); border-radius: 16px 8px 8px 16px; background: var(--card); text-align: center; cursor: pointer; transition: border-color .16s ease, background-color .16s ease, transform .16s ease; }
+      #drop:hover { border-color: var(--accent); background: #f7fbf8; transform: translateY(-1px); }
+      .drop-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-hover); }
+      .drop-title { font: 600 16px var(--head); }
+      .drop-title span { color: var(--muted); font: 500 14px var(--sans); }
+      .drop-formats { color: var(--muted); font: 500 10px var(--mono); }
+      .upload-contract { padding: 26px; border: 1px solid var(--border); border-radius: 8px 16px 16px 8px; background: var(--card); }
+      .upload-contract h3 { margin: 0 0 16px; font: 600 15px var(--head); }
+      .upload-contract ul { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+      .upload-contract li { display: grid; grid-template-columns: 20px 1fr; gap: 9px; color: var(--muted); font-size: 12px; }
+      .upload-contract li::before { content: "✓"; color: var(--accent-hover); font-weight: 800; }
+      .upload-contract strong { display: block; margin-bottom: 1px; color: var(--fg); font-size: 12.5px; }
+      #runresult { margin-top: 24px; }
+      body:not(:has(:target)) .overview-actions, body:has(#overview:target) .overview-actions { display: block; }
+      body:not(:has(:target)) main, body:has(#overview:target) main { display: none; }
+      body:has(#single:target) section.hero, body:has(#multi:target) section.hero, body:has(#upload:target) section.hero,
+      body:has(#single:target) .overview-actions, body:has(#multi:target) .overview-actions, body:has(#upload:target) .overview-actions { display: none; }
+      body:has(#single:target) #single, body:has(#multi:target) #multi, body:has(#upload:target) #upload { display: block; }
+      .panel-anchor { scroll-margin-top: 84px; }
+      footer { width: min(100%, 1320px); margin: 0 auto; padding: 0 clamp(20px, 3vw, 40px) 34px; color: var(--muted); font-size: 11px; }
+      @media (max-width: 1080px) {
+        .row { grid-template-columns: minmax(0, 1fr); }
+        .work-surface:first-child, .work-surface:last-child { border-radius: 14px; }
+        .chart { height: 300px; }
+        .upload-layout { grid-template-columns: 1fr; }
+        #drop, .upload-contract { border-radius: 14px; }
       }
-      @media (max-width: 620px) {
-        header { padding:14px 18px; }
-        header .sub { display:none; }
-        .hero { padding:32px 18px 14px; }
-        .hero h1 { font-size:31px; }
-        .hero p { font-size:14px; }
-        .overview-actions { padding:8px 18px 52px; }
-        .workflow-link { grid-template-columns:26px minmax(0,1fr) auto; gap:10px; }
-        main { padding:10px 18px 52px; gap:0; }
-        .panel { padding:24px 0; border-radius:0; }
-        .head { align-items:flex-start; }
-        .stats { grid-template-columns:1fr; }
-        .kpi { border-left:0; border-top:1px solid var(--border); }
-        .kpi:first-child { border-top:0; }
-        .chart { height:260px; }
-        footer { padding:0 18px 28px; }
+      @media (max-width: 860px) {
+        .app-frame { grid-template-columns: 1fr; }
+        .rail { position: static; height: auto; min-height: 64px; padding: 14px 20px; flex-direction: row; align-items: center; }
+        .rail-brand { padding: 0; }
+        .rail-brand small, .rail-label, .rail-status { display: none; }
+        .rail nav { margin-left: auto; display: flex; }
+        .rail nav a { min-height: 44px; padding: 8px 10px; }
+        .rail nav a svg { display: none; }
+        header { top: 0; }
       }
-      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
+      @media (max-width: 680px) {
+        body { font-size: 16px; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+        .rail { padding: 12px 18px; }
+        .rail-brand .brand-mark { width: 34px; height: 34px; }
+        .rail nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; margin: 0; padding: 7px max(6px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); border-top: 1px solid var(--border); background: rgba(252,253,249,.97); box-shadow: 0 -12px 30px rgba(19,39,31,.08); backdrop-filter: blur(12px); }
+        .rail nav a { min-width: 0; min-height: 54px; flex-direction: column; justify-content: center; gap: 4px; padding: 4px 2px; border: 0; border-radius: 7px; color: var(--muted); font-size: 9px; text-align: center; }
+        .rail nav a svg { display: block; width: 18px; height: 18px; }
+        .rail nav a[aria-current="page"] { color: var(--accent-hover); background: var(--accent-soft); }
+        header { min-height: 58px; padding: 9px 18px; }
+        .header-copy small { display: none; }
+        header .live { font-size: 10px; }
+        main { padding: 0 18px 48px; }
+        .panel { padding-top: 28px; }
+        .head { display: grid; gap: 18px; }
+        .head button { width: 100%; }
+        .panel h2 { font-size: 26px; }
+        .panel p.note { font-size: 14px; }
+        .stats { grid-template-columns: 1fr 1fr; margin-top: 24px; }
+        .kpi { padding: 14px 12px; border-left: 1px solid var(--border); }
+        .kpi:first-child { grid-column: 1 / -1; padding-left: 0; border-bottom: 1px solid var(--border); border-left: 0; }
+        .kpi:nth-child(2) { padding-left: 0; border-left: 0; }
+        .kpi .v { font-size: 22px; }
+        .row { gap: 14px; }
+        .work-surface { padding: 16px; border-radius: 12px !important; }
+        .chart { height: 270px; }
+        .hero { padding: 42px 18px 20px; }
+        .hero h1 { font-size: clamp(36px, 11vw, 46px); }
+        .hero p { font-size: 15px; }
+        .hero-meta { gap: 8px 14px; margin-top: 20px; }
+        .loopbar { grid-template-columns: repeat(3, 1fr); row-gap: 10px; margin-top: 28px; }
+        .loopbar span:nth-child(3)::after, .loopbar span:nth-child(5)::after { display: none; }
+        .overview-actions { padding: 12px 18px 48px; }
+        .overview-head { align-items: start; }
+        .overview-head .workspace-mode { display: none; }
+        .workflow-link { grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; padding: 16px 2px; }
+        .workflow-type { display: none; }
+        .workflow-copy strong { font-size: 14px; }
+        .workflow-copy small { font-size: 12px; }
+        .upload-contract { padding: 20px; }
+        #drop { min-height: 220px; padding: 28px 16px; }
+        footer { padding: 0 18px 24px; font-size: 10px; }
+      }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
     </style>
   </head>
   <body>
     <div class="app-frame">
       <aside class="rail">
         <div class="rail-brand">
-          <span class="brand-mark"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#fff" opacity=".55"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#fff"/></svg></span>
+          <span class="brand-mark"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#A9B9AF"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#4CC79A"/></svg></span>
           <span><strong>Bioqore</strong><small>Engine console</small></span>
         </div>
         <div class="rail-label">Workspace</div>
         <nav aria-label="Engine sections">
-          <a href="#overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 13h6V4H4v9Zm10 7h6V11h-6v9ZM4 20h6v-3H4v3Zm10-13h6V4h-6v3Z"/></svg>Overview</a>
-          <a href="#single"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2"/></svg>Single objective</a>
-          <a href="#multi"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="15" r="2"/><circle cx="12" cy="9" r="2"/><circle cx="18" cy="6" r="2"/><path d="m8.5 13.5 2-2.5 5.5-4"/></svg>Multi-objective</a>
-          <a href="#upload"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m-5 5 5-5 5 5M5 20h14"/></svg>Analyze run sheet</a>
-          <a href="/docs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h6"/></svg>API reference</a>
+          <a href="#overview" data-route="overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 13h6V4H4v9Zm10 7h6V11h-6v9ZM4 20h6v-3H4v3Zm10-13h6V4h-6v3Z"/></svg><span>Overview</span></a>
+          <a href="#single" data-route="single"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2"/></svg><span>One metric</span></a>
+          <a href="#multi" data-route="multi"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="15" r="2"/><circle cx="12" cy="9" r="2"/><circle cx="18" cy="6" r="2"/><path d="m8.5 13.5 2-2.5 5.5-4"/></svg><span>Tradeoffs</span></a>
+          <a href="#upload" data-route="upload"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m-5 5 5-5 5 5M5 20h14"/></svg><span>Run sheet</span></a>
+          <a href="/docs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8 13h8M8 17h6"/></svg><span>API</span></a>
         </nav>
         <div class="rail-status"><strong><span class="status-dot"></span>Local engine ready</strong><code>127.0.0.1:8050</code></div>
       </aside>
       <div class="workspace">
         <header>
-          <span class="mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="#93c5fd"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="#2563eb"/></svg><h1>Bioqore</h1></span>
-          <span class="live">local · live</span>
+          <div class="header-context">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 21c0-5 0-7-3-10S4 7 4 7s4 1 6 3 2 5 2 5z" fill="currentColor" opacity=".36"/><path d="M12 21c0-4 1-6 3.5-8.5S20 9 20 9s-1 4-3.5 6.5S12 21 12 21z" fill="currentColor"/></svg>
+            <span class="header-copy"><small>Optimization workspace</small><strong id="view-label">Overview</strong></span>
+          </div>
+          <span class="live">Local engine connected</span>
         </header>
         <section class="hero" id="overview">
-          <div class="eyebrow">Local optimization workspace</div>
-          <h1>Find the next experiment worth running.</h1>
-          <p>Bioqore fits honest models to measured runs, shows the evidence behind them, and proposes the next batch with uncertainty attached.</p>
-          <div class="hero-meta"><span>Engine ready</span><span>BoTorch GP</span><span>Leakage-controlled evaluation</span><span>Data stays local</span></div>
+          <div class="eyebrow">Scientific optimization, running locally</div>
+          <h1>Turn measured runs into the next experiment.</h1>
+          <p>Fit a model, inspect the evidence, and choose the next batch with uncertainty still attached.</p>
+          <div class="hero-meta"><span>Engine ready</span><span>BoTorch GP</span><span>Leakage-controlled validation</span><span>Data stays on this machine</span></div>
+          <div class="loopbar" aria-label="Experiment optimization loop"><span>Prepare</span><span>Analyze</span><span>Decide</span><span>Run</span><span>Learn</span></div>
         </section>
         <section class="overview-actions" aria-labelledby="workflow-title">
           <div class="overview-head">
-            <h2 id="workflow-title">Choose a workflow</h2>
-            <p>Start from the decision you need to make.</p>
+            <div><h2 id="workflow-title">What do you need to decide?</h2><p>Choose the workflow that matches the experiment decision.</p></div>
+            <span class="workspace-mode">LOCAL WORKSPACE · READY</span>
           </div>
           <div class="workflow-list">
             <a class="workflow-link" href="#single">
               <span class="workflow-index">01</span>
-              <span class="workflow-copy"><strong>Improve one outcome</strong><small>Optimize a single target and inspect the next proposed batch.</small></span>
+              <span class="workflow-copy"><strong>Improve one measured outcome</strong><small>Follow convergence and review the model’s next proposed batch.</small></span>
+              <span class="workflow-type">Example data</span>
               <span class="workflow-arrow" aria-hidden="true">→</span>
             </a>
             <a class="workflow-link" href="#multi">
               <span class="workflow-index">02</span>
-              <span class="workflow-copy"><strong>Balance competing outcomes</strong><small>Explore Pareto tradeoffs when no single recipe wins everywhere.</small></span>
+              <span class="workflow-copy"><strong>Balance competing outcomes</strong><small>Inspect the Pareto frontier when no recipe wins on every target.</small></span>
+              <span class="workflow-type">Example data</span>
               <span class="workflow-arrow" aria-hidden="true">→</span>
             </a>
             <a class="workflow-link" href="#upload">
               <span class="workflow-index">03</span>
-              <span class="workflow-copy"><strong>Analyze a run sheet</strong><small>Use your CSV, TSV, or Excel data to generate recommendations.</small></span>
+              <span class="workflow-copy"><strong>Analyze your run sheet</strong><small>Validate a model, rank drivers, and propose experiments from your data.</small></span>
+              <span class="workflow-type">Your data</span>
               <span class="workflow-arrow" aria-hidden="true">→</span>
             </a>
           </div>
@@ -203,71 +256,100 @@
       <section class="panel panel-anchor" id="single">
         <div class="head">
           <div>
-            <h2>Single-objective benchmark <span class="demo-badge">Example data</span></h2>
-            <p class="note">Follow best titer as the model learns a three-input recipe, then inspect the next batch and its uncertainty.</p>
+            <div class="page-kicker">Single objective <span class="demo-badge">Example data</span></div>
+            <h2>Optimize titer</h2>
+            <p class="note">See how the model learns a three-input recipe, then review the next batch and its uncertainty.</p>
           </div>
-          <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
+          <button id="run1"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run benchmark</span></button>
         </div>
         <div class="stats">
-          <div class="kpi hero"><div class="k">Best titer (mg/L)</div><div class="v" id="s1best">—</div></div>
-          <div class="kpi"><div class="k">Gap to optimum</div><div class="v" id="s1gap">—</div></div>
-          <div class="kpi"><div class="k">Experiments</div><div class="v" id="s1n">—</div></div>
+          <div class="kpi hero"><div class="k">Best observed titer (mg/L)</div><div class="v" id="s1best">—</div></div>
+          <div class="kpi"><div class="k">Recipe gap to optimum</div><div class="v" id="s1gap">—</div></div>
+          <div class="kpi"><div class="k">Measured experiments</div><div class="v" id="s1n">—</div></div>
         </div>
         <div class="row">
-          <div><div class="label">Convergence — best titer vs experiments</div><div id="conv" class="chart"></div></div>
-          <div><div class="label">Next batch proposed</div><div id="prop1"></div></div>
+          <div class="work-surface"><div class="section-kicker">Evidence</div><div class="label">Optimization progress <span>Best titer by experiment count</span></div><div id="conv" class="chart"></div></div>
+          <div class="work-surface"><div class="section-kicker">Decision</div><div class="label">Next batch <span>Predicted value ± uncertainty</span></div><div id="prop1"></div></div>
         </div>
       </section>
 
       <section class="panel panel-anchor" id="multi">
         <div class="head">
           <div>
-            <h2>Multi-objective tradeoffs <span class="demo-badge">Example data</span></h2>
-            <p class="note">Compare titer and purity when they peak at different recipes. The Pareto front shows the achievable choices without pretending there is one perfect answer.</p>
+            <div class="page-kicker">Multi-objective <span class="demo-badge">Example data</span></div>
+            <h2>Balance titer and purity</h2>
+            <p class="note">Compare achievable tradeoffs when the two outcomes peak at different recipes.</p>
           </div>
-          <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run</span></button>
+          <button id="run2"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6z"/></svg><span class="rlabel">Run benchmark</span></button>
         </div>
         <div class="stats">
-          <div class="kpi hero"><div class="k">Pareto front</div><div class="v" id="s2pf">—</div></div>
-          <div class="kpi"><div class="k">Best titer (mg/L)</div><div class="v" id="s2t">—</div></div>
-          <div class="kpi"><div class="k">Best purity (%)</div><div class="v" id="s2p">—</div></div>
+          <div class="kpi hero"><div class="k">Non-dominated recipes</div><div class="v" id="s2pf">—</div></div>
+          <div class="kpi"><div class="k">Highest titer (mg/L)</div><div class="v" id="s2t">—</div></div>
+          <div class="kpi"><div class="k">Highest purity (%)</div><div class="v" id="s2p">—</div></div>
         </div>
         <div class="row">
-          <div><div class="label">Titer vs purity <span style="color: var(--muted)">· gray = all runs, blue = Pareto front</span></div><div id="pareto" class="chart"></div></div>
-          <div><div class="label">Next batch proposed</div><div id="prop2"></div></div>
+          <div class="work-surface"><div class="section-kicker">Evidence</div><div class="label">Achievable tradeoffs <span>All runs and Pareto frontier</span></div><div id="pareto" class="chart"></div></div>
+          <div class="work-surface"><div class="section-kicker">Decision</div><div class="label">Next batch <span>Recipes that expand the frontier</span></div><div id="prop2"></div></div>
         </div>
       </section>
 
       <section class="panel panel-anchor" id="upload">
         <div class="head">
           <div>
-            <h2>Analyze your run sheet</h2>
-            <p class="note">Upload CSV, TSV, or Excel data with one measured experiment per row. Bioqore validates the model, ranks the drivers, and proposes a next batch. Files are parsed by this local server only.</p>
+            <div class="page-kicker">Your experiment data</div>
+            <h2>Analyze a run sheet</h2>
+            <p class="note">Validate the model, rank the drivers, and generate a proposed next batch. Your file stays on this machine.</p>
           </div>
         </div>
-        <div id="drop" style="display:flex; flex-direction:column; align-items:center; gap:10px; border:2px dashed var(--border); border-radius:14px; background:var(--bg); padding:34px 20px; text-align:center; cursor:pointer; transition:border-color .15s, background .15s;">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg>
-          <div style="font-weight:600; color:var(--fg);">Drop a run sheet here<span style="font-weight:400; color:var(--muted);"> or click to choose</span></div>
-          <div style="font-family:var(--mono); font-size:11px; color:var(--muted);">CSV · TSV · XLSX · parsed locally</div>
+        <div class="upload-layout">
+          <div id="drop">
+            <span class="drop-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg></span>
+            <div class="drop-title">Choose a run sheet <span>or drop it here</span></div>
+            <div class="drop-formats">CSV · TSV · XLSX · XLS</div>
+          </div>
+          <aside class="upload-contract" aria-label="Run sheet requirements">
+            <h3>Before you upload</h3>
+            <ul>
+              <li><span><strong>One experiment per row</strong>Replicates may share the same recipe.</span></li>
+              <li><span><strong>Inputs and outcomes as columns</strong>Bioqore identifies candidate targets after parsing.</span></li>
+              <li><span><strong>Measured data only</strong>Predictions should not be mixed into the run sheet.</span></li>
+            </ul>
+          </aside>
         </div>
         <input id="rfile" type="file" accept=".csv,.tsv,.xlsx,.xls" style="display:none" />
-        <div id="runresult" style="margin-top:18px;"></div>
+        <div id="runresult"></div>
       </section>
         </main>
-        <footer>Bioqore Engine · local-first scientific optimization · model evidence stays attached to every recommendation</footer>
+        <footer>Bioqore Engine · local scientific optimization · evidence stays attached to every recommendation</footer>
       </div>
     </div>
 
     <script>
       const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8050" : "";
       const apiUrl = (path) => `${API_BASE}${path}`;
+      const routeLabels = { overview: "Overview", single: "Optimize one metric", multi: "Balance tradeoffs", upload: "Analyze run sheet" };
+      function syncRoute() {
+        const route = window.location.hash.slice(1) || "overview";
+        document.getElementById("view-label").textContent = routeLabels[route] || routeLabels.overview;
+        document.querySelectorAll(".rail nav a[data-route]").forEach((link) => {
+          if (link.dataset.route === route) link.setAttribute("aria-current", "page");
+          else link.removeAttribute("aria-current");
+        });
+        requestAnimationFrame(() => {
+          ["conv", "pareto", "rdrv", "rpvm"].forEach((id) => {
+            const chart = document.getElementById(id);
+            if (chart && chart.data && window.Plotly?.Plots) Plotly.Plots.resize(chart);
+          });
+        });
+      }
+      window.addEventListener("hashchange", syncRoute);
+      syncRoute();
       function markConnection(ready) {
         const live = document.querySelector("header .live");
-        live.textContent = ready ? "local · live" : "engine offline";
-        live.style.color = ready ? "var(--accent-hover)" : "#8f5418";
-        live.style.background = ready ? "var(--accent-soft)" : "var(--explore-soft)";
+        live.textContent = ready ? "Local engine connected" : "Engine offline";
+        live.style.color = ready ? "var(--accent-hover)" : "var(--danger)";
       }
-      const accent = "#2563eb", explore = "#a86525", grid = "#e5e5e2", ink = "#6c6f6c", dot = "#a9ada9";
+      const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#9caaa1";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
         font: { color: ink, family: "JetBrains Mono, monospace", size: 11 },
@@ -279,7 +361,8 @@
       function setRun(btn, running) {
         btn.disabled = running;
         const lab = btn.querySelector(".rlabel");
-        if (lab) lab.textContent = running ? "Running…" : "Run";
+        if (lab && !btn.dataset.idleLabel) btn.dataset.idleLabel = lab.textContent;
+        if (lab) lab.textContent = running ? "Running benchmark…" : btn.dataset.idleLabel;
       }
       // proposal table: inputs + predicted value (with uncertainty) + a why tag
       function propTable(el, cols, proposals, predHead, predFn) {
@@ -311,7 +394,7 @@
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
           line: { color: accent, width: 2.5 }, marker: { color: accent, size: 6 },
-          fill: "tozeroy", fillcolor: "rgba(37,99,235,0.09)",
+          fill: "tozeroy", fillcolor: "rgba(21,154,110,0.10)",
         }], { ...base, xaxis: { ...ax, title: "experiments" }, yaxis: { ...ax, title: "best titer (mg/L)" } }, { displayModeBar: false, responsive: true });
         document.getElementById("conv").setAttribute("aria-label", `Best titer rose to ${d.best_value.toFixed(1)} mg/L over ${t[t.length - 1].n} experiments.`);
         document.getElementById("s1best").textContent = d.best_value.toFixed(1);
@@ -359,7 +442,7 @@
 
     <script>
       (function () {
-        const accent = "#2563eb", explore = "#a86525", grid = "#e5e5e2", ink = "#6c6f6c", dot = "#a9ada9";
+        const accent = "#159a6e", explore = "#b96f2b", grid = "#dde3da", ink = "#59685f", dot = "#9caaa1";
         const drop = document.getElementById("drop"), inp = document.getElementById("rfile"), out = document.getElementById("runresult");
         let curFile = null;
         const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
@@ -398,7 +481,7 @@
           const rv = d.cv_spearman;
           const relWord = rv == null ? "n/a" : rv < 0.2 ? "Low" : rv < 0.5 ? "Moderate" : "Good";
           const relTip = "How well the model predicted runs it had never seen (held-out rank correlation). Higher = more trustworthy suggestions. 0 = guessing, 1 = perfect.";
-          const sel = '<select id="tsel" style="font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:8px;padding:6px 8px;min-height:28px;background:#fff;color:var(--fg);">' +
+          const sel = '<select id="tsel" style="font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-height:44px;background:#fff;color:var(--fg);">' +
             d.targets.map((t) => '<option ' + (t === d.target ? "selected" : "") + ">" + esc(t) + "</option>").join("") + "</select>";
           out.innerHTML =
             '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:14px;">' +
@@ -411,10 +494,10 @@
               '<div class="kpi"><div class="k">Runs / inputs</div><div class="v">' + d.n + "/" + d.d + "</div></div>" +
             "</div>" +
             '<div class="row" style="margin-bottom:14px;">' +
-              '<div><div class="label">Drivers — rank correlation with ' + esc(d.target) + '</div><div id="rdrv" class="chart"></div></div>' +
-              '<div><div class="label">Predicted vs measured (out-of-fold)</div><div id="rpvm" class="chart"></div></div>' +
+              '<div class="work-surface"><div class="section-kicker">Evidence</div><div class="label">Drivers <span>Rank correlation with ' + esc(d.target) + '</span></div><div id="rdrv" class="chart"></div></div>' +
+              '<div class="work-surface"><div class="section-kicker">Validation</div><div class="label">Predicted vs measured <span>Out-of-fold estimates</span></div><div id="rpvm" class="chart"></div></div>' +
             "</div>" +
-            '<div class="label">Recommended next experiments</div><div id="rtbl"></div>';
+            '<div class="work-surface" style="border-radius:14px;"><div class="section-kicker">Decision</div><div class="label">Recommended next experiments <span>Predicted value ± uncertainty</span></div><div id="rtbl"></div></div>';
 
           document.getElementById("tsel").onchange = (e) => runFile(curFile, e.target.value);
 
