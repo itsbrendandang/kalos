@@ -210,6 +210,14 @@
     </div>
 
     <script>
+      const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8050" : "";
+      const apiUrl = (path) => `${API_BASE}${path}`;
+      function markConnection(ready) {
+        const live = document.querySelector("header .live");
+        live.textContent = ready ? "local · live" : "engine offline";
+        live.style.color = ready ? "var(--accent-hover)" : "#8f5418";
+        live.style.background = ready ? "var(--accent-soft)" : "var(--explore-soft)";
+      }
       const accent = "#10a37f", explore = "#b86b24", grid = "#dedfdb", ink = "#686b68", dot = "#a9ada9";
       const base = {
         paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -238,7 +246,18 @@
 
       async function runSingle() {
         const btn = document.getElementById("run1"); setRun(btn, true);
-        const d = await (await fetch("/api/single")).json();
+        let d;
+        try {
+          const response = await fetch(apiUrl("/api/single"));
+          if (!response.ok) throw new Error(`Engine returned ${response.status}`);
+          d = await response.json();
+          markConnection(true);
+        } catch (error) {
+          markConnection(false);
+          setRun(btn, false);
+          btn.querySelector(".rlabel").textContent = "Retry";
+          return;
+        }
         const t = d.trajectory;
         Plotly.newPlot("conv", [{
           x: t.map((p) => p.n), y: t.map((p) => p.best), mode: "lines+markers",
@@ -256,7 +275,18 @@
 
       async function runMulti() {
         const btn = document.getElementById("run2"); setRun(btn, true);
-        const d = await (await fetch("/api/multi")).json();
+        let d;
+        try {
+          const response = await fetch(apiUrl("/api/multi"));
+          if (!response.ok) throw new Error(`Engine returned ${response.status}`);
+          d = await response.json();
+          markConnection(true);
+        } catch (error) {
+          markConnection(false);
+          setRun(btn, false);
+          btn.querySelector(".rlabel").textContent = "Retry";
+          return;
+        }
         Plotly.newPlot("pareto", [
           { x: d.all.map((p) => p.titer), y: d.all.map((p) => p.purity), mode: "markers", name: "all runs",
             marker: { color: "#949894", size: 7, symbol: "circle-open" } },
@@ -304,8 +334,13 @@
           out.innerHTML = '<div style="font-family:var(--mono);font-size:12px;color:var(--muted);padding:8px 0;">Analyzing ' + esc(file.name) + " …</div>";
           const fd = new FormData(); fd.append("file", file); if (target) fd.append("target", target);
           let d;
-          try { d = await (await fetch("/api/run", { method: "POST", body: fd })).json(); }
-          catch (err) { out.innerHTML = errBox("Could not reach the engine."); return; }
+          try {
+            const response = await fetch(apiUrl("/api/run"), { method: "POST", body: fd });
+            d = await response.json();
+            if (!response.ok && !d.error) throw new Error(`Engine returned ${response.status}`);
+            markConnection(true);
+          }
+          catch (err) { markConnection(false); out.innerHTML = errBox("Could not reach the engine at 127.0.0.1:8050."); return; }
           if (d.error) { out.innerHTML = errBox(d.error); return; }
           render(d);
         }

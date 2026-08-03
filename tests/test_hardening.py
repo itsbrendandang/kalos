@@ -28,6 +28,18 @@ from kalos.portal.app import (  # noqa: E402
 client = TestClient(app)
 
 
+def test_file_portal_origin_can_reach_local_engine():
+    response = client.options(
+        "/api/single",
+        headers={
+            "Origin": "null",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "null"
+
+
 def _good_sheet(n: int = 40, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     methanol = rng.uniform(0, 4, n)

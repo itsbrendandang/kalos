@@ -78,6 +78,7 @@ app = FastAPI(title="Bioqore Engine API")
 # Allow the kalos-web Next.js app (dev + any localhost) to call the engine.
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["null"],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
