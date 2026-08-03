@@ -90,6 +90,32 @@
       .hero-meta { display:flex; flex-wrap:wrap; gap:16px; margin-top:17px; }
       .hero-meta span { padding:0; border:0; border-radius:0; background:transparent; color:var(--muted); font-size:11px; font-weight:600; }
       .hero-meta span:first-child { padding:3px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent-hover); }
+      .overview-actions { display:none; max-width:1240px; margin:0 auto; padding:8px 32px 72px; }
+      .overview-head { padding:22px 0 16px; border-top:1px solid var(--border); }
+      .overview-head h2 { margin:0; font:600 18px/1.3 var(--head); letter-spacing:-.02em; }
+      .overview-head p { margin:5px 0 0; color:var(--muted); font-size:13.5px; }
+      .workflow-list { border-top:1px solid var(--border); }
+      .workflow-link { min-height:82px; display:grid; grid-template-columns:34px minmax(0,1fr) auto; align-items:center; gap:16px; padding:16px 4px; border-bottom:1px solid var(--border); color:var(--fg); text-decoration:none; }
+      .workflow-link:hover strong { color:var(--accent-hover); }
+      .workflow-index { font:600 11px var(--mono); color:var(--muted); }
+      .workflow-copy strong { display:block; font:600 15px/1.35 var(--head); }
+      .workflow-copy small { display:block; margin-top:4px; color:var(--muted); font-size:12.5px; }
+      .workflow-arrow { color:var(--muted); font-size:19px; transition:transform .15s ease, color .15s ease; }
+      .workflow-link:hover .workflow-arrow { color:var(--accent); transform:translateX(3px); }
+      main .panel { display:none; }
+      body:not(:has(:target)) .overview-actions,
+      body:has(#overview:target) .overview-actions { display:block; }
+      body:not(:has(:target)) main,
+      body:has(#overview:target) main { display:none; }
+      body:has(#single:target) section.hero,
+      body:has(#multi:target) section.hero,
+      body:has(#upload:target) section.hero,
+      body:has(#single:target) .overview-actions,
+      body:has(#multi:target) .overview-actions,
+      body:has(#upload:target) .overview-actions { display:none; }
+      body:has(#single:target) #single,
+      body:has(#multi:target) #multi,
+      body:has(#upload:target) #upload { display:block; }
       .panel-anchor { scroll-margin-top:84px; }
       #prop1, #prop2, #rtbl { overflow-x:auto; }
       footer { max-width:1240px; margin:0 auto; padding:0 32px 36px; color:var(--muted); font-size:11px; }
@@ -108,6 +134,8 @@
         .hero { padding:32px 18px 14px; }
         .hero h1 { font-size:31px; }
         .hero p { font-size:14px; }
+        .overview-actions { padding:8px 18px 52px; }
+        .workflow-link { grid-template-columns:26px minmax(0,1fr) auto; gap:10px; }
         main { padding:10px 18px 52px; gap:0; }
         .panel { padding:24px 0; border-radius:0; }
         .head { align-items:flex-start; }
@@ -147,6 +175,29 @@
           <h1>Find the next experiment worth running.</h1>
           <p>Bioqore fits honest models to measured runs, shows the evidence behind them, and proposes the next batch with uncertainty attached.</p>
           <div class="hero-meta"><span>Engine ready</span><span>BoTorch GP</span><span>Leakage-controlled evaluation</span><span>Data stays local</span></div>
+        </section>
+        <section class="overview-actions" aria-labelledby="workflow-title">
+          <div class="overview-head">
+            <h2 id="workflow-title">Choose a workflow</h2>
+            <p>Start from the decision you need to make.</p>
+          </div>
+          <div class="workflow-list">
+            <a class="workflow-link" href="#single">
+              <span class="workflow-index">01</span>
+              <span class="workflow-copy"><strong>Improve one outcome</strong><small>Optimize a single target and inspect the next proposed batch.</small></span>
+              <span class="workflow-arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="workflow-link" href="#multi">
+              <span class="workflow-index">02</span>
+              <span class="workflow-copy"><strong>Balance competing outcomes</strong><small>Explore Pareto tradeoffs when no single recipe wins everywhere.</small></span>
+              <span class="workflow-arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="workflow-link" href="#upload">
+              <span class="workflow-index">03</span>
+              <span class="workflow-copy"><strong>Analyze a run sheet</strong><small>Use your CSV, TSV, or Excel data to generate recommendations.</small></span>
+              <span class="workflow-arrow" aria-hidden="true">→</span>
+            </a>
+          </div>
         </section>
         <main>
       <section class="panel panel-anchor" id="single">
