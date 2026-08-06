@@ -12,6 +12,8 @@ CPU). The deep-learning protein embedder runs on MPS separately.
 """
 from __future__ import annotations
 
+from typing import Sequence
+
 import gpytorch
 import numpy as np
 import torch
@@ -20,6 +22,7 @@ from botorch.fit import fit_gpytorch_mll
 from botorch.models import SingleTaskGP
 from botorch.models.transforms.input import Normalize
 from botorch.models.transforms.outcome import Standardize
+from gpytorch.kernels import AdditiveKernel, ProductKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.utils.errors import NotPSDError
 
@@ -188,3 +191,147 @@ class Surrogate:
     def best_f(self) -> float:
         assert self._y is not None
         return float(self._y.max())
+
+
+# Composite kernels combine several sub-kernels, each potentially covering a
+# different subset of input dimensions with its OWN lengthscale (this is the
+# shape `MixedSingleTaskGP` builds: a sum/product of a continuous-dims kernel and
+# a separate categorical-dims kernel). There is no single per-original-feature
+# lengthscale on a kernel like this, so `_ard_lengthscale` refuses rather than
+# arbitrarily picking one term.
+_COMPOSITE_KERNEL_TYPES = (AdditiveKernel, ProductKernel)
+
+
+def _ard_lengthscale(model: SingleTaskGP) -> tuple[np.ndarray | None, str | None]:
+    """Pull a single per-input-dimension ARD lengthscale array off a fitted
+    model's `covar_module`, or explain why one is not available.
+
+    Returns `(lengthscale, None)` on success - `lengthscale` has shape `(d,)` and
+    is in the model's INPUT-TRANSFORMED (normalized) units, see
+    `ard_main_effects` for what that means and why it matters. Returns
+    `(None, reason)` when there is no single, unambiguous per-feature lengthscale
+    to report: the kernel is a composite (additive/product) kernel over per-term
+    dimension subsets (see `_COMPOSITE_KERNEL_TYPES` above), the kernel has no
+    `lengthscale` parameter at all, or the kernel is not ARD (`ard_num_dims` is
+    `None`, meaning BoTorch/GPyTorch fell back to one lengthscale shared across
+    every dimension, which carries no per-feature information to rank).
+    """
+    kernel = getattr(model, "covar_module", None)
+    if kernel is None:
+        return None, "model has no covar_module"
+    if isinstance(kernel, _COMPOSITE_KERNEL_TYPES):
+        return None, (
+            "model's kernel is a composite (additive/product) kernel over per-term "
+            "dimension subsets (e.g. MixedSingleTaskGP's separate continuous + "
+            "categorical kernels) - there is no single per-feature lengthscale to report"
+        )
+    # A ScaleKernel wraps the actual distance kernel in `base_kernel`. The
+    # default path `Surrogate.fit()` takes today (no explicit `covar_module`
+    # passed to `SingleTaskGP`) installs a bare ARD kernel with no ScaleKernel
+    # wrapper, so `covar_module.lengthscale` already works directly - fall back to
+    # `kernel` itself when there is no `base_kernel`, so both shapes are handled.
+    base = getattr(kernel, "base_kernel", kernel)
+    if isinstance(base, _COMPOSITE_KERNEL_TYPES):
+        return None, (
+            "model's kernel wraps a composite (additive/product) kernel over "
+            "per-term dimension subsets - there is no single per-feature "
+            "lengthscale to report"
+        )
+    lengthscale = getattr(base, "lengthscale", None)
+    if lengthscale is None:
+        return None, "kernel has no fitted lengthscale parameter"
+    if getattr(base, "ard_num_dims", None) is None:
+        return None, (
+            "kernel is not ARD - a single lengthscale is shared across every "
+            "input dimension, so there is no per-feature signal to rank"
+        )
+    return lengthscale.detach().cpu().numpy().reshape(-1), None
+
+
+def ard_main_effects(surrogate: Surrogate, feature_names: Sequence[str]) -> dict[str, object]:
+    """Model-based per-feature main effects, from the fitted GP's ARD lengthscales.
+
+    This is a RELATIVE SENSITIVITY HEURISTIC, not a variance decomposition and not
+    a calibrated effect size. BoTorch's default kernel for `SingleTaskGP` (what
+    `Surrogate.fit()` always builds when no `covar_module` is passed, the only
+    path this codebase uses today) is ARD: one lengthscale per input dimension. A
+    short lengthscale means the fitted posterior mean tends to vary faster along
+    that dimension near the training data, so the model leans on it more to
+    explain what it has seen. `relative_importance` below is
+    `(1 / lengthscale_j) / sum_k(1 / lengthscale_k)`, normalized to sum to 1
+    across the ranked features.
+
+    What this does NOT measure: it is not a Sobol index, not a fraction of
+    variance explained, and not a percentage-based effect size of any kind - do
+    not present it as one. It ignores the kernel's outputscale/signal amplitude
+    (a dimension can have a short lengthscale and still barely move the output if
+    its amplitude there is tiny) and it says nothing about interactions between
+    features. It ranks features WITHIN one fitted model only; the lengthscale
+    ratios are not meaningful compared across different fits or campaigns.
+
+    Scale dependence - read this before trusting the numbers: ARD lengthscales
+    are only comparable across dimensions when every dimension was fit on a
+    common scale. `Surrogate.fit()` (`kalos/core/surrogate.py`) always normalizes
+    inputs to `[0, 1]` per dimension via botorch's `Normalize(d=d, bounds=box)`
+    input transform, tied to the fixed design `bounds` box (not the training-data
+    envelope), and the kernel operates on those normalized inputs - so the
+    lengthscales this function reads are already on a common per-dimension scale
+    and comparable across features FOR A MODEL FIT THROUGH `Surrogate.fit()`.
+    This function trusts that contract and does not independently re-normalize
+    anything; it must not be pointed at a GP fit without input normalization; on
+    such a model "shorter lengthscale" for a wide-range feature versus a
+    narrow-range one would just reflect the input's raw units, not any real
+    difference in sensitivity, and the ranking would be meaningless.
+
+    `feature_names` must have exactly one name per fitted input dimension, in the
+    same column order used to build the training `X` passed to `Surrogate.fit()`;
+    a length mismatch raises immediately rather than silently mapping a name to
+    the wrong dimension.
+
+    Returns a dict:
+      `{"available": True, "reason": None, "effects": [...]}`, where `effects` is
+      `[{"name": str, "lengthscale": float, "relative_importance": float}, ...]`
+      sorted by `relative_importance`, descending;
+    or, when no single per-feature lengthscale exists on this model (a non-ARD
+    kernel, or a composite continuous/categorical kernel like `MixedSingleTaskGP`
+    builds):
+      `{"available": False, "reason": <str explaining why>, "effects": None}`.
+    """
+    assert surrogate.model is not None, "fit() first"
+    assert surrogate._X is not None, "fit() first"
+    d = int(surrogate._X.shape[-1])
+    names = list(feature_names)
+    assert len(names) == d, (
+        f"feature_names has {len(names)} entries but the fitted model has {d} "
+        "input dimensions - refusing to guess a name-to-dimension mapping"
+    )
+
+    lengthscale, reason = _ard_lengthscale(surrogate.model)
+    if lengthscale is None:
+        return {"available": False, "reason": reason, "effects": None}
+    if lengthscale.shape[0] != d:
+        # Defensive: would only happen if a future covar_module override reports a
+        # lengthscale count that disagrees with the training data's dimension
+        # count. Refuse rather than mapping names onto the wrong dimensions.
+        return {
+            "available": False,
+            "reason": (
+                f"kernel reports {lengthscale.shape[0]} lengthscale(s) but the "
+                f"model has {d} input dimensions - refusing to guess a mapping"
+            ),
+            "effects": None,
+        }
+
+    inv = 1.0 / np.clip(lengthscale, 1e-12, None)
+    total = float(inv.sum())
+    relative = inv / total if total > 0 else np.zeros_like(inv)
+    effects = [
+        {
+            "name": names[j],
+            "lengthscale": round(float(lengthscale[j]), 6),
+            "relative_importance": round(float(relative[j]), 6),
+        }
+        for j in range(d)
+    ]
+    effects.sort(key=lambda e: -float(e["relative_importance"]))  # type: ignore[arg-type]
+    return {"available": True, "reason": None, "effects": effects}

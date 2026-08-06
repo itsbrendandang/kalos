@@ -16,6 +16,7 @@ __version__ = "0.1.0"
 # not pay the torch tax until one of these is actually touched.
 _LAZY = {
     "Surrogate": (".core.surrogate", "Surrogate"),
+    "ard_main_effects": (".core.surrogate", "ard_main_effects"),
     "propose": (".core.optimize", "propose"),
     "MultiObjectiveSurrogate": (".core.multiobjective", "MultiObjectiveSurrogate"),
     "propose_multiobjective": (".core.multiobjective", "propose_multiobjective"),
@@ -23,7 +24,7 @@ _LAZY = {
 }
 
 __all__ = [
-    "Surrogate", "propose", "MultiObjectiveSurrogate", "propose_multiobjective",
+    "Surrogate", "ard_main_effects", "propose", "MultiObjectiveSurrogate", "propose_multiobjective",
     "GatesConfig", "PromotionResult", "check_gates", "grouped_cv_spearman",
     "row_hash_groups", "make_splits", "assert_no_group_leakage",
     "bootstrap_spearman", "rank_drivers", "split_conformal",

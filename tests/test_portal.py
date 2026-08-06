@@ -42,6 +42,14 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
     assert rel["clears_floor"] == (out["cv_spearman"] >= 0.20)
     assert set(rel) == {"spearman", "ci95", "spearman_floor", "clears_floor", "ci_excludes_zero", "unmodeled"}
     assert "scale-up transfer" in rel["unmodeled"]
+    # GP-based main effects: a model estimate, alongside (not replacing) the
+    # Spearman `drivers` above - same feature set, different statistic.
+    gpme = out["gp_main_effects"]
+    assert gpme["available"] is True and gpme["reason"] is None
+    names = {e["name"] for e in gpme["effects"]}
+    assert names == set(out["features"])
+    total = sum(e["relative_importance"] for e in gpme["effects"])
+    assert abs(total - 1.0) < 1e-6
 
 
 def test_latest_reflects_last_upload(tmp_path, monkeypatch):

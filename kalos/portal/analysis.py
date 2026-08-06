@@ -131,7 +131,7 @@ def _analyze(
     # actually needs them, so this is where the torch tax is paid.
     from kalos.core.evaluation import grouped_cv_report
     from kalos.core.optimize import propose
-    from kalos.core.surrogate import Surrogate
+    from kalos.core.surrogate import Surrogate, ard_main_effects
 
     _seed_everything()
     df = _dedupe_columns(df.dropna(axis=1, how="all"))
@@ -252,6 +252,14 @@ def _analyze(
     for d in drv:
         d.pop("_idx", None)  # internal-only; not part of the returned API surface
     p_mean, p_std = s.posterior(batch)
+    # Model-based main effects, from the fitted GP's ARD lengthscales - a
+    # different, complementary statistic to the Spearman `drivers` above: this one
+    # is a model estimate, not a measurement, but it is a RELATIVE SENSITIVITY
+    # HEURISTIC, not a variance decomposition or a calibrated effect size. See
+    # `ard_main_effects`'s docstring for the full honesty contract (what it does
+    # and does not measure, and why it is only comparable across features because
+    # `Surrogate.fit()` normalizes every input to [0, 1]).
+    gp_main_effects = ard_main_effects(s, [str(c) for c in feats])
     # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
     # break) as soon as its last use is done, rather than waiting on `_analyze`
@@ -285,6 +293,7 @@ def _analyze(
         "reliability": reliability,
         "best": round(float(y.max()), 4),
         "drivers": drv,
+        "gp_main_effects": gp_main_effects,
         "proposal_features": show,
         "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],

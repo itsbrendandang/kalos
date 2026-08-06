@@ -14,7 +14,9 @@ hand-rolled GP + EI.
 ```
 kalos/
   core/
-    surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
+    surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized);
+                       ard_main_effects() reads the fitted GP's ARD lengthscales for
+                       model-based feature importance (a heuristic, not a Sobol index)
     optimize.py        qLogEI acquisition + optimize_acqf -> next batch
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
     evaluation.py      grouped cross-validated Spearman (leakage-controlled)

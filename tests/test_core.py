@@ -5,11 +5,17 @@ import os
 
 import numpy as np
 import pytest
+import torch
+from botorch.models import MixedSingleTaskGP, SingleTaskGP
+from botorch.models.transforms.input import Normalize
+from botorch.models.transforms.outcome import Standardize
+from gpytorch.kernels import RBFKernel, ScaleKernel
 
 from kalos import (
     GatesConfig,
     MultiObjectiveSurrogate,
     Surrogate,
+    ard_main_effects,
     check_gates,
     grouped_cv_spearman,
     propose,
@@ -131,3 +137,80 @@ def test_esm2_embeds():
     e = ESM2Embedder()
     v = e.embed("MKWVTFISLLFLFSSAYSRGVF")
     assert v.shape == (e.dim,) and np.isfinite(v).all()
+
+
+def _wrap_model(model, d: int) -> Surrogate:
+    """Wrap an already-constructed botorch model into a bare `Surrogate` shell,
+    bypassing `fit()` (which does not expose a `covar_module`/`cat_dims`
+    override). Only `.model` and `._X`'s dimension count are used by
+    `ard_main_effects`, so a dummy `._X` of the right shape is enough."""
+    s = Surrogate()
+    s.model = model
+    s._X = torch.zeros(1, d, dtype=torch.double)
+    return s
+
+
+def test_ard_main_effects_on_fitted_model():
+    rng = np.random.default_rng(3)
+    n = 30
+    x0 = rng.uniform(0, 1, n)
+    x1 = rng.uniform(0, 1, n)
+    y = 5.0 * x0 + 0.001 * x1 + rng.normal(0, 0.01, n)  # x0 dominates by a lot
+    X = np.column_stack([x0, x1])
+    s = Surrogate().fit(X, y, bounds=np.array([[0, 0], [1, 1]], float))
+
+    out = ard_main_effects(s, ["dominant", "negligible"])
+    assert out["available"] is True and out["reason"] is None
+    effects = out["effects"]
+    assert [e["name"] for e in effects] == ["dominant", "negligible"]  # correct dim mapping
+    assert effects[0]["relative_importance"] > effects[1]["relative_importance"]
+    total = sum(e["relative_importance"] for e in effects)
+    assert abs(total - 1.0) < 1e-6  # normalized to sum to 1
+    assert all(e["lengthscale"] > 0 for e in effects)
+
+
+def test_ard_main_effects_rejects_feature_name_mismatch():
+    rng = np.random.default_rng(4)
+    X = rng.uniform(0, 1, (20, 2))
+    y = X[:, 0] - X[:, 1]
+    s = Surrogate().fit(X, y, bounds=np.array([[0, 0], [1, 1]], float))
+    with pytest.raises(AssertionError):
+        ard_main_effects(s, ["only_one_name"])  # 1 name for a 2-D fit
+
+
+def test_ard_main_effects_before_fit_raises():
+    with pytest.raises(AssertionError):
+        ard_main_effects(Surrogate(), ["a", "b"])
+
+
+def test_ard_main_effects_reports_unavailable_for_non_ard_kernel():
+    d = 3
+    X = torch.rand(10, d, dtype=torch.double)
+    y = X.sum(dim=-1, keepdim=True)
+    covar = ScaleKernel(RBFKernel())  # no ard_num_dims -> one shared lengthscale
+    model = SingleTaskGP(
+        X, y, covar_module=covar,
+        input_transform=Normalize(d=d), outcome_transform=Standardize(m=1),
+    )
+    s = _wrap_model(model, d)
+
+    out = ard_main_effects(s, ["a", "b", "c"])
+    assert out["available"] is False and out["effects"] is None
+    assert "not ARD" in out["reason"]
+
+
+def test_ard_main_effects_reports_unavailable_for_mixed_kernel():
+    d = 3
+    X = torch.rand(10, d, dtype=torch.double)
+    X[:, 2] = (X[:, 2] * 3).floor()  # a fake 3-level categorical dim
+    y = X[:, :1] - X[:, 1:2]
+    model = MixedSingleTaskGP(
+        X, y, cat_dims=[2],
+        input_transform=Normalize(d=d, indices=[0, 1]),
+        outcome_transform=Standardize(m=1),
+    )
+    s = _wrap_model(model, d)
+
+    out = ard_main_effects(s, ["a", "b", "c"])
+    assert out["available"] is False and out["effects"] is None
+    assert "composite" in out["reason"]
