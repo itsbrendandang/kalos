@@ -8,6 +8,7 @@ teardown check would (correctly) fail it.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sqlite3
 import threading
@@ -106,3 +107,119 @@ def test_violation_on_a_worker_thread_is_still_recorded(home_guard: "HomeGuard")
     worker.join()
 
     assert home_guard.pop_violations(), "a thread's violation must still be recorded"
+
+
+# --- Keyword-only calls: each wrapped sink has its own path keyword(s) ------ #
+#
+# `_guarded` originally only inspected the first two positional arguments, so
+# `open(file="...")` sailed straight through. Each test below calls its sink
+# with the path passed ONLY by keyword - never positionally - which is exactly
+# the shape that bypassed the old guard.
+
+
+def test_open_builtin_kwargs_only_write_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`open`'s path parameter is named `file`."""
+    target = home_guard.real_kalos / "kwargs-open-probe.json"
+    with pytest.raises(home_guard.violation):
+        open(file=str(target), mode="w")
+    assert not target.exists()
+    assert home_guard.pop_violations()
+
+
+def test_os_open_kwargs_only_write_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.open` (the low-level fd open, distinct from `builtins.open`) names
+    its path parameter `path`."""
+    target = home_guard.real_kalos / "kwargs-os-open-probe.json"
+    with pytest.raises(home_guard.violation):
+        os.open(path=str(target), flags=os.O_CREAT | os.O_WRONLY)
+    assert not target.exists()
+    assert home_guard.pop_violations()
+
+
+def test_os_mkdir_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.mkdir` names its path parameter `path`."""
+    target = home_guard.real_kalos / "kwargs-mkdir-probe"
+    with pytest.raises(home_guard.violation):
+        os.mkdir(path=str(target))
+    assert not target.exists()
+    assert home_guard.pop_violations()
+
+
+def test_os_makedirs_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.makedirs` names its path parameter `name`, not `path` - the one
+    sink whose keyword differs from the rest, and the one most likely to be
+    guessed wrong."""
+    target = home_guard.real_kalos / "kwargs-makedirs-probe" / "nested"
+    with pytest.raises(home_guard.violation):
+        os.makedirs(name=str(target), exist_ok=True)
+    assert not target.exists()
+    assert home_guard.pop_violations()
+
+
+def test_os_remove_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.remove` names its path parameter `path`."""
+    target = home_guard.real_kalos / "kwargs-remove-probe.json"
+    with pytest.raises(home_guard.violation):
+        os.remove(path=str(target))
+    assert home_guard.pop_violations()
+
+
+def test_os_unlink_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.unlink` names its path parameter `path`."""
+    target = home_guard.real_kalos / "kwargs-unlink-probe.json"
+    with pytest.raises(home_guard.violation):
+        os.unlink(path=str(target))
+    assert home_guard.pop_violations()
+
+
+def test_os_rmdir_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.rmdir` names its path parameter `path`."""
+    target = home_guard.real_kalos / "kwargs-rmdir-probe"
+    with pytest.raises(home_guard.violation):
+        os.rmdir(path=str(target))
+    assert home_guard.pop_violations()
+
+
+def test_os_rename_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.rename` takes two paths, `src` and `dst`; a real-home destination
+    reached only by keyword must still be caught."""
+    src = home_guard.sandbox / "kwargs-rename-src.json"
+    src.write_text("{}")
+    dst = home_guard.real_kalos / "kwargs-rename-dst.json"
+    with pytest.raises(home_guard.violation):
+        os.rename(src=str(src), dst=str(dst))
+    assert not dst.exists()
+    assert home_guard.pop_violations()
+
+
+def test_os_replace_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`os.replace` takes two paths, `src` and `dst`, same as `rename`."""
+    src = home_guard.sandbox / "kwargs-replace-src.json"
+    src.write_text("{}")
+    dst = home_guard.real_kalos / "kwargs-replace-dst.json"
+    with pytest.raises(home_guard.violation):
+        os.replace(src=str(src), dst=str(dst))
+    assert not dst.exists()
+    assert home_guard.pop_violations()
+
+
+def test_sqlite_connect_kwargs_only_to_real_home_is_blocked(home_guard: "HomeGuard") -> None:
+    """`sqlite3.connect`'s path parameter is named `database` - this is the
+    exact keyword-only shape of the confirmed gap: the call that originally
+    wrote 25 test campaigns into the real `~/.kalos/portal.db`, made
+    keyword-only."""
+    with pytest.raises(home_guard.violation):
+        sqlite3.connect(database=str(home_guard.real_kalos / "kwargs-portal-probe.db"))
+    assert home_guard.pop_violations()
+
+
+def test_kwargs_only_write_to_the_sandbox_is_not_flagged(home_guard: "HomeGuard") -> None:
+    """A legitimate keyword-only write inside the sandbox must go through
+    untouched, and an unrelated string keyword (`mode`) must never be
+    mistaken for a path - the guard checks only the named path keyword(s) for
+    each sink, not every string-valued keyword argument."""
+    target = home_guard.sandbox / "kwargs-sandbox-probe.json"
+    with open(file=str(target), mode="w") as handle:
+        handle.write("{}")
+    assert target.read_text() == "{}"
+    assert home_guard.pop_violations() == []

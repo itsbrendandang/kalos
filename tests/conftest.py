@@ -93,14 +93,38 @@ def _check(operation: str, *candidates: Any) -> None:
             )
 
 
-def _guarded(operation: str, real: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap `real` so its first two positional arguments are path-checked.
+# Path-parameter name(s) for each `os` sink, keyed by attribute name. A
+# keyword-only call - `os.mkdir(path="...")` - uses the sink's own parameter
+# name, which differs per function, so each entry lists exactly the keyword(s)
+# that can carry a path for that sink. `rename`/`replace` list two: source and
+# destination.
+_OS_SINK_PATH_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "open": ("path",),  # os.open, the low-level fd open - not builtins.open
+    "mkdir": ("path",),
+    "makedirs": ("name",),
+    "remove": ("path",),
+    "unlink": ("path",),
+    "rmdir": ("path",),
+    "rename": ("src", "dst"),
+    "replace": ("src", "dst"),
+}
 
-    Two, because the rename/replace pair takes a source and a destination.
+
+def _guarded(
+    operation: str, real: Callable[..., Any], path_keywords: tuple[str, ...] = ()
+) -> Callable[..., Any]:
+    """Wrap `real` so its path argument(s) are checked whether passed
+    positionally or by keyword.
+
+    `path_keywords` names exactly the keyword argument(s) that can carry a
+    path for this sink (e.g. `("file",)` for `open`, `("src", "dst")` for
+    `os.rename`) - deliberately narrow, so an unrelated string keyword (a
+    mode, a flag) is never mistaken for a path and flagged.
     """
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        _check(operation, *args[:2])
+        keyword_candidates = (kwargs[key] for key in path_keywords if key in kwargs)
+        _check(operation, *args[:2], *keyword_candidates)
         return real(*args, **kwargs)
 
     return wrapper
@@ -112,16 +136,18 @@ def _install_sandbox() -> None:
 
     # `builtins.open` and `io.open` are separate references to the same
     # function; `Path.open`/`read_text`/`write_text` go through `io.open`.
-    guarded_open = _guarded("open", builtins.open)
+    # Its path parameter is named `file`.
+    guarded_open = _guarded("open", builtins.open, ("file",))
     builtins.open = guarded_open  # type: ignore[assignment]
     io.open = guarded_open  # type: ignore[assignment]
 
     # `Path.mkdir`/`Path.unlink`/`os.makedirs` delegate to these `os` globals.
-    for name in ("open", "mkdir", "makedirs", "remove", "unlink", "rmdir", "rename", "replace"):
-        setattr(os, name, _guarded(f"os.{name}", getattr(os, name)))
+    for name, path_keywords in _OS_SINK_PATH_KEYWORDS.items():
+        setattr(os, name, _guarded(f"os.{name}", getattr(os, name), path_keywords))
 
     # sqlite opens its database file in C, bypassing every wrapper above.
-    sqlite3.connect = _guarded("sqlite3.connect", sqlite3.connect)  # type: ignore[assignment]
+    # Its path parameter is named `database`.
+    sqlite3.connect = _guarded("sqlite3.connect", sqlite3.connect, ("database",))  # type: ignore[assignment]
 
 
 _install_sandbox()
