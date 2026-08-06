@@ -145,9 +145,15 @@ def _load_latest(tenant: str = "default") -> dict | None:
         return _LATEST.get(tenant)
 
 
-def _save_latest(result: dict, dataset: str, *, tenant: str = "default") -> None:
+def _save_latest(
+    result: dict, dataset: str, *, tenant: str = "default", campaign_id: str | None = None
+) -> None:
     with _LATEST_LOCK:
-        state = {**result, "dataset": dataset, "updated": time.time()}
+        # `campaign_id` is None for the legacy (non-campaign) call sites -
+        # /api/single, /api/multi never had one - and for a best-effort seed
+        # that failed. Always present in the shape so an existing reader that
+        # only reads the pre-existing fields is unaffected either way.
+        state = {**result, "dataset": dataset, "updated": time.time(), "campaign_id": campaign_id}
         _LATEST[tenant] = state
         try:
             path = _latest_path(tenant)
@@ -257,7 +263,7 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
 
 def _run_uploaded_sync(
     raw: bytes, target: str | None, anonymize: bool, filename: str, roles_json: str = "",
-    *, tenant: str = "default",
+    *, tenant: str = "default", campaign_id: str | None = None,
 ) -> dict:
     """The CPU-bound body of an upload: parse -> analyze -> persist -> result.
 
@@ -272,6 +278,23 @@ def _run_uploaded_sync(
     schema and the analysis runs domain-neutrally (the generic profile) instead of
     inferring bioprocess roles from column names. Omitted, the bioprocess profile
     infers roles exactly as before.
+
+    `campaign_id` selects between the two campaign outcomes (see
+    docs/CAMPAIGN_LOOP.md, "Replacing a campaign's data"):
+
+    - **None (the default)**: seed a brand new campaign, best-effort. A
+      seeding failure is logged and swallowed - the caller asked for an
+      analysis and gets one.
+    - **Given**: REPLACE that campaign's base data in place, contractually. A
+      refusal propagates as a `CampaignError` and fails the whole upload with
+      that exact message, because the caller asked to modify one specific
+      campaign; silently doing something else (or nothing) would leave them
+      believing a correction landed when it did not.
+
+    The replace is validated inside the store, under the store's own lock,
+    AFTER the analysis - one authoritative check with no time-of-check window,
+    at the cost of one wasted GP fit on a refusal. It runs BEFORE
+    `_save_latest`, so a refused replace leaves `/api/latest` untouched too.
     """
     _ensure_torch_threads()
     df = _parse_upload(raw)
@@ -280,18 +303,32 @@ def _run_uploaded_sync(
         result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
     else:
         result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
-    _save_latest(result, filename, tenant=tenant)
-    try:
-        # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
-        # "Seeding") for THIS tenant. Best-effort: a seeding failure must never
-        # break the upload response the client is waiting on.
-        from kalos.portal.campaign import get_campaign_store
+    from kalos.portal.campaign import get_campaign_store
 
-        get_campaign_store().seed(
-            df, result["target"], result["proposal_features"], tenant=tenant
+    if campaign_id is not None:
+        # Explicit replace: contractual, NOT best-effort. A CampaignError here
+        # propagates out to `run_uploaded`, which echoes its (author-written,
+        # safe) message as a 400. Nothing has been persisted yet, so a refusal
+        # leaves both the campaign and /api/latest exactly as they were.
+        resolved_id: str | None = get_campaign_store().replace(
+            campaign_id, df, result["target"], result["proposal_features"],
+            tenant=tenant, name=filename,
         )
-    except Exception:  # noqa: BLE001 - seeding must never fail the upload
-        log.exception("failed to seed the campaign from an uploaded run sheet")
+    else:
+        resolved_id = None
+        try:
+            # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
+            # "Seeding") for THIS tenant. Best-effort: a seeding failure must never
+            # break the upload response the client is waiting on. Seeded BEFORE
+            # _save_latest so the minted campaign id can be stamped onto
+            # /api/latest below; a seeding failure just leaves campaign_id None,
+            # same as the pre-identity shape.
+            resolved_id = get_campaign_store().seed(
+                df, result["target"], result["proposal_features"], tenant=tenant, name=filename
+            )
+        except Exception:  # noqa: BLE001 - seeding must never fail the upload
+            log.exception("failed to seed the campaign from an uploaded run sheet")
+    _save_latest(result, filename, tenant=tenant, campaign_id=resolved_id)
     return result
 
 
@@ -301,9 +338,25 @@ async def run_uploaded(
     target: str = Form(default=""),
     anonymize: bool = Form(default=False),
     roles: str = Form(default=""),
+    campaign_id: str | None = None,
     _principal: Principal = Depends(require_scope(WRITE)),
 ) -> JSONResponse:
+    """Analyze an uploaded run sheet, and either start a new campaign from it
+    or correct an existing one.
+
+    `campaign_id` (a QUERY parameter, so the multipart form body is unchanged)
+    switches between the two, and is the whole of the corrected-run-sheet
+    story (docs/CAMPAIGN_LOOP.md, "Replacing a campaign's data"):
+
+    - **omitted** - the default, and the pre-existing behavior byte for byte:
+      every upload creates its own new campaign.
+    - **given** - the uploaded file REPLACES that campaign's base data in
+      place, keeping its id, instead of creating a second one. Refused with a
+      400 and an explicit reason if that would discard measured lab results,
+      change the target, or touch an archived campaign.
+    """
     from kalos.core.surrogate import FitError  # deferred: only needed to match the except below
+    from kalos.portal.campaign import CampaignError  # deferred: mirrors the FitError import above
 
     raw = await file.read()
     filename = file.filename or "uploaded dataset"
@@ -314,10 +367,20 @@ async def run_uploaded(
         # request, including GET /api/latest) while a GP fit runs.
         result = await run_in_threadpool(
             functools.partial(
-                _run_uploaded_sync, raw, target or None, anonymize, filename, roles, tenant=tenant
+                _run_uploaded_sync, raw, target or None, anonymize, filename, roles,
+                tenant=tenant, campaign_id=campaign_id,
             )
         )
         return JSONResponse(result)
+    except CampaignError as exc:
+        # A refused ?campaign_id= replace. MUST be caught before the ValueError
+        # clause below - CampaignError subclasses ValueError, so it would
+        # otherwise be flattened into the generic parse-failure message and the
+        # caller would never learn why their correction was rejected. The
+        # message is authored by CampaignStore, never a raw library error, so
+        # echoing it is safe (see kalos.portal.campaign.CampaignError).
+        log.warning("upload rejected: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except UploadRejected as rej:
         # A guard tripped: the message is already generic and safe to return.
         log.warning("upload rejected: %s", rej)

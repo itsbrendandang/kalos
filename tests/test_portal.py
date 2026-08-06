@@ -67,6 +67,7 @@ def test_latest_reflects_last_upload(tmp_path, monkeypatch):
     assert got["cv_spearman"] is not None
     assert len(got["proposals"]) >= 1
     assert "updated" in got
+    assert got["campaign_id"] is None  # no campaign_id passed to _save_latest here
 
     # survives a restart (reloads from disk when the in-memory copy is gone)
     monkeypatch.setattr(portal, "_LATEST", {})
