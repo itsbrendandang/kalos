@@ -293,6 +293,82 @@ def test_start_rejects_malformed_recipe_with_400(store, client, bad_recipe):
     assert client.get("/api/campaign").json()["pending"] == []
 
 
+# --- recipe must match THIS campaign's schema ------------------------------ #
+# A started run is folded in as `{**recipe, target: result}` and re-analyzed, so
+# a recipe from another dataset (or one missing modeled features) would fold in
+# with blank columns that `_analyze` zero-fills into fabricated measurements.
+
+@pytest.mark.parametrize("bad_recipe, why", [
+    # every key belongs to a different experiment entirely
+    ({"Glycerol_g_L": 39.8, "DO_pct": 59.2}, "unknown columns"),
+    # right campaign, but only some of the modeled features are specified
+    ({"Methanol": 2.0}, "missing pH"),
+    # a real recipe with one stray column from somewhere else
+    ({"Methanol": 2.0, "pH": 6.0, "Glycerol_g_L": 39.8}, "one unknown column"),
+    # the measured outcome is not an input
+    ({"Methanol": 2.0, "pH": 6.0, "lipase_titer": 5.0}, "target passed as an input"),
+])
+def test_start_rejects_recipe_that_does_not_match_the_campaign(store, client, bad_recipe, why):
+    store.seed(_tiny_df(), "lipase_titer", ["Methanol", "pH"])
+    resp = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": bad_recipe, "pred": 1.0, "std": 0.1, "mode": "explore", "reason": why},
+    ]})
+    assert resp.status_code == 400, why
+    assert "error" in resp.json()
+    assert client.get("/api/campaign").json()["pending"] == []
+
+
+def test_start_allows_a_known_non_feature_column(store, client):
+    """A column carried in the base rows but not modeled (an id, a dropped
+    output) is allowed but not required — `_analyze` drops it anyway."""
+    df = _tiny_df()
+    df.insert(0, "medium", ["A", "B"] * (len(df) // 2))
+    store.seed(df, "lipase_titer", ["Methanol", "pH"])
+
+    resp = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0, "medium": "A"}, "pred": 5.1,
+         "std": 0.4, "mode": "explore", "reason": "carries the id column"},
+    ]})
+    assert resp.status_code == 200
+    assert resp.json()["started"][0]["recipe"]["medium"] == "A"
+
+
+def test_start_rejects_a_batch_atomically(store, client):
+    """One bad recipe rejects the whole batch: a partially-applied start would
+    leave the caller unsure which runs were queued."""
+    store.seed(_tiny_df(), "lipase_titer", ["Methanol", "pH"])
+    resp = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "good"},
+        {"recipe": {"Glycerol_g_L": 39.8}, "pred": 6.2, "std": 0.2,
+         "mode": "exploit", "reason": "from another dataset"},
+    ]})
+    assert resp.status_code == 400
+    assert client.get("/api/campaign").json()["pending"] == []
+
+
+def test_cross_dataset_recipe_cannot_inflate_best_so_far(store, client):
+    """The regression this guard exists for: starting a recipe from a different
+    dataset, logging a large outcome, and re-proposing used to fold that row in
+    and jump the campaign's best-so-far to a value from an unrelated experiment.
+    """
+    store.seed(_tiny_df(), "lipase_titer", ["Methanol", "pH"])
+    before = client.get("/api/campaign").json()
+
+    resp = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Glycerol_g_L": 39.84, "DO_pct": 59.2}, "pred": 58.7,
+         "std": 3.1, "mode": "exploit", "reason": "wrong dataset"},
+    ]})
+    assert resp.status_code == 400
+
+    after = client.get("/api/campaign").json()
+    assert after["best"] == before["best"]
+    assert after["round"] == before["round"] == 0
+    assert after["n_base"] == before["n_base"]
+    assert after["history"] == before["history"]
+    assert after["pending"] == []
+
+
 # --- transactional reanalyze: failure and reseed-race leave state intact ---- #
 
 def test_reanalyze_analyze_failure_does_not_advance_round_or_fold(store, client, monkeypatch):

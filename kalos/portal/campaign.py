@@ -61,6 +61,65 @@ def _finite_number(value: Any) -> float | None:
     return v if math.isfinite(v) else None
 
 
+def _validate_recipe_schema(
+    recipe_map: dict[str, Any], state: dict[str, Any]
+) -> None:
+    """Raise `CampaignError` unless `recipe_map` matches the campaign's schema.
+
+    A started run is eventually folded into `base_rows` as
+    `{**recipe, target: result}` and re-analyzed. That expansion is only sound
+    when the recipe describes the SAME experiment the campaign is optimizing,
+    so the keys are checked here — at the point of the bad input — rather than
+    silently corrupting the dataset rounds later:
+
+      - **No unknown columns.** A key that appears neither in `features` nor in
+        any base row means the caller is starting a recipe from a different
+        dataset than the campaign holds. Folded in, it would add a column that
+        is blank for every pre-existing row, and the pre-existing feature
+        columns would be blank for this one — which `_analyze` then zero-fills,
+        turning "not measured" into a fabricated 0.0 for both.
+      - **No missing modeled features.** Every column in `features` must be
+        given a value. A partially-specified recipe (e.g. a UI that renders
+        only the top few drivers) folds in with the omitted features blank,
+        and those are likewise zero-filled into fabricated measurements.
+      - **Not the target.** The measured outcome arrives via
+        `POST /api/campaign/result`; passing it as a recipe input would be
+        overwritten by the fold and signals a confused caller.
+
+    Non-feature columns carried in the base rows (an id or a dropped output
+    column) are NOT required: the optimizer does not propose them, `_analyze`
+    drops them anyway, and demanding them would make every honest recipe fail.
+    """
+    target = state["target"]
+    features: list[str] = list(state.get("features") or [])
+    keys = set(recipe_map)
+
+    if target in keys:
+        raise CampaignError(
+            f"recipe must not include the target {target!r}; log the measured "
+            "outcome with POST /api/campaign/result instead"
+        )
+
+    known = set(features)
+    for row in state["base_rows"]:
+        known.update(row)
+    unknown = sorted(keys - known)
+    if unknown:
+        raise CampaignError(
+            f"recipe has columns this campaign does not know: {unknown}. The "
+            f"campaign optimizes {target!r} over {features}; start recipes from "
+            "its own proposals, or upload a new run sheet to start a new campaign."
+        )
+
+    missing = [f for f in features if f not in keys]
+    if missing:
+        raise CampaignError(
+            f"recipe is missing a value for {missing}; every modeled feature "
+            f"({features}) must be specified, or the run folds in with those "
+            "inputs blank and they are read as zero."
+        )
+
+
 def _best_measured(base_rows: list[dict[str, Any]], target: str) -> float | None:
     """The best (max) MEASURED target value over `base_rows`, or None when no
     row carries a finite numeric target — never a prediction (docs/CAMPAIGN_LOOP.md,
@@ -139,8 +198,13 @@ class CampaignStore:
         new base dataset, so any in-flight pending runs from a previous
         campaign are discarded rather than silently folded into the wrong
         dataset. `target`/`features` come from the analysis result
-        (`result["target"]`, `result["proposal_features"]`), never guessed
-        from column names — see docs/CAMPAIGN_LOOP.md, "Seeding".
+        (`result["target"]`, `result["features"]`), never guessed from column
+        names — see docs/CAMPAIGN_LOOP.md, "Seeding".
+
+        `features` must be the FULL modeled feature list, not the abridged
+        `proposal_features` the UI displays: it is the schema every started
+        recipe is validated against (`_validate_recipe_schema`), so a short
+        list here would let partially-specified recipes through.
         """
         from kalos.portal.serialization import _json_safe_records  # local: avoids a cycle at import time
 
@@ -222,6 +286,10 @@ class CampaignStore:
                     raise CampaignError(
                         "each recipe must include a non-empty 'recipe' mapping of feature -> value"
                     )
+                # ...and check it against THIS campaign's schema, so a recipe
+                # from a different dataset (or one missing modeled features)
+                # cannot be folded in and zero-filled into fabricated inputs.
+                _validate_recipe_schema(recipe_map, state)
                 run = {
                     "id": uuid.uuid4().hex,
                     "recipe": recipe_map,
