@@ -35,6 +35,10 @@ kalos/
     adapter.py         BackendAdapter seam (local store today, http portal later)
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
+  domains/
+    profile.py         torch-free ColumnRoles / DesignSpace + DomainProfile (declared roles, mixed spaces)
+    bioprocess.py      the default bioprocess role-hint profile (legacy behavior)
+    generic.py         a domain-neutral profile for non-bio tabular optimization
   portal/
     app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
@@ -112,6 +116,18 @@ python -m pip install -e ".[ml,portal]" # the web portal (FastAPI) drives the li
 python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
 ```
 
+### Development checks
+
+CI runs the same three gates on every push and pull request (`.github/workflows/ci.yml`).
+Reproduce them from a clean `.[ml,portal,dev]` install:
+
+```bash
+python -m pip install -e ".[ml,portal,dev]"  # + ruff, mypy, and type stubs
+ruff check kalos/                            # lint
+mypy                                          # types (config in pyproject [tool.mypy])
+python -m pytest -q                           # tests
+```
+
 ## Device
 
 BoTorch GPs run in float64 for numerical stability, and Apple's MPS backend is
@@ -119,10 +135,37 @@ float32-only, so the **GP runs on CPU** (fast for the small-sample regime BO
 targets). The **ESM-2 embedder runs on MPS** when available. No GPU is required
 to use the platform locally.
 
+## Domains: reusing the engine beyond bioprocess
+
+The optimization engine (`core/`), the experiment store (`store/`), the runner
+(`runner/`), and the upload/validate pipeline are domain-neutral: they operate on
+numeric arrays and know nothing about biology. Biology lives in the `domains/`
+layer as data, not code in the engine.
+
+- **Declared column roles.** By default the analyze path infers roles (target,
+  features, ids, group) from the bioprocess profile's name hints. A caller in any
+  other domain can instead declare a `ColumnRoles` schema (target, features,
+  categoricals, groups, ids) so they state what their columns mean rather than
+  renaming them to match a regex. `POST /api/run` accepts an optional `roles`
+  JSON field for this; with it the analysis runs under the neutral generic
+  profile.
+- **Mixed continuous + categorical design spaces.** A `DesignSpace` marks each
+  dimension continuous or categorical. When categoricals are present the engine
+  fits a BoTorch `MixedSingleTaskGP` and proposes with `optimize_acqf_mixed`, and
+  proposals decode integer level codes back to labels. The continuous-only path
+  is unchanged.
+
+To target a new domain: declare a `ColumnRoles` (or copy `domains/generic.py`
+into a new profile) and, if it has discrete choices, list them under
+`categoricals`. Nothing in `core/` changes. The `mixed_bump` objective in
+`bench/` exercises the mixed loop end to end.
+
 ## Roadmap
 
 - ~~Multi-objective (qNEHVI) for titer + purity together.~~ **Done** (`core/multiobjective.py`).
-- Mixed continuous/categorical inputs (carbon source, medium) via Ax or BoTorch.
+- ~~Mixed continuous/categorical inputs (carbon source, medium) via BoTorch.~~ **Done**
+  (`domains/`, `core` mixed GP + `optimize_acqf_mixed`); large categorical spaces fall
+  back to `optimize_acqf_mixed_alternating`.
 - The push-feed ingestion loop (platform streams runs in; brain proposes the next
   batch; anonymized on read).
 - ~~Feasibility classifier + gated acquisition.~~ **Done** (`core/feasibility.py`,

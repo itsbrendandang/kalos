@@ -8,9 +8,10 @@ neither sign nor confidence).
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy.stats import spearmanr
 
 
@@ -20,7 +21,7 @@ def _ensure_2d(Z: np.ndarray) -> np.ndarray:
 
 
 def spearman_driver_matrix(
-    Z: np.ndarray, signal: Sequence[float], feature_names: Optional[Sequence[str]] = None
+    Z: np.ndarray, signal: ArrayLike, feature_names: Optional[Sequence[str]] = None
 ) -> Dict[str, object]:
     """Per-feature Spearman rho + p-value vs. a signal."""
     Z = _ensure_2d(Z)
@@ -39,7 +40,7 @@ def spearman_driver_matrix(
 
 
 def bootstrap_spearman(
-    Z: np.ndarray, signal: Sequence[float], B: int = 200, random_state: int = 42,
+    Z: np.ndarray, signal: ArrayLike, B: int = 200, random_state: int = 42,
     ci: float = 0.95, feature_names: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
     """Bootstrap Spearman per feature: mean, std, and percentile CI bounds."""
@@ -65,7 +66,7 @@ def bootstrap_spearman(
 
 def rank_drivers(summary: Dict[str, object], top_k: int = 5, direction: str = "abs") -> List[Tuple[str, float]]:
     """Rank features by bootstrap mean rho (or raw rho). direction: abs|pos|neg."""
-    names = list(summary["feature_names"])  # type: ignore[arg-type]
+    names = list(cast(Sequence[str], summary["feature_names"]))
     scores = np.asarray(summary.get("mean", summary.get("rho")), dtype=float)
     if direction == "abs":
         order = np.argsort(-np.abs(scores))

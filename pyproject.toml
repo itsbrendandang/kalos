@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kalos"
 version = "0.1.0"
-description = "Kalos: a Bayesian-optimization platform for bioprocess development, built on BoTorch with NVIDIA BioNeMo / ESM-2 protein features."
+description = "Kalos: a domain-neutral Bayesian-optimization platform for sequential experiment design, built on BoTorch. Ships a bioprocess domain (NVIDIA BioNeMo / ESM-2 protein features) and supports mixed continuous/categorical design spaces."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
@@ -31,10 +31,23 @@ portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"
 # The torch-free deterministic core (units/synonyms/plan/apply) and the
 # offline fallback in llm.py need none of this.
 normalize = ["anthropic>=0.40"]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs"]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["kalos"]
+# Third-party libs without usable stubs in this project's context. torch/botorch/
+# gpytorch DO ship py.typed, but following their full type surface makes a cold-cache
+# run take minutes; we typecheck kalos's own code, not theirs.
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "botorch.*", "gpytorch.*", "linear_operator.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

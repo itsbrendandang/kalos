@@ -6,8 +6,8 @@ so the model never "predicts" titer from another measured output (leakage).
 from __future__ import annotations
 
 import gc
-import re
 import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,13 @@ from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.splits import row_hash_groups
 from kalos.data.anonymizer import _hash
+from kalos.domains import (
+    BIOPROCESS_PROFILE,
+    ColumnRoles,
+    DesignSpace,
+    Dimension,
+    DomainProfile,
+)
 from kalos.portal.uploads import MAX_FIT_ROWS, UploadRejected, _ERR_TOO_MANY_FIT_ROWS
 from kalos.portal.validate import column_provenance, provenance_dicts
 
@@ -27,19 +34,26 @@ from kalos.portal.validate import column_provenance, provenance_dicts
 # import here would tax the idle poller and portal boot with the whole
 # torch/botorch/gpytorch stack (~220 MB) before any analysis ever runs. They
 # are imported lazily inside `_analyze`/`_seed_everything`, the only places
-# that actually need them.
+# that actually need them. `kalos.domains` above is torch-free by contract.
 
-_OUTCOME_HINT = re.compile(r"titer|titre|yield|conc|purity|lipase|biomass|od\d|product|response|output|score|kda|activity|titer", re.I)
-_TARGET_PREF = re.compile(r"titer|titre|lipase|yield", re.I)
-_ID_HINT = re.compile(r"^(id|name|sample.*|well|index|run|experiment|round|date|time|medium|strain|recipe|batch|campaign|group|lot|notes?)$", re.I)
-_GROUP_HINT = re.compile(r"medium|strain|recipe|batch|campaign|group|lot", re.I)
+# The default (bioprocess) column-role hints, kept as module-level names because
+# `_anonymize_result` and the provenance defaults reference them. Sourced from
+# BIOPROCESS_PROFILE so a run with no declared roles behaves exactly as before.
+_OUTCOME_HINT = BIOPROCESS_PROFILE.outcome_hint
+_TARGET_PREF = BIOPROCESS_PROFILE.target_pref
+_ID_HINT = BIOPROCESS_PROFILE.id_hint
+_GROUP_HINT = BIOPROCESS_PROFILE.group_hint
 
 
-def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
+def _annotate(batch: np.ndarray, mean, std, best: float, cols=None, design: DesignSpace | None = None) -> list:
     """Attach predicted value, uncertainty, and an explore/exploit rationale to
     each proposed experiment. Explore = high model uncertainty (chosen to learn);
     exploit = high predicted value (chosen to win). Current human-in-the-loop BO
-    research says a recommendation must carry exactly this."""
+    research says a recommendation must carry exactly this.
+
+    When a `design` is given, each row also carries `recipe`: the full proposed
+    experiment decoded to `{feature: value}`, with categorical dimensions decoded
+    back to their labels instead of raw integer codes."""
     mean = np.asarray(mean, float).reshape(-1)
     std = np.asarray(std, float).reshape(-1)
     thr = float(np.quantile(std, 2 / 3)) if len(std) > 2 else float(std.max() if len(std) else 0.0)
@@ -57,6 +71,8 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None) -> list:
         row = {"pred": round(m, 3), "std": round(sd, 3), "mode": mode, "reason": reason}
         row["vals"] = (np.round(batch[i], 3).tolist() if cols is None
                        else [round(float(batch[i][j]), 3) for j in cols])
+        if design is not None:
+            row["recipe"] = dict(zip(design.names, design.decode_row(batch[i])))
         rows.append(row)
     return rows
 
@@ -113,13 +129,116 @@ def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _resolve_columns(
+    df: pd.DataFrame,
+    num: list,
+    target: str | None,
+    roles: ColumnRoles | None,
+    profile: DomainProfile,
+) -> tuple[str, list, list, str | None, set]:
+    """Decide the column roles for one run sheet.
+
+    Returns `(target, cont_feats, cat_feats, gcol, declared)`, where the two
+    feature lists are in sheet-column order and `declared` is the set of columns
+    whose role came from an explicit `ColumnRoles` (empty in inference mode).
+
+    Two modes:
+      - `roles` given: use the declared target, features, ids, group, and
+        categoricals. When `roles.features` is empty the continuous features are
+        still inferred from the `profile`, honoring the declared ids/categoricals.
+      - `roles` None (default): infer everything from `profile` (with the
+        bioprocess profile this reproduces the original behavior exactly).
+    """
+    num_set = set(num)
+    if roles is not None:
+        if roles.target not in df.columns:
+            raise ValueError(f"declared target {roles.target!r} is not a column")
+        # A declared feature / categorical / group / id whose name does not match
+        # a header is a silent data-loss trap (typo, case mismatch): the real
+        # column would never be excluded/used and provenance would not flag it.
+        # Fail loudly so the caller is never told a declared column was honored
+        # when it was not - ids included (a typo'd id leaves the real id in as a
+        # feature otherwise).
+        declared_names = [*roles.features, *roles.categoricals, *roles.ids]
+        if roles.groups:
+            declared_names.append(roles.groups)
+        unknown = sorted({c for c in declared_names if c not in df.columns})
+        if unknown:
+            raise ValueError(f"declared columns not found in the sheet: {unknown}")
+        # A column cannot be both the target and an id/categorical - a
+        # self-contradictory schema is a caller error, not something to resolve
+        # silently by dropping one role.
+        if roles.target in set(roles.ids) or roles.target in set(roles.categoricals):
+            raise ValueError(
+                f"declared target {roles.target!r} cannot also be declared an id or categorical"
+            )
+        target = roles.target
+        cat_feats = [c for c in roles.categoricals if c in df.columns and c != target]
+        cat_set = set(cat_feats)
+        ids = set(roles.ids)
+        # `declared` drives the provenance `source` field, so declared ids belong
+        # in it too (their exclusion was the caller's instruction, not an inference).
+        declared: set = {target, *cat_feats, *ids}
+        if roles.features:
+            declared.update(roles.features)
+            # Declared continuous features must clear the same >=80% numeric-parse
+            # gate inference mode uses (`num`). A text column declared as a feature
+            # (the caller likely meant categorical) is left out here and reported
+            # as `dropped_non_numeric` by provenance, not silently zero-filled in.
+            cont_feats = [
+                c for c in roles.features
+                if c != target and c not in ids and c not in cat_set and c in num_set
+            ]
+        else:
+            cont_feats = [
+                c for c in num
+                if c != target and c not in cat_set and c not in ids
+                and not profile.id_hint.match(str(c).strip())
+                and not profile.outcome_hint.search(str(c))
+            ]
+        gcol = roles.groups if (roles.groups and roles.groups in df.columns) else None
+        if gcol is None:
+            gcol = next((c for c in df.columns if profile.group_hint.search(str(c))), None)
+        # normalize both feature lists to sheet-column order
+        cont_feats = [c for c in df.columns if c in set(cont_feats)]
+        cat_feats = [c for c in df.columns if c in cat_set]
+        return target, cont_feats, cat_feats, gcol, declared
+
+    # inference mode (default profile = bioprocess): unchanged legacy behavior
+    outcomes = [c for c in num if profile.outcome_hint.search(str(c))]
+    if target is None or target not in df.columns:
+        target = next(
+            (c for c in outcomes if profile.target_pref.search(str(c))),
+            outcomes[0] if outcomes else num[-1],
+        )
+    cont_feats = [
+        c for c in num
+        if c != target
+        and not profile.id_hint.match(str(c).strip())
+        and not profile.outcome_hint.search(str(c))
+    ]
+    gcol = next((c for c in df.columns if profile.group_hint.search(str(c))), None)
+    return target, cont_feats, [], gcol, set()
+
+
 def _analyze(
-    df: pd.DataFrame, target: str | None = None, *, anonymize: bool = False
+    df: pd.DataFrame,
+    target: str | None = None,
+    *,
+    anonymize: bool = False,
+    roles: ColumnRoles | None = None,
+    profile: DomainProfile = BIOPROCESS_PROFILE,
 ) -> dict:
     """Run the engine on an arbitrary run sheet: pick the target (the value to
     maximize), use the process INPUTS as features (other measured outputs are
     excluded to avoid leakage), then honest grouped-CV, signed drivers, and a
     proposed next batch.
+
+    Column roles come from an explicit `roles` schema when given, else are
+    inferred from `profile` (defaulting to the bioprocess profile, which
+    reproduces the original behavior). `roles.categoricals` marks feature columns
+    whose values are unordered labels; the engine fits a mixed GP over them and
+    proposals decode back to labels.
 
     Deterministic: seeds torch + numpy up front so the same sheet gives the same
     proposals. Returns a per-column `provenance` report (what was kept/dropped and
@@ -130,7 +249,7 @@ def _analyze(
     # module-level note above). This is the one place in this module that
     # actually needs them, so this is where the torch tax is paid.
     from kalos.core.evaluation import grouped_cv_report
-    from kalos.core.optimize import propose
+    from kalos.core.optimize import MAX_MIXED_COMBOS, propose
     from kalos.core.surrogate import Surrogate
 
     _seed_everything()
@@ -138,24 +257,31 @@ def _analyze(
     num = _numeric_cols(df)
     if not num:
         raise ValueError("no numeric columns found")
-    outcomes = [c for c in num if _OUTCOME_HINT.search(str(c))]
-    if target is None or target not in df.columns:
-        target = next((c for c in outcomes if _TARGET_PREF.search(str(c))), outcomes[0] if outcomes else num[-1])
-    feats = []
-    for c in num:
-        if c == target or _ID_HINT.match(str(c).strip()) or _OUTCOME_HINT.search(str(c)):
-            continue  # drop the target, ids, and OTHER measured outputs (anti-leakage)
+    target, cont_feats, cat_feats, gcol, declared = _resolve_columns(
+        df, num, target, roles, profile
+    )
+    if roles is None:
+        outcomes = [c for c in num if profile.outcome_hint.search(str(c))]
+        candidate_targets = outcomes or [target]
+    else:
+        candidate_targets = [target]
+
+    # Keep only continuous features that actually vary (a constant column carries
+    # no signal and would collapse its normalization range). Matches the legacy
+    # full-column variance filter.
+    varying = []
+    for c in cont_feats:
         col = pd.to_numeric(df[c], errors="coerce")
         if col.std(skipna=True) and col.std() > 1e-9:
-            feats.append(c)
-    if len(feats) < 1:
+            varying.append(c)
+    cont_feats = varying
+    if not cont_feats and not cat_feats:
         raise ValueError("no varying process-input columns found (only outputs/ids?)")
-    candidate_targets = outcomes or [target]
 
     y_all = pd.to_numeric(df[target], errors="coerce")
     keep = y_all.notna()
-    X_raw = df.loc[keep, feats].apply(pd.to_numeric, errors="coerce")   # NaN preserved (for grouping)
-    X_zf = X_raw.fillna(0.0)                                             # zero-filled (for the GP + box)
+    Xc_raw = df.loc[keep, cont_feats].apply(pd.to_numeric, errors="coerce")  # NaN preserved (for grouping)
+    Xc_zf = Xc_raw.fillna(0.0)                                               # zero-filled (for the GP + box)
     y = y_all[keep].to_numpy(float)
     if len(y) < 6:
         raise ValueError(f"need at least 6 rows with a numeric {target!r}; got {len(y)}")
@@ -170,30 +296,98 @@ def _analyze(
     # feature that varies over the whole sheet but is constant on the fitted rows
     # would otherwise collapse its bound to zero width silently. Drop such features
     # and record them so provenance flags them instead of misleading the client.
-    fitted_range = X_zf.max(axis=0) - X_zf.min(axis=0)
-    constant_on_fitted = [c for c in feats if float(fitted_range[c]) <= 1e-9]
-    if constant_on_fitted:
-        feats = [c for c in feats if c not in set(constant_on_fitted)]
-        if len(feats) < 1:
-            raise ValueError("no varying process-input columns on the target-present rows")
-        X_raw = X_raw.drop(columns=constant_on_fitted)
-        X_zf = X_zf.drop(columns=constant_on_fitted)
+    constant_on_fitted: list = []
+    if cont_feats:
+        fitted_range = Xc_zf.max(axis=0) - Xc_zf.min(axis=0)
+        constant_on_fitted = [c for c in cont_feats if float(fitted_range[c]) <= 1e-9]
+        if constant_on_fitted:
+            cont_feats = [c for c in cont_feats if c not in set(constant_on_fitted)]
+            Xc_raw = Xc_raw.drop(columns=constant_on_fitted)
+            Xc_zf = Xc_zf.drop(columns=constant_on_fitted)
 
-    X = X_zf.to_numpy(float)
-    bounds = np.vstack([X.min(0), X.max(0)])
+    # Categorical features: derive ordered levels from the fitted rows. A blank
+    # cell is NOT a proposable level - it means the categorical is unknown for that
+    # row - so blanks are excluded from the levels here, and rows with a blank in
+    # any kept categorical are dropped from the fit below (you cannot model, or
+    # recommend, a recipe whose categorical component is unknown). Drop any
+    # categorical that carries a single level too (no choice to optimize).
+    kept_cats: list = []
+    constant_cats: list = []
+    cat_dims_map: dict = {}
+    for c in cat_feats:
+        labels = df.loc[keep, c].fillna("").astype(str).str.strip()
+        levels = tuple(sorted({v for v in labels.tolist() if v != ""}))
+        if len(levels) < 2:
+            constant_cats.append(c)
+            continue
+        kept_cats.append(c)
+        cat_dims_map[c] = levels
 
-    gcol = next((c for c in df.columns if _GROUP_HINT.search(str(c))), None)
+    if not cont_feats and not kept_cats:
+        raise ValueError("no varying process-input columns on the target-present rows")
+
+    # Drop fitted rows whose value for any kept categorical is blank/unknown, so a
+    # missing categorical can never poison the GP (as a NaN code) or surface as a
+    # proposed recipe with an empty categorical. `keep_index` is the original-frame
+    # index of the surviving rows, used for every per-row lookup below.
+    keep_index = df.index[keep.to_numpy()]
+    complete = np.ones(len(y), dtype=bool)
+    for c in kept_cats:
+        labels = df.loc[keep_index, c].fillna("").astype(str).str.strip()
+        complete &= labels.isin(cat_dims_map[c]).to_numpy()
+    n_dropped_incomplete = int((~complete).sum())
+    if n_dropped_incomplete:
+        if int(complete.sum()) < 6:
+            raise ValueError(
+                f"only {int(complete.sum())} rows have all declared categoricals present; "
+                "need at least 6 to fit"
+            )
+        pos = np.flatnonzero(complete)
+        y = y[complete]
+        Xc_raw = Xc_raw.iloc[pos]
+        Xc_zf = Xc_zf.iloc[pos]
+        keep_index = keep_index[pos]
+
+    # Assemble the design space with continuous dims first, categorical dims last.
+    # BoTorch's mixed models accept arbitrary cat_dims indices, so this order is not
+    # required; it just keeps X and the continuous driver slice `X[:, :n_cont]` simple.
+    dims: list[Dimension] = []
+    cont_arr = Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0))
+    for j, c in enumerate(cont_feats):
+        col = cont_arr[:, j]
+        dims.append(Dimension(str(c), "continuous", lower=float(col.min()), upper=float(col.max())))
+    for c in kept_cats:
+        dims.append(Dimension(str(c), "categorical", levels=cat_dims_map[c]))
+    design = DesignSpace(tuple(dims))
+
+    if kept_cats:
+        code_maps = {c: {lvl: i for i, lvl in enumerate(cat_dims_map[c])} for c in kept_cats}
+        cat_cols = [
+            df.loc[keep_index, c].fillna("").astype(str).str.strip().map(code_maps[c]).to_numpy(float)
+            for c in kept_cats
+        ]
+        X = np.column_stack([cont_arr, *cat_cols]) if cont_feats else np.column_stack(cat_cols)
+    else:
+        X = cont_arr
+    bounds = design.bounds()
+    cat_dims = design.cat_dims or None
+    cat_cardinalities = design.cat_cardinalities or None
+
     if gcol:
-        groups = df.loc[keep, gcol].astype(str).tolist()
+        groups = df.loc[keep_index, gcol].astype(str).tolist()
     else:
         # group on the RAW values (NaN preserved) so rows missing different
         # components are not merged into one replicate group by the zero-fill —
-        # via the one leakage-checked, deterministic grouper.
-        groups = row_hash_groups(X_raw)
+        # via the one leakage-checked, deterministic grouper. Categorical labels
+        # join the grouping key so identical recipes stay one replicate group.
+        gf = Xc_raw.copy()
+        for c in kept_cats:
+            gf[c] = df.loc[keep_index, c].fillna("").astype(str)
+        groups = row_hash_groups(gf)
 
     # honest grouped cross-validation: pooled out-of-fold predictions + a
     # group-level bootstrap CI, all through the single leakage-checked splitter.
-    rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds)
+    rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds, cat_dims=cat_dims)
     rho = rep["spearman"]
     oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
 
@@ -222,13 +416,20 @@ def _analyze(
     # finding. (Same honesty contract as `reliability.ci_excludes_zero` above.)
     # `rho` is the sample Spearman POINT estimate (consistent with the point
     # estimate `reliability.spearman` reports); the bootstrap supplies only the CI.
-    drv = []
-    if feats:
-        names = [str(c) for c in feats]
-        point = spearman_driver_matrix(X, y, feature_names=names)["rho"]
-        boot = bootstrap_spearman(X, y, feature_names=names)
-        for j, c in enumerate(feats):
-            lo, hi = round(float(boot["lo"][j]), 3), round(float(boot["hi"][j]), 3)
+    # Drivers are computed over the CONTINUOUS features only: a signed Spearman
+    # rank correlation on an integer-coded nominal category is not a meaningful
+    # "driver", so categorical dims are deliberately excluded here. Their
+    # continuous indices (0..len(cont_feats)-1) align with the leading columns of X.
+    drv: list[dict[str, Any]] = []
+    if cont_feats:
+        names = [str(c) for c in cont_feats]
+        Xcont = X[:, : len(cont_feats)]
+        point = np.asarray(spearman_driver_matrix(Xcont, y, feature_names=names)["rho"]).astype(float)
+        boot = bootstrap_spearman(Xcont, y, feature_names=names)
+        boot_lo = np.asarray(boot["lo"], dtype=float)
+        boot_hi = np.asarray(boot["hi"], dtype=float)
+        for j, c in enumerate(cont_feats):
+            lo, hi = round(float(boot_lo[j]), 3), round(float(boot_hi[j]), 3)
             drv.append(
                 {
                     "_idx": j,
@@ -241,12 +442,12 @@ def _analyze(
                     "significant": bool(lo > 0 or hi < 0),
                 }
             )
-    drv.sort(key=lambda d: -abs(d["rho"]))
+    drv.sort(key=lambda d: -abs(float(d["rho"])))
     drv = drv[:8]
 
     # proposed next batch, with predicted target + uncertainty + a why per row
-    s = Surrogate().fit(X, y, bounds=bounds)
-    batch = propose(s, bounds, q=5)
+    s = Surrogate().fit(X, y, bounds=bounds, cat_dims=cat_dims)
+    batch = propose(s, bounds, q=5, cat_dims=cat_dims, cat_cardinalities=cat_cardinalities)
     show = [d["name"] for d in drv[:4]]
     show_idx = [d["_idx"] for d in drv[:4]]  # carry the feature index, not a name lookup
     for d in drv:
@@ -263,21 +464,41 @@ def _analyze(
     # per-column provenance: what was kept as a feature, used as the target, or
     # dropped (id / other output / constant / sparse), so the client is never left
     # guessing about a silently dropped column. Mirrors the selection logic above.
+    kept_features = [str(c) for c in cont_feats] + [str(c) for c in kept_cats]
     provenance = provenance_dicts(
         column_provenance(
             df,
             target=str(target),
-            features=[str(c) for c in feats],
+            features=kept_features,
             numeric_cols=[str(c) for c in num],
-            id_hint=_ID_HINT,
-            outcome_hint=_OUTCOME_HINT,
-            constant_on_fitted_rows=[str(c) for c in constant_on_fitted],
+            id_hint=profile.id_hint,
+            outcome_hint=profile.outcome_hint,
+            constant_on_fitted_rows=[str(c) for c in constant_on_fitted]
+            + [str(c) for c in constant_cats],
+            declared={str(c) for c in declared},
+            declared_ids={str(c) for c in roles.ids} if roles is not None else set(),
+            declared_features={str(c) for c in roles.features} if roles is not None else set(),
         )
     )
 
+    # Which acquisition optimizer actually served these proposals, so the audit
+    # trail is explicit (mirrors seed / timestamp / engine_version): a large
+    # categorical space silently switches from exact enumeration to the
+    # alternating heuristic (kalos/core/optimize.py), and the client should know.
+    if not cat_dims:
+        proposal_optimizer = "continuous"
+    else:
+        n_combos = 1
+        for k in cat_cardinalities or []:
+            n_combos *= int(k)
+        proposal_optimizer = "mixed_exact" if n_combos <= MAX_MIXED_COMBOS else "mixed_alternating"
+
     result = {
-        "n": int(keep.sum()), "d": len(feats), "target": str(target), "group_col": gcol,
-        "targets": [str(c) for c in candidate_targets], "features": [str(c) for c in feats],
+        "n": int(len(y)), "d": len(kept_features), "target": str(target), "group_col": gcol,
+        "targets": [str(c) for c in candidate_targets], "features": kept_features,
+        "categorical_features": [str(c) for c in kept_cats],
+        "n_dropped_incomplete": n_dropped_incomplete,
+        "proposal_optimizer": proposal_optimizer,
         "cv_spearman": None if rho != rho else round(rho, 3),
         "cv_ci95": ci95,
         "cv_n_groups": rep["n_groups"],
@@ -286,7 +507,7 @@ def _analyze(
         "best": round(float(y.max()), 4),
         "drivers": drv,
         "proposal_features": show,
-        "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx),
+        "proposals": _annotate(batch, p_mean, p_std, float(y.max()), cols=show_idx, design=design),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
         "provenance": provenance,
         "seed": ANALYZE_SEED,

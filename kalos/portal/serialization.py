@@ -1,7 +1,7 @@
 """Kalos portal — JSON-safe serialization helpers."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -17,7 +17,8 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     when `_payload_to_frame` rebuilds the DataFrame for the Singleton.
     """
     safe = df.astype(object).where(pd.notna(df), None)
-    records: list[dict[str, Any]] = safe.to_dict(orient="records")
+    # column labels are strings here; to_dict types them as Hashable
+    records = cast("list[dict[str, Any]]", safe.to_dict(orient="records"))
     for row in records:
         for key, val in row.items():
             if isinstance(val, float) and not np.isfinite(val):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TypeGuard
 
 
 @dataclass
@@ -29,7 +29,7 @@ class PromotionResult:
     summary: str = ""
 
 
-def _finite(x: Any) -> bool:
+def _finite(x: Any) -> TypeGuard[float]:
     # bool is an int subclass; a stray True/False is not a real metric value.
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 

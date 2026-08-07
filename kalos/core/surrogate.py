@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from botorch.exceptions import ModelFittingError
 from botorch.fit import fit_gpytorch_mll
-from botorch.models import SingleTaskGP
+from botorch.models import MixedSingleTaskGP, SingleTaskGP
 from botorch.models.transforms.input import Normalize
 from botorch.models.transforms.outcome import Standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -104,15 +104,52 @@ def sanitize_bounds(bounds) -> tuple[np.ndarray, np.ndarray]:
     return lower, upper
 
 
+def _build_mixed_gp(
+    Xt: torch.Tensor,
+    yt: torch.Tensor,
+    box: torch.Tensor,
+    cat_dims: list[int],
+    d: int,
+    yvar: torch.Tensor | None,
+) -> MixedSingleTaskGP:
+    """A `MixedSingleTaskGP` with the continuous dims input-normalized to the
+    design box and the categorical dims (integer codes) passed through.
+
+    `box` is the sanitized full `(2, d)` box. Only the continuous columns are
+    normalized (via `Normalize(indices=...)`); normalizing the categorical codes
+    would corrupt the CategoricalKernel's equality test. When every dim is
+    categorical there is nothing to normalize, so no input transform is applied.
+    """
+    cat_set = set(cat_dims)
+    cont_dims = [i for i in range(d) if i not in cat_set]
+    input_transform = (
+        Normalize(d=d, indices=cont_dims, bounds=box[:, cont_dims])
+        if cont_dims
+        else None
+    )
+    kwargs: dict = {
+        "cat_dims": cat_dims,
+        "input_transform": input_transform,
+        "outcome_transform": Standardize(m=1),
+    }
+    if yvar is not None:
+        kwargs["train_Yvar"] = yvar
+    return MixedSingleTaskGP(Xt, yt, **kwargs)
+
+
 class Surrogate:
-    """SingleTaskGP over a continuous design space."""
+    """SingleTaskGP over a continuous design space, or a MixedSingleTaskGP when
+    some dimensions are categorical (`cat_dims`)."""
 
     def __init__(self) -> None:
-        self.model: SingleTaskGP | None = None
+        self.model: SingleTaskGP | MixedSingleTaskGP | None = None
         self._y: np.ndarray | None = None
         self._X: torch.Tensor | None = None
+        # Integer indices of categorical columns in X (None/empty = all continuous).
+        # Recorded so the acquisition path knows which dims to enumerate.
+        self._cat_dims: list[int] | None = None
 
-    def fit(self, X, y, bounds, *, noise=None) -> "Surrogate":
+    def fit(self, X, y, bounds, *, noise=None, cat_dims=None) -> "Surrogate":
         """Fit on (X, y). `bounds` (2 x d) ties input normalization to the fixed
         design box rather than the training-data envelope; it is required so a
         caller can never fall into the training-envelope normalization footgun.
@@ -128,6 +165,13 @@ class Surrogate:
         on replicated recipes), so the GP stops re-inferring noise it already
         has an external estimate for and stops chasing single-replicate noise
         spikes as if they were signal.
+
+        `cat_dims` optionally marks a subset of columns as categorical (their
+        values are integer level codes, not measurements). When given, the GP is
+        a `MixedSingleTaskGP` with a CategoricalKernel on those dims and a Matern
+        kernel on the rest; the continuous dims are input-normalized to the box
+        and the categorical codes pass through untouched. When `None`/empty the
+        continuous `SingleTaskGP` path is unchanged.
         """
         Xa = np.asarray(X, float)
         ya = np.asarray(y, float).reshape(-1)
@@ -142,28 +186,34 @@ class Surrogate:
         d = Xt.shape[-1]
         lower, upper = sanitize_bounds(bounds)  # widen zero-width dims so Normalize is finite
         box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
-        normalize = Normalize(d=d, bounds=box)
-        if noise is None:
-            # No explicit likelihood is passed, so SingleTaskGP uses BoTorch's
-            # default noise model: a GaussianLikelihood with a
-            # LogNormalPrior(-4, 1) on the noise and a positive floor. That
-            # default is the right noise prior for the small-sample regime, so
-            # we deliberately do not override it here.
-            self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
-        else:
-            # Fixed observation noise: pass train_Yvar (n x 1, original y-units)
-            # alongside outcome_transform=Standardize. BoTorch scales Yvar
-            # through the Standardize transform internally, and SingleTaskGP
-            # automatically selects a FixedNoiseGaussianLikelihood whenever
-            # train_Yvar is given, so no explicit likelihood override is
-            # needed here either.
+
+        yvar: torch.Tensor | None = None
+        if noise is not None:
+            # Fixed observation noise: build train_Yvar (n x 1, original y-units).
+            # BoTorch scales Yvar through the Standardize outcome transform and
+            # selects a FixedNoiseGaussianLikelihood automatically, so no explicit
+            # likelihood override is needed on either the continuous or mixed path.
             noise_arr = np.broadcast_to(np.asarray(noise, float), (Xa.shape[0],)).astype(float)
             if not np.isfinite(noise_arr).all() or (noise_arr < 0).any():
                 raise ValueError("noise must be finite and non-negative")
             yvar = torch.as_tensor(noise_arr, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
-            self.model = SingleTaskGP(
-                Xt, yt, train_Yvar=yvar, input_transform=normalize, outcome_transform=Standardize(m=1)
-            )
+
+        cats = [int(i) for i in cat_dims] if cat_dims else []
+        if cats:
+            self.model = _build_mixed_gp(Xt, yt, box, cats, d, yvar)
+        else:
+            normalize = Normalize(d=d, bounds=box)
+            if yvar is None:
+                # No explicit likelihood is passed, so SingleTaskGP uses BoTorch's
+                # default noise model: a GaussianLikelihood with a
+                # LogNormalPrior(-4, 1) on the noise and a positive floor. That
+                # default is the right noise prior for the small-sample regime, so
+                # we deliberately do not override it here.
+                self.model = SingleTaskGP(Xt, yt, input_transform=normalize, outcome_transform=Standardize(m=1))
+            else:
+                self.model = SingleTaskGP(
+                    Xt, yt, train_Yvar=yvar, input_transform=normalize, outcome_transform=Standardize(m=1)
+                )
         mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         _fit_mll_with_retry(mll)
         self._y = ya
@@ -171,6 +221,7 @@ class Surrogate:
         # can use them as X_baseline; the model applies its input transform to them
         # internally at acquisition time.
         self._X = Xt
+        self._cat_dims = cats or None
         return self
 
     def posterior(self, X):
