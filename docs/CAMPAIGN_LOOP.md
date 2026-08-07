@@ -83,21 +83,34 @@ stateDiagram-v2
 }
 ```
 
-`features` and `target` come from the analysis result (`proposal_features`, `target`), so the campaign never guesses column roles - it takes them from the engine.
+`features` and `target` come from the analysis result (`features`, `target`), so the campaign never guesses column roles - it takes them from the engine.
+`features` is the FULL modeled feature list, not the abridged `proposal_features` a proposal table displays: it is the schema every started recipe is validated against, so a short list here would let partially-specified recipes through.
 `generation` is re-minted on every single write (`seed`, `start`, `set_result`, `commit_fold`); a re-analysis captures the generation it planned against and refuses to commit if it changed underneath - see "Re-analyze = the loop closing" below.
 
 ## Seeding
 
 The campaign base is seeded/replaced whenever `/api/run` succeeds.
-`_run_uploaded_sync` (`kalos/portal/app.py`) already holds the parsed `df` and calls `_analyze` then `_save_latest`; it also seeds the campaign from `(df, result["target"], result["proposal_features"])`.
+`_run_uploaded_sync` (`kalos/portal/app.py`) already holds the parsed `df` and calls `_analyze` then `_save_latest`; it also seeds the campaign from `(df, result["target"], result["features"])`.
 A fresh upload starts a fresh campaign (new base, empty pending, round 0).
+
+## Recipe schema validation
+
+A started run is eventually folded in as `{**recipe, target: result}` and re-analyzed, so `start` checks each recipe against the campaign's schema (`_validate_recipe_schema`) and rejects a mismatch with a 400 at the point of the bad input, rather than corrupting the base dataset rounds later:
+
+- **No unknown columns.** A key in neither `features` nor any base row means the recipe came from a different dataset. Folded in, it adds a column blank for every existing row while the existing feature columns are blank for this one - and `_analyze` zero-fills both, turning "not measured" into a fabricated `0.0`.
+- **No missing modeled features.** Every column in `features` must carry a value. A partially-specified recipe (a UI rendering only the top few drivers) folds in with the omitted features blank, which are likewise read as zero.
+- **Not the target.** The measured outcome arrives via `POST /api/campaign/result`.
+
+Non-feature columns carried in the base rows (an id, a dropped output) are allowed but not required: the optimizer does not propose them and `_analyze` drops them anyway. A batch is validated as a unit - one bad recipe rejects the whole `start` call, so the caller is never left guessing which runs were queued.
+
+Callers must therefore send a proposal's full `recipe` (every modeled input, categoricals as labels), never a mapping rebuilt from `proposal_features`.
 
 ## Endpoints (`/api/campaign` router, mounted like `/api/experiments`)
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
 | GET | `/api/campaign` | - | Campaign summary for the `/decide` view (below), or `{"has_campaign": false}` before any upload. |
-| POST | `/api/campaign/start` | `{"recipes": [{recipe, pred, std, mode, reason}]}` | Append each recipe as a pending awaiting run. Returns the appended runs with ids. |
+| POST | `/api/campaign/start` | `{"recipes": [{recipe, pred, std, mode, reason}]}` | Append each recipe as a pending awaiting run. Returns the appended runs with ids. `400` if any recipe does not match the campaign schema (see "Recipe schema validation"); nothing is appended. |
 | POST | `/api/campaign/result` | `{"id": "...", "value": 3.2}` | Set the measured outcome on a pending run. 400 on unknown id or non-finite value. |
 | POST | `/api/campaign/reanalyze` | - | Fold every measured pending run into base rows, run `_analyze` on the grown dataset, and commit + `_save_latest`. Returns `{analysis, campaign}`. Awaiting runs stay pending. `400` if there is nothing new to fold; `409` if the campaign was reseeded mid-analysis (retry). See below. |
 
