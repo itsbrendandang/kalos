@@ -64,6 +64,10 @@ def test_build_payload_privacy():
     by_header = {c["header"]: c for c in payload["columns"]}
     assert by_header["Notes"]["sample"] == "<redacted>"
 
+    # HASH-rule column (campaign): header survives (so the model can still
+    # propose a "group" role for it), but its raw values must not.
+    assert by_header["Campaign"]["sample"] == "<redacted>"
+
     titer_sample = by_header["Titer (g/L)"]["sample"]
     assert titer_sample, "expected non-empty sample for a numeric column"
     assert all(isinstance(v, (int, float)) for v in titer_sample)
@@ -71,7 +75,7 @@ def test_build_payload_privacy():
     dumped = json.dumps(payload)
     assert dumped  # round-trips without raising
 
-    for raw_value in ("Acme-BF-018", "Acme-BF-019", "J. Rivera", "M. Chen"):
+    for raw_value in ("Acme-BF-018", "Acme-BF-019", "J. Rivera", "M. Chen", "C-100", "C-101"):
         assert raw_value not in dumped
 
 
@@ -83,12 +87,15 @@ def test_build_payload_is_deterministic_and_guards_identity_headers():
     assert dropped_a == dropped_b
 
     # Defense-in-depth guard: build_payload asserts no header in the result
-    # matches the anonymizer's DROP rules - exercise it directly to ensure
-    # the check runs (it should never fire in normal operation).
+    # matches the anonymizer's DROP rules, and no HASH-rule column's sample
+    # is anything but the redaction marker - exercise both directly to
+    # ensure the checks run (they should never fire in normal operation).
     from kalos.normalize import payload as payload_module
 
     assert not payload_module._is_identity_header("Titer (g/L)")
     assert payload_module._is_identity_header("Operator")
+    assert payload_module._is_hash_header("Campaign")
+    assert not payload_module._is_hash_header("Titer (g/L)")
 
 
 # --- 2. offline fallback ----------------------------------------------------- #
@@ -229,11 +236,14 @@ def test_propose_plan_live_mocked(monkeypatch):
     sent_content = fake_messages.calls[0]["messages"][0]["content"]
     assert "Client Sample Name" not in sent_content
     assert "Operator" not in sent_content
-    for raw_value in ("Acme-BF-018", "J. Rivera", "M. Chen"):
+    for raw_value in ("Acme-BF-018", "J. Rivera", "M. Chen", "C-100", "C-101"):
         assert raw_value not in sent_content
     sent_payload = json.loads(sent_content)
     by_header = {c["header"]: c for c in sent_payload["columns"]}
     assert by_header["Notes"]["sample"] == "<redacted>"
+    # HASH-rule column (campaign): header sent so the model can still assign
+    # it a "group" role, but its raw sample values must be redacted.
+    assert by_header["Campaign"]["sample"] == "<redacted>"
 
 
 def test_propose_plan_falls_back_on_api_error(monkeypatch):

@@ -9,14 +9,20 @@ the intent of shipping them somewhere. Two layers of defense, in order:
      identity column before anything else runs. Those columns never enter
      the payload at all.
   2. For every surviving column, free-text columns (the ones most likely to
-     carry incidental PII in prose, e.g. lab notes) are redacted to the
-     literal string `"<redacted>"` - no raw cell value from a free-text
-     column is ever included in the payload.
+     carry incidental PII in prose, e.g. lab notes) and HASH-rule columns
+     (`kalos.data.anonymizer.HASH_EXACT`/`HASH_SUBSTR` - campaign/lot/batch_id/
+     experiment, pseudonymized everywhere else in the repo) are redacted to
+     the literal string `"<redacted>"` - no raw cell value from either kind
+     of column is ever included in the payload. HASH columns still appear in
+     the payload BY HEADER (and dtype/non_null/parse_rate), so the model can
+     still propose a `"group"` role for them; only their cell values are
+     withheld.
 
 A defense-in-depth assertion re-checks every payload header against the
-anonymizer's DROP rules right before returning, and raises `ValueError` if
-one ever slipped through - this should be structurally impossible given the
-pre-screen above, but the guarantee is enforced in code, not just by
+anonymizer's DROP rules, and every HASH-rule column's sample against the
+redaction marker, right before returning - raising `ValueError` if either
+guarantee ever slipped through. This should be structurally impossible given
+the logic above, but both guarantees are enforced in code, not just by
 convention.
 """
 from __future__ import annotations
@@ -26,7 +32,7 @@ from typing import Any
 
 import pandas as pd
 
-from kalos.data.anonymizer import DROP_EXACT, DROP_SUBSTR, Anonymizer
+from kalos.data.anonymizer import DROP_EXACT, DROP_SUBSTR, HASH_EXACT, HASH_SUBSTR, Anonymizer
 
 REDACTED = "<redacted>"
 
@@ -43,6 +49,14 @@ def _is_identity_header(header: str) -> bool:
     """True iff `header` matches the anonymizer's identity DROP rules."""
     key = header.strip().lower()
     return key in DROP_EXACT or any(token in key for token in DROP_SUBSTR)
+
+
+def _is_hash_header(header: str) -> bool:
+    """True iff `header` matches the anonymizer's HASH rules (e.g. campaign,
+    lot, batch_id, experiment) - columns pseudonymized everywhere else in the
+    repo, whose raw cell values must never reach this payload either."""
+    key = header.strip().lower()
+    return key in HASH_EXACT or any(token in key for token in HASH_SUBSTR)
 
 
 def _numeric_parse_rate(series: pd.Series) -> tuple[float, int]:
@@ -144,13 +158,15 @@ def build_payload(
         (non-identity) column: `{"header", "dtype", "non_null": "k/n"}` plus
         `"parse_rate"` for numeric/numeric+unit columns and `"sample"` for
         every column (the literal string `"<redacted>"` for `"free-text"`
-        columns, real sample values otherwise).
+        columns and for columns matching the anonymizer's HASH rules, real
+        sample values otherwise).
       - `dropped_identity` is the list of raw column names dropped by the
         deterministic identity pre-screen before classification ever runs.
 
     `anonymizer` is accepted for interface symmetry with `apply_plan` and
     `offline_plan`, but this function only reads the anonymizer's static
-    DROP rule sets (via the module-level `DROP_EXACT`/`DROP_SUBSTR` import),
+    DROP/HASH rule sets (via the module-level `DROP_EXACT`/`DROP_SUBSTR`/
+    `HASH_EXACT`/`HASH_SUBSTR` import),
     not any instance state - anonymizer identity rules are process-wide,
     not configurable per-instance.
     """
@@ -177,7 +193,7 @@ def build_payload(
         if dtype in ("numeric", "numeric+unit") and parse_rate is not None:
             entry["parse_rate"] = round(parse_rate, 4)
 
-        if dtype == "free-text":
+        if dtype == "free-text" or _is_hash_header(entry["header"]):
             entry["sample"] = REDACTED
         else:
             entry["sample"] = _sample_values(series, max_sample)
@@ -187,13 +203,19 @@ def build_payload(
     payload: dict[str, Any] = {"columns": columns_payload}
 
     # Defense in depth: no payload column header may match the anonymizer's
-    # DROP rules. Given the pre-screen above this should be structurally
-    # impossible, but the guarantee is enforced here, not just by convention.
+    # DROP rules, and no HASH-rule column's sample may be anything other than
+    # the redaction marker. Given the logic above both should be structurally
+    # impossible, but the guarantees are enforced here, not just by convention.
     for entry in columns_payload:
         if _is_identity_header(entry["header"]):
             raise ValueError(
                 f"internal error: identity column {entry['header']!r} leaked into the "
                 "normalize payload despite the pre-screen"
+            )
+        if _is_hash_header(entry["header"]) and entry["sample"] != REDACTED:
+            raise ValueError(
+                f"internal error: HASH-rule column {entry['header']!r} carries raw sample "
+                "values in the normalize payload despite the redaction rule"
             )
 
     # The payload must be JSON-serializable and deterministic given the same
