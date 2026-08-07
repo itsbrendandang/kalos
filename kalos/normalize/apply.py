@@ -17,7 +17,7 @@ import pandas as pd
 from kalos.data.anonymizer import Anonymizer, _hash, default_salt
 
 from . import units
-from .plan import ColumnProvenance, NormalizationPlan
+from .plan import Action, ColumnProvenance, NormalizationPlan
 
 # Short, stable prefix on hashed group values so a hashed cell is visually
 # distinguishable from a raw value in any exported/inspected frame.
@@ -107,7 +107,9 @@ def apply_plan(
 
         if col.role in ("identity", "freetext"):
             dropped.append(col.raw_name)
-            action = "dropped_identity" if col.role == "identity" else "dropped_freetext"
+            action: Action = (
+                "dropped_identity" if col.role == "identity" else "dropped_freetext"
+            )
             provenance.append(
                 ColumnProvenance(
                     raw_name=col.raw_name,

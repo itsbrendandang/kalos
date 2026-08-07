@@ -16,6 +16,7 @@ from the environment, never handled as a string here.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pandas as pd
 
@@ -247,7 +248,10 @@ def _live_plan(
     client = anthropic.Anthropic()
     payload_json = json.dumps(payload, sort_keys=True)
 
-    kwargs = dict(
+    # Annotated `dict[str, Any]`: mypy cannot match a `**` splat of a
+    # heterogeneously-valued dict against the SDK's overloads, so an inferred
+    # `dict[str, object]` fails every `create`/`parse` variant at the call site.
+    kwargs: dict[str, Any] = dict(
         model=config.model,
         max_tokens=4096,
         system=_SYSTEM_PROMPT,
@@ -255,9 +259,16 @@ def _live_plan(
         thinking={"type": "disabled"},
     )
 
+    parsed: LLMPlan
     if hasattr(client.messages, "parse"):
         response = client.messages.parse(output_format=LLMPlan, **kwargs)
-        parsed: LLMPlan = response.parsed_output
+        # `parsed_output` is None when the model returned no parseable object.
+        # Raise rather than propagate a None into the plan walk below: the
+        # caller treats any exception here as "LLM tier unavailable" and falls
+        # back to the deterministic offline plan, which is the honest outcome.
+        if response.parsed_output is None:
+            raise ValueError("LLM returned no parseable normalization plan")
+        parsed = response.parsed_output
     else:
         schema = LLMPlan.model_json_schema()
         response = client.messages.create(
