@@ -45,7 +45,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"  skip {f.name}: {exc}")
             continue
-        cols = [str(c) for c in df.columns]
         result_cols = [c for c in df.columns if _OUTCOME.search(str(c))]
         meta_cols = [c for c in df.columns if (_GROUP.search(str(c)) or _ID.match(str(c).strip())) and c not in result_cols]
         info = reg.register_dataset(f.stem, df, result_cols=result_cols, meta_cols=meta_cols)

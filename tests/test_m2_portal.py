@@ -309,8 +309,8 @@ def test_existing_run_and_latest_endpoints_still_work(client, tmp_path, monkeypa
     # isolate the pre-existing /api/latest cache so this smoke test never
     # touches the real ~/.kalos/latest_analysis.json either.
     monkeypatch.setattr(portal_module, "_STATE_DIR", tmp_path)
-    monkeypatch.setattr(portal_module, "_LATEST_PATH", tmp_path / "latest.json")
-    monkeypatch.setattr(portal_module, "_LATEST", None)
+    monkeypatch.setattr(portal_module, "_LATEST_DIR", tmp_path / "latest")
+    monkeypatch.setattr(portal_module, "_LATEST", {})
 
     assert client.get("/api/latest").json() == {"has_data": False}
 

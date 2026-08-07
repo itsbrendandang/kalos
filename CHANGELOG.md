@@ -2,6 +2,100 @@
 
 Newest first.
 
+## 2026-07-22 (P1: experiments tenancy)
+
+### Fixed - production hardening P1: the experiments store is now tenant-scoped and auth-gated
+
+A progress review found that campaign + latest were tenant-scoped (Phase 1b) but the **experiments store was still global and its endpoints entirely ungated** - a live cross-tenant leak once multiple tenants exist. Closed:
+
+- `kalos/store/sqlite_store.py`: `experiments` gains a `tenant` column (with an index and a one-time `ALTER TABLE ... DEFAULT 'default'` backfill migration for pre-existing databases); every `get`/`list`/`set_status`/`save_result` filters by tenant and `create` records it. A cross-tenant id reads as not-found, so tenants can't probe each other's ids.
+- `kalos/portal/experiments.py`: every route now requires the `read` or `write` scope and passes `Principal.tenant` to the store.
+- `kalos/runner/adapter.py`: `LocalStoreAdapter` is bound to a tenant, so the Singleton runner only ever sees and mutates the calling tenant's experiments. (The remote-runner `/api/experiments/{id}/result` channel still operates on the `default` tenant - a documented follow-up.)
+- `tests/test_tenant_isolation.py`: +3 tests - experiments isolated per tenant (list/get/mutate), the legacy backfill to `default`, and HTTP proof that the endpoints require auth and one tenant never sees another's experiments. Existing M2/experiments suites green (default tenant unchanged).
+
+## 2026-07-22 (even later still)
+
+### Added - production hardening Phase 1c: CORS allowlist + startup security posture (`kalos/portal/config.py`)
+
+- `kalos/portal/config.py` (new): centralizes the portal's deployment security config. CORS is an explicit allowlist when `KALOS_CORS_ORIGINS` is set (the production posture) and the permissive localhost regex otherwise (dev/pilot, unchanged). `log_security_posture` logs auth+CORS state once at startup and warns when the portal is not locked down.
+- `kalos/portal/app.py`: the CORS middleware now uses `cors_config()`; the posture is logged at startup.
+- `docs/HARDENING.md`: `KALOS_CORS_ORIGINS` config reference and a TLS-via-reverse-proxy deployment note.
+- `tests/test_config.py` (new): 9 tests - allowlist parsing, dev-default regex vs configured allowlist, and the posture warning.
+
+## 2026-07-22 (later)
+
+### Changed - production hardening Phase 1b: per-tenant persistence (`docs/HARDENING.md`)
+
+Every portal read/write is now keyed by the caller's tenant (`Principal.tenant` from the auth layer), so two tenants can never see or overwrite each other's campaign or analysis. Backward compatible: in open mode everything maps to the `default` tenant, so the dev/pilot loop is unchanged.
+
+- `kalos/portal/campaign.py`: the `CampaignStore` is now backed by **SQLite** - one `campaigns(tenant, state, updated_at)` row per tenant in `<state_dir>/portal.db`, replacing the single `~/.kalos/campaign.json`. Each method takes a `tenant` (default `"default"`); each write is one transaction. The transactional generation-token logic is unchanged (it lives inside the per-tenant `state` blob).
+- `kalos/portal/app.py`: `_LATEST` is now a per-tenant map plus a per-tenant best-effort cache file under `<state_dir>/latest/<tenant>.json` (tenant sanitized for the filename), replacing the single global. `/api/latest` requires the `read` scope and returns the caller's tenant's analysis; `/api/run` seeds the campaign and saves latest under `Principal.tenant`.
+- `kalos/portal/campaign_routes.py`: `GET /api/campaign` requires `read`; every store call (`summary`/`start`/`set_result`/`plan_fold`/`commit_fold`/`get`) and the reanalyze `_save_latest`/`_load_latest` pass `principal.tenant`.
+- `tests/test_tenant_isolation.py` (new): 4 tests - campaigns and `/api/latest` isolated per tenant at the store level, reseeding one tenant never touches another, and an HTTP end-to-end proof that one tenant's campaign is invisible and untouchable by another through the authenticated API. Existing portal/campaign fixtures updated for the SQLite + per-tenant-latest shape.
+
+## 2026-07-22
+
+### Added - production hardening Phase 1a: in-house API authentication (`kalos/portal/auth.py`)
+
+First step of the behind-the-scenes hardening track (`docs/HARDENING.md`) toward a multi-tenant, operable service. Compliance/certification work is handled offline and is out of scope here.
+
+- `kalos/portal/auth.py` (new): a self-hosted token layer. A bearer token resolves to a `Principal` (subject, tenant, scopes); tokens are provisioned as SHA-256 hashes (never plaintext, never logged) and constant-time compared. Config is read at request time from `KALOS_AUTH_TOKENS_FILE` (preferred) or `KALOS_AUTH_TOKENS`, so rotation needs no restart.
+  FastAPI dependencies `require_principal` / `require_scope(scope)` gate endpoints.
+- **Backward compatible.** With no tokens configured the API runs in *open mode* - every request gets an anonymous `default`-tenant principal with read+write (today's behavior) and a startup warning is logged; `admin` is never granted without a real token. The moment tokens are provisioned, enforcement turns on.
+- Gated the mutating endpoints on the `write` scope: `POST /api/run` (`kalos/portal/app.py`) and `POST /api/campaign/{start,result,reanalyze}` (`kalos/portal/campaign_routes.py`). `GET` reads stay open for now; per-tenant data isolation is the next slice.
+- `docs/HARDENING.md` (new): the in-house hardening plan and configuration reference (auth -> tenant-scoped persistence -> reliability -> operability).
+- `tests/test_auth.py` (new): 27 tests - open mode, valid/invalid/missing/malformed tokens, tenant isolation, file-over-env precedence, scope gating, and HTTP end-to-end that `/api/campaign/start` is 401 unauthenticated, 403 for a read-only token, and clears the gate with a valid write token. Full portal suite green (open mode unchanged).
+
+## 2026-07-21 (even later)
+
+### Changed - the SNR lever ships in production: replicate-aware proposals (`kalos/portal/analysis.py`)
+
+BENCHMARK.md established that BO only beats random on the real zero-inflated media data when it optimizes the replicate-averaged (reproducible) titer with the measured assay noise floor fed to the GP - single measurements reward lucky noise spikes (ICC ~0.26, roughly three quarters of titer variance is assay noise).
+That fix lived only in the benchmark harness; the production analysis path still fit the GP on raw single measurements.
+
+- `kalos/portal/analysis.py` (`_analyze`): when the fitted rows have replicated recipes (>= 2 replicated, >= 6 distinct recipes, positive noise floor), the proposal surrogate is now fit on `aggregate_replicates()` means with per-recipe fixed observation variance `sigma^2 / n_reps` (via `Surrogate.fit(noise=...)`), and the proposed batch optimizes that reproducible objective; the shown incumbent is the reproducible best.
+  Non-replicated sheets fall through to the unchanged raw fit.
+- Every analysis result now carries a `noise` block: `n_recipes`, `n_replicated`, `replicate_aware`, `icc`, `noise_sd`, `signal_sd`, `best_single`, `best_reproducible` - the honest signal-to-noise picture and the reproducible ceiling, not just the lucky spike.
+  Diagnostics (grouped-CV reliability, drivers) stay on the raw rows - they are already replicate-grouped for leakage and describe the as-measured signal.
+- `examples/benchmark_media_pool.py` (new): a committed, runnable reproduction of the real-data pool retrospective (`KALOS_MEDIA_DATA=/path python examples/benchmark_media_pool.py`), racing BO / feasibility-gated BO / random on the reproducible objective (BO leads) and the single-measurement objective (the artifact). No client data is committed.
+- `tests/test_replicate_aware_analysis.py` (new): replicate-aware fit triggers + honest noise report; non-replicated unchanged; deterministic.
+
+## 2026-07-21 (later)
+
+### Added - campaign loop: the closed optimization loop (`kalos/portal/campaign.py`, `/api/campaign*`)
+
+Until now the portal was a one-shot analysis viewer: upload a run sheet, get a batch, done.
+This adds the loop that makes it a product - propose, run, log the measured outcome, re-propose - reusing the existing `_analyze` path with no new engine capability.
+Design and full contract in `docs/CAMPAIGN_LOOP.md`.
+
+- `kalos/portal/campaign.py` (new, torch-free): `CampaignStore` persists one campaign (a target plus a growing `base_rows` dataset and a list of started `pending` runs) to `~/.kalos/campaign.json`, lock-guarded and written atomically (temp file + `os.replace`), mirroring the `_LATEST` state pattern.
+  `best` is the max MEASURED target over `base_rows`, never a prediction; a non-finite result is rejected; only runs with a real measured outcome are ever folded into the dataset.
+- `kalos/portal/campaign_routes.py` (new): `GET /api/campaign` (summary for the `/decide` view), `POST /api/campaign/start` (append proposed recipes as awaiting runs), `POST /api/campaign/result` (log a measured outcome), `POST /api/campaign/reanalyze` (fold measured runs into the dataset, re-run `_analyze` via a worker thread, persist as the new `/api/latest`, increment the round).
+  `reanalyze` returns the same shape `GET /api/latest` does (including `dataset` and `updated`), so the frontend can swap it straight into its `PopulatedResult` state.
+- `kalos/portal/app.py`: a fresh `/api/run` upload now seeds a fresh campaign from `(df, target, proposal_features)` (best-effort - a seeding failure never breaks the upload); the campaign router is mounted beside the experiments router.
+- Honest by construction each round: re-analyze routes through the same leakage-controlled grouped-CV `_analyze`, so reliability, conformal bands, and the "not modeled" callouts stay first-class every cycle.
+- Progress trajectory: the campaign records a `history` of `{round, best, n_base}` points (round 0 at seed, one per re-analyze) so the frontend can plot best-so-far converging. `best` is measured and base rows only grow, so the trajectory is non-decreasing.
+
+`tests/test_campaign.py`: 12 tests (seed, summary states, start, result validation, and the fold-and-re-analyze round-trip that grows the base, increments the round, and extends the history trajectory).
+
+### Fixed - campaign re-analyze is now transactional (no data loss, no phantom rounds)
+
+Review of the closed loop surfaced a persist-then-validate ordering defect: `fold_and_snapshot` committed the fold (round++, measured runs merged into `base_rows`) to disk *before* `_analyze` ran, so an analysis failure permanently advanced the round with no rollback, and a concurrent `/api/run` upload during the multi-second analysis could silently destroy the just-folded measured data and clobber `/api/latest` with stale numbers.
+
+- `kalos/portal/campaign.py`: `fold_and_snapshot` is split into `plan_fold()` (computes the folded dataset in memory, mutating nothing) and `commit_fold(generation)` (persists only if the campaign is unchanged).
+  Every write now stamps a fresh `generation` token, so a re-analysis that was planned against one campaign refuses to commit if a `seed()`/`set_result`/`start` landed underneath it.
+- `kalos/portal/campaign_routes.py`: `reanalyze` now plans the fold, runs `_analyze`, and only then commits - so a failed analysis leaves the campaign untouched (a retry is meaningful), and a campaign reseeded mid-analysis returns `409` without ever calling `_save_latest`, so `campaign.json` is never overwritten with stale results.
+  Re-analyzing with no newly measured run is rejected up front (it would only inflate the round and the progress trajectory).
+- `/api/latest` is a separate resource (own lock, taken in the opposite order by the upload path), so its final write is guarded best-effort: the route re-checks the campaign generation immediately before `_save_latest` and skips the stale write if a fresh upload reseeded in between.
+  This eliminates the multi-second race across `_analyze` and the upload-lands-after-commit case; a sub-millisecond residual window is documented in `docs/CAMPAIGN_LOOP.md` (fully sealing it needs an ordered stamp on `_LATEST`).
+- `kalos/portal/campaign.py`: `plan_fold` reads `generation` with `.get()` so a pre-token `campaign.json` re-analyzes without crashing (`KeyError` -> `500`); the migration is self-healing (the commit re-stamps a real token).
+- `kalos/portal/campaign.py`: `start()` now validates each `recipe` is a non-empty mapping and raises `CampaignError` at the point of the bad input, instead of surfacing as an unhandled `500` rounds later inside the fold.
+- `kalos/portal/campaign_routes.py`: documented the deliberate unauthenticated auth posture for `/api/campaign*` (browser-facing, localhost-bound, same as `/api/run`).
+- `docs/CAMPAIGN_LOOP.md`: added Mermaid diagrams (the closed loop, the pending-run lifecycle, the transactional re-analyze sequence) and documented the transactional design and the residual `/api/latest` window.
+- `pyproject.toml`: added `httpx>=0.27,<1` to the `dev` extra. `starlette.testclient.TestClient` (used by every portal test) needs `httpx`, but it is not pulled in transitively, so CI's `pip install -e ".[ml,portal,dev]"` left it absent and the whole portal suite errored at import (`RuntimeError: ... requires the httpx2 package`). This was red on `feat/campaign-loop` before this branch; the fix lands with the merge.
+
+`tests/test_campaign.py`: +8 tests - malformed-recipe rejection (×4), no-measured-runs rejection, `_analyze`-failure leaves round/base untouched then a retry folds normally, `commit_fold` aborting when the campaign is reseeded underneath it, and re-analyze on a legacy (pre-`generation`) `campaign.json` not crashing.
+
 ## 2026-07-21
 
 ### Changed - CI now gates ruff + mypy + the portal tests, and the type layer is clean

@@ -146,6 +146,22 @@ On the reproducible objective - replicate-averaged titer, with the measured nois
 The two concrete product changes that follow: optimize and benchmark on **replicate-averaged titer** (never single measurements, which reward noise), and report/feed the **assay noise floor** (ICC ~0.26, sigma ~0.008) so the model stops chasing spikes and clients know the honest reproducibility ceiling.
 The highest-leverage laboratory action remains reducing assay noise and collecting replicates.
 
+## Update: the SNR lever now ships in the production engine
+
+The win above was proven in the benchmark harness but not in the path that actually proposes experiments for clients.
+It is now wired into production analysis (`kalos/portal/analysis.py`, `_analyze`).
+When an uploaded run sheet has replicated recipes (>= 2 replicated recipes and >= 6 distinct recipes with a positive noise floor), the proposal surrogate is fit on the **replicate-averaged** titer with the **measured assay noise floor** fed in as fixed per-recipe observation variance (`sigma^2 / n_reps`, the variance of each recipe's mean), and the proposed batch optimizes that reproducible objective.
+Non-replicated sheets are unchanged.
+Every analysis result now also carries a `noise` block - `n_recipes`, `n_replicated`, `icc`, `noise_sd`, `signal_sd`, and `best_single` vs `best_reproducible` - so a client sees, honestly, how much of their titer spread is real signal versus assay noise, and what the reproducible ceiling actually is (not the lucky single-measurement spike).
+
+Reproduce the real-data pool result from committed code:
+
+```bash
+KALOS_MEDIA_DATA=/path/to/combined.tsv python examples/benchmark_media_pool.py
+```
+
+It races BO / feasibility-gated BO / random on both the reproducible objective (where BO leads) and the single-measurement objective (the artifact), printing each strategy's best-found trajectory and normalized speed. No client data is committed; the script takes the sheet by path.
+
 ## Caveats
 
 - The synthetic surfaces measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on real data.

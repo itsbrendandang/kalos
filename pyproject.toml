@@ -31,13 +31,29 @@ portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"
 # The torch-free deterministic core (units/synonyms/plan/apply) and the
 # offline fallback in llm.py need none of this.
 normalize = ["anthropic>=0.40"]
-dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs"]
+# `httpx` is the transport `starlette.testclient.TestClient` (used across the
+# portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
+# a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
+# portal test errors at import. Pinned below starlette's httpx2 cutover to keep
+# the proven, locally-green transport. See CHANGELOG 2026-07-21 (later).
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs", "httpx>=0.27,<1"]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# Pin the ruleset explicitly. With no [tool.ruff] section ruff applies whatever
+# its current release defaults to, so a ruff upgrade CI never asked for can turn
+# the build red on untouched code: 0.16.0 widened the defaults and put 217 new
+# findings in kalos/ alone (UP/B/SIM/FURB/PL/RUF/I), which is what broke CI on
+# 2026-07-24. These four are ruff's classic defaults and the set this codebase
+# was written against; both 0.15 and 0.16 are clean under them.
+# Adopting the wider set is a real cleanup worth doing on its own branch -- most
+# of it is `ruff check --fix`-able -- but it is not a lint-config change.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -7,6 +7,7 @@ import tempfile
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from kalos import bootstrap_spearman, rank_drivers, split_conformal
 from kalos.data.barcode_registry import BarcodeRegistry
@@ -63,10 +64,8 @@ def test_splits_group_replicates_and_tripwire():
     assert_no_group_leakage(splits, g)   # passes
     # a hand-built leaky split must raise
     bad = [(np.array([0, 1]), np.array([2, 3]))]  # group 0 on both sides
-    try:
-        assert_no_group_leakage(bad, g); raise AssertionError("expected leakage error")
-    except AssertionError as e:
-        assert "leakage" in str(e).lower()
+    with pytest.raises(AssertionError, match="(?i)leakage"):
+        assert_no_group_leakage(bad, g)
 
 
 def test_row_hash_groups_keeps_nan_distinct_from_zero():

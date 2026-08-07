@@ -14,3 +14,6 @@ dist/
 # model / HF caches (never commit weights)
 .cache/
 models/
+.gstack/
+# git worktrees live here; committing one adds a phantom gitlink
+.claude/worktrees/
