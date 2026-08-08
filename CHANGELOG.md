@@ -2,6 +2,20 @@
 
 Newest first.
 
+## 2026-08-08 (campaign store schema repair)
+
+### Fixed - an incompatible `campaigns` table silently discarded every campaign write
+
+`CREATE TABLE IF NOT EXISTS` is not a migration. It matches on table NAME and ignores shape, so a `campaigns` table with the wrong columns or key was accepted at startup, and the failure only surfaced per-write, as a `sqlite3.OperationalError` ("ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint") deep inside `_write_locked`. `/api/run` catches and logs that while continuing, so the portal looked healthy while persisting nothing - indefinitely, because nothing ever repaired the table.
+
+Observed, not hypothetical: a development database carried `PRIMARY KEY (tenant, campaign_id)` from an unmerged multi-campaign branch. `tenant` is *in* that key but is not the sole key, and SQLite's `ON CONFLICT(tenant)` requires exactly the latter. Every campaign write on `main` had been failing. The table was found empty, which is the proof - nothing had ever been persisted.
+
+- `kalos/portal/campaign.py`: `_ensure_campaigns_schema` checks the real shape via `PRAGMA table_info` (every required column present, and `tenant` the sole primary key) and repairs a mismatch. Repair is **non-destructive**: the old table is renamed to `campaigns_backup_N` and left in place, a correct table is created, and salvageable state is copied across. Where the old shape held several campaigns per tenant, the most recently updated one wins, since that is the campaign the single-campaign API would have been serving. Logged at WARNING, because an operator needs to know a table was renamed under them and where the rows went.
+- The backup name is the first unused `campaigns_backup_N`, so an upgrade/downgrade ping-pong never clobbers an earlier backup.
+- `tests/test_campaign_schema_migration.py` (+12): the exact composite-key shape found in the wild, newest-per-tenant selection, non-destructiveness, repeated migration, an unsalvageable same-name table, and both happy paths (a fresh database and reopening a correct one must not migrate or churn backups).
+
+Audited the sibling `kalos/store/sqlite_store.py` for the same hazard: it is sound, its `ALTER TABLE` tenant backfill having applied correctly.
+
 ## 2026-08-08 (bioprocess data validation gate)
 
 ### Fixed - the optimizer could propose physically impossible recipes
