@@ -1,0 +1,119 @@
+[2026-07-22T17:21:40.196Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:21:40.258Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:41.263Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:42.268Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:43.272Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:44.278Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:45.283Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:50.292Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=z70i8zosG-kqbgpHfh4lo' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:50.892Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:21:50.914Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=2-oWk2m9V-IiO605638YG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:51.923Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=2-oWk2m9V-IiO605638YG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:52.807Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:21:52.849Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=JA0sD2UJULP_50UzfCq_S' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:53.919Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=JA0sD2UJULP_50UzfCq_S' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:54.694Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:21:54.791Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=7p2vW1ZKyWRm84sMVJg-M' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:55.931Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=7p2vW1ZKyWRm84sMVJg-M' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:56.587Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:21:57.019Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=1h1BfA-Q1_jMKRqr8b2ig' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:59.263Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=1h1BfA-Q1_jMKRqr8b2ig' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:21:59.760Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:01.561Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:04.256Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=VkTaxJlV0U8aP5IApeQ6f' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:09.217Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=VkTaxJlV0U8aP5IApeQ6f' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:12.611Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=VkTaxJlV0U8aP5IApeQ6f' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:16.907Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=VkTaxJlV0U8aP5IApeQ6f' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:21.684Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=VkTaxJlV0U8aP5IApeQ6f' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:24.069Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:27.525Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=HVrId1tNuFbEVH1LNkfJK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:31.927Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=HVrId1tNuFbEVH1LNkfJK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:34.704Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=HVrId1tNuFbEVH1LNkfJK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:38.075Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:40.000Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=gZ2SeiOqby853nzXVA0yQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:40.020Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:41.814Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:43.610Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:45.403Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:47.193Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:22:50.535Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:54.922Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:22:59.700Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:03.527Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:07.121Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:09.486Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:16.554Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=8qq0rZ99-frpuXz4VoBRN' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:25.673Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:23:29.323Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:34.399Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:39.686Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:40.690Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:41.692Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:42.696Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:47.701Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:52.706Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:23:57.717Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:02.727Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:07.752Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:12.792Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:17.866Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=m7pkTjMgR2WBtuWufVz_s' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:17.990Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:24:18.109Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PvT-xJMIs3McmTPnTzNge' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:19.349Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PvT-xJMIs3McmTPnTzNge' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:20.523Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PvT-xJMIs3McmTPnTzNge' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:22.007Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PvT-xJMIs3McmTPnTzNge' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:23.479Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:24:28.142Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:31.527Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:34.917Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:39.073Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:43.561Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:46.702Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:24:53.844Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:02.130Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:10.779Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:20.251Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:27.120Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:35.743Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:40.747Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=if9RvuSBxhyRuSi94S0MD' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:40.904Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:25:40.910Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=dn4QwpfgxXEOuTclgpprs' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:41.396Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:25:41.413Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:42.416Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:43.423Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:44.431Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:45.437Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:46.454Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=ULVkpcYmzm2NnmbkP-GDA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:48.722Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:25:48.767Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:49.811Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:50.904Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:52.178Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:53.415Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:25:55.619Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:02.902Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:11.065Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:17.526Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:24.682Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:33.970Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
+[2026-07-22T17:26:40.249Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:47.814Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=PNg2jbc91TSS9Rf2VITO4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:48.213Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:26:50.656Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=w2EbjkKDHP5MgMPC4TIw0' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:54.695Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=w2EbjkKDHP5MgMPC4TIw0' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:57.389Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=w2EbjkKDHP5MgMPC4TIw0' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:26:59.009Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:26:59.131Z] [info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[2026-07-22T17:27:03.171Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:05.568Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:09.714Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:14.312Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:19.069Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:24.870Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:33.122Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:42.262Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:27:50.319Z] [error] WebSocket connection to 'ws://127.0.0.1:3000/_next/webpack-hmr?id=nlhX8KnaXsmj6qTckzz2o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE
+[2026-07-22T17:28:15.616Z] [warning] The resource http://127.0.0.1:3000/_next/static/chunks/36ho0h1zul0u0.css was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.
+[2026-07-22T17:28:50.266Z] [warning] The resource http://127.0.0.1:3000/_next/static/chunks/36ho0h1zul0u0.css was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.
+[2026-07-22T17:28:54.490Z] [warning] The resource http://127.0.0.1:3000/_next/static/chunks/36ho0h1zul0u0.css was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.
