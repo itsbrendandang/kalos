@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-08-08 (identifier columns: privacy + spurious drivers)
+
+### Fixed - a numeric identifier column was being modeled as a process input
+
+Given a sheet carrying `run_number` and `batch_id`, the engine fit on both, reported both as significant drivers at rho = 1.0, and proposed a recipe instructing the scientist to **"set batch_id = 100.037"**. A run index rises monotonically with time, so it correlates with any drift or learning trend across a campaign and will almost always rank as a top driver. That is a spurious correlation presented as process insight, which is the failure mode this codebase works hardest everywhere else to prevent.
+
+### Fixed - identifier column names survived `anonymize=True`
+
+The same root cause: `DomainProfile.id_hint` is anchored to whole tokens (`^(id|name|run|batch|campaign|lot|...)$`), which matches a column called exactly `run` but not `run_number`, `batch_id`, `campaign_id` or `lot_number` - and compound names are what real run sheets use. So `anonymize=True` published those names verbatim while claiming to pseudonymize identifier columns. The codebase already contradicted itself here: the metadata scrubber's `HASH_EXACT` does list `campaign_id`, so one id was hashed as metadata and published as a column name in the same response.
+
+- `kalos/portal/analysis.py`: `identifier_pattern` unions a profile's own `id_hint` with the compound-identifier pattern, and feature selection, provenance, and anonymization all now resolve through it, so they cannot disagree about what an identifier is. Union, never intersection - it can only classify more names as identifiers, never fewer. `id_hint` itself is untouched, because it also drives role classification and narrowing it would discard real measurements like `batch_titer`.
+- `_anonymize_result` now covers the `validation` block and `design_box_exclusions`, not just `group_col` and `provenance`. A finding names its column twice - a `column` field and the sentence built around it - so both are rewritten together. Aliasing the structured field while leaving the name in the prose beside it would have been anonymization worth nothing.
+- Precision holds in the other direction: `Methanol`, `pH`, `scale_L`, `lipase_titer`, `batch_titer` and `run_duration_days` are all still treated as real columns.
+
+`tests/test_identifier_privacy.py` (+29): the pattern in both directions, identifiers never becoming features / drivers / recipe entries, provenance agreeing, no identifier surviving `anonymize=True` (including inside message prose), real feature names preserved, pseudonyms stable, and opt-in behavior unchanged when `anonymize=False`.
+
+Also recorded as a test rather than silently changed: `id_hint` carries a `sample.*` glob, so a genuine measurement named `sample_volume_L` is classified as an identifier and dropped. That is pre-existing behavior and narrowing it is a scientific decision, not a drive-by edit inside a privacy fix.
+
+Suite: 385 passed, 1 skipped. ruff and mypy clean.
+
 ## 2026-08-08 (cleanup: remove the barcode registry)
 
 ### Removed - `kalos.data.barcode_registry` and its demo

@@ -5,10 +5,12 @@ so the model never "predicts" titer from another measured output (leakage).
 """
 from __future__ import annotations
 
+import functools
 import gc
 import os
+import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -30,6 +32,7 @@ from kalos.portal.uploads import MAX_FIT_ROWS, UploadRejected, _ERR_TOO_MANY_FIT
 from kalos.portal.validate import column_provenance, provenance_dicts
 from kalos.validation import apply_unit_conversions, report_dict, validate_frame
 from kalos.validation.bounds import DIMENSION_BOUNDS, infer_dimension
+from kalos.validation.checks import _RUN_ID_RE
 
 # NOTE: `kalos.core.evaluation` (which imports `kalos.core.surrogate`),
 # `kalos.core.optimize`, and `torch` itself are intentionally NOT imported at
@@ -225,7 +228,7 @@ def _resolve_columns(
             cont_feats = [
                 c for c in num
                 if c != target and c not in cat_set and c not in ids
-                and not profile.id_hint.match(str(c).strip())
+                and not identifier_pattern(profile.id_hint.pattern).match(str(c).strip())
                 and not profile.outcome_hint.search(str(c))
             ]
         gcol = roles.groups if (roles.groups and roles.groups in df.columns) else None
@@ -246,7 +249,7 @@ def _resolve_columns(
     cont_feats = [
         c for c in num
         if c != target
-        and not profile.id_hint.match(str(c).strip())
+        and not identifier_pattern(profile.id_hint.pattern).match(str(c).strip())
         and not profile.outcome_hint.search(str(c))
     ]
     gcol = next((c for c in df.columns if profile.group_hint.search(str(c))), None)
@@ -635,7 +638,7 @@ def _analyze(
             target=str(target),
             features=kept_features,
             numeric_cols=[str(c) for c in num],
-            id_hint=profile.id_hint,
+            id_hint=identifier_pattern(profile.id_hint.pattern),
             outcome_hint=profile.outcome_hint,
             constant_on_fitted_rows=[str(c) for c in constant_on_fitted]
             + [str(c) for c in constant_cats],
@@ -689,6 +692,53 @@ def _analyze(
     return result
 
 
+@functools.lru_cache(maxsize=8)
+def identifier_pattern(id_hint_pattern: str) -> re.Pattern[str]:
+    """A profile's id hint UNIONED with the compound-identifier pattern.
+
+    A `DomainProfile.id_hint` is anchored to whole tokens
+    (`^(id|name|run|batch|campaign|lot|...)$`), which matches a column called
+    exactly `run` or `batch` but not `run_number`, `batch_id`, `campaign_id` or
+    `lot_number` - and compound names are what real run sheets actually use.
+
+    Two things went wrong because of that gap, and both are worse than a naming
+    nit:
+
+    1. A NUMERIC identifier column became a model FEATURE. Given `run_number`
+       and `batch_id`, the engine fit on them and reported both as significant
+       drivers at rho = 1.0, then proposed a recipe instructing the scientist to
+       "set batch_id = 100.037". A run index rises monotonically with time, so it
+       correlates with any drift or learning trend in the campaign and will
+       almost always look like a top driver. That is a spurious correlation
+       presented as a process insight, which is the failure mode this codebase
+       works hardest everywhere else to prevent.
+    2. `anonymize=True` published those same names verbatim while claiming to
+       pseudonymize identifier columns. The codebase already contradicted itself
+       here: the metadata scrubber's `HASH_EXACT` does list `campaign_id`, so one
+       id was hashed as metadata and published as a column name.
+
+    Both now resolve through this single pattern, so feature selection,
+    provenance, and anonymization cannot disagree about what an identifier is.
+
+    Union, never intersection - it can only ever classify MORE names as
+    identifiers, never fewer. Precision still matters in the other direction,
+    since dropping or aliasing a real process input would be its own defect:
+    both halves reject `Methanol`, `pH`, `scale_L`, `lipase_titer`,
+    `batch_titer` and `run_duration_days`.
+
+    Cached because it is called per column per analysis; keyed on the pattern
+    string so a different domain profile gets its own union.
+    """
+    return re.compile(
+        f"(?:{id_hint_pattern})|(?:{_RUN_ID_RE.pattern})", re.IGNORECASE
+    )
+
+
+def _is_identifier_name(name: str) -> bool:
+    """Whether a column NAME should be pseudonymized when `anonymize=True`."""
+    return bool(identifier_pattern(_ID_HINT.pattern).match(str(name).strip()))
+
+
 def _anonymize_result(result: dict) -> dict:
     """Replace identifier-type column names in the response with stable pseudonyms.
 
@@ -699,7 +749,7 @@ def _anonymize_result(result: dict) -> dict:
     anonymized report is still internally consistent across fields.
     """
     def alias(name: str) -> str:
-        return f"col_{_hash(name)[:8]}" if _ID_HINT.match(str(name).strip()) else name
+        return f"col_{_hash(name)[:8]}" if _is_identifier_name(name) else name
 
     out = dict(result)
     if out.get("group_col"):
@@ -707,4 +757,42 @@ def _anonymize_result(result: dict) -> dict:
     out["provenance"] = [
         {**row, "name": alias(row["name"])} for row in out.get("provenance", [])
     ]
+
+    # The validation report names columns too, in two places: a `column` field and
+    # the human-readable `message` built around it ("column 'Sample Name' carries
+    # ..."). Aliasing only the field would leak the real name through the prose, so
+    # both are rewritten together. Anonymization is worth nothing if it covers the
+    # structured copy of a name and not the sentence next to it.
+    validation = out.get("validation")
+    if isinstance(validation, dict):
+        out["validation"] = {
+            **validation,
+            "findings": [_alias_named_row(f, alias) for f in validation.get("findings", [])],
+            "conversions": [
+                _alias_named_row(c, alias) for c in validation.get("conversions", [])
+            ],
+        }
+    out["design_box_exclusions"] = [
+        _alias_named_row(e, alias) for e in out.get("design_box_exclusions", [])
+    ]
+    return out
+
+
+def _alias_named_row(row: dict, alias: Callable[[str], str]) -> dict:
+    """Alias `row["column"]` and scrub the real name out of `row["message"]`.
+
+    Only rewrites the message when the alias actually differs, so a non-identifier
+    column (a process feature like "Methanol", which the owner UI legitimately
+    shows) is left completely untouched rather than being needlessly rewritten.
+    """
+    name = row.get("column")
+    if not isinstance(name, str) or not name:
+        return dict(row)
+    aliased = alias(name)
+    if aliased == name:
+        return dict(row)
+    out = {**row, "column": aliased}
+    message = out.get("message")
+    if isinstance(message, str):
+        out["message"] = message.replace(name, aliased)
     return out
