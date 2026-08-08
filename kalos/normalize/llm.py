@@ -58,8 +58,8 @@ def _canonical_name_with_unit(raw_name: str, unit_token: str | None, to_base: bo
 _SYSTEM_PROMPT = """You are a bioprocess data engineer normalizing a client run sheet.
 
 You will be given ONLY column headers plus screened statistics and sample values \
-(free-text columns are redacted). Raw identity columns have already been removed \
-before you see this payload.
+(free-text columns and grouping/campaign-style columns are redacted). Raw identity \
+columns have already been removed before you see this payload.
 
 For each column in the payload, propose:
   - raw_name: the header exactly as given.

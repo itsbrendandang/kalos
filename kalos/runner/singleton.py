@@ -1,7 +1,7 @@
 """The Singleton runner (`docs/M2_INTEGRATION.md`, "Singleton runner").
 
 Pulls `READY` experiment JSON through a `BackendAdapter`, runs the existing BO
-engine (`kalos.portal.app._analyze`, called verbatim - this module adds
+engine (`kalos.core.analysis._analyze`, called verbatim - this module adds
 orchestration, not new science), pushes the processed result back, and marks
 the experiment `DONE` (or `FAILED` with an actionable message). A PID/lock
 file at `~/.kalos/runner.lock` (path injectable) guarantees only one runner
@@ -22,9 +22,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from kalos.core.analysis import UploadRejected, _analyze
 from kalos.core.replicates import noise_report
-from kalos.portal.analysis import _analyze
-from kalos.portal.uploads import UploadRejected
 from kalos.runner.adapter import BackendAdapter
 from kalos.store.models import Status
 

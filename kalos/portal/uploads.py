@@ -14,6 +14,8 @@ import zipfile
 
 import pandas as pd
 
+from kalos.core.analysis import MAX_FIT_ROWS, UploadRejected, _ERR_TOO_MANY_FIT_ROWS
+
 log = logging.getLogger("kalos.portal")
 
 # --- upload safety limits ---------------------------------------------------- #
@@ -24,23 +26,17 @@ MAX_COLUMNS = 512            # columns allowed in any upload (CSV or xlsx)
 MAX_XLSX_CELLS = 2_000_000   # rows * cols ceiling for a parsed xlsx (zip-bomb guard)
 _ZIP_MAGIC = b"PK\x03\x04"   # xlsx/xls-as-zip start-of-file marker
 
-# Separate, tighter cap on the rows the SURROGATE is actually fit on. A
-# SingleTaskGP is O(n^2) in memory and O(n^3) in time, so a raw upload that is
-# within MAX_CSV_ROWS can still be far too large for an exact GP. The optimizer
-# targets the small-sample bioprocess regime (N <= a couple thousand), so we
-# reject an over-cap fit set rather than silently subsampling (which would be
-# invisible, non-deterministic data loss). Override with KALOS_MAX_FIT_ROWS.
-MAX_FIT_ROWS = int(os.environ.get("KALOS_MAX_FIT_ROWS", "2000"))
+# MAX_FIT_ROWS / UploadRejected / _ERR_TOO_MANY_FIT_ROWS live in
+# `kalos.core.analysis` (imported above) - that cap guards the GP fit itself,
+# not the raw upload, so it belongs with the engine, not this untrusted-input
+# boundary. Imported here (and re-exported) so existing call sites that reach
+# them via `kalos.portal.uploads` keep working unchanged.
 
 # Generic, non-leaking messages. We never echo the parser error, a column name,
 # or a cell value back to an unauthenticated caller.
 _ERR_PARSE = "Could not parse the uploaded file. Check it is a CSV or Excel run-sheet."
 _ERR_TOO_LARGE = "The uploaded file is too large."
 _ERR_TOO_MANY_COLUMNS = "The uploaded file has too many columns."
-_ERR_TOO_MANY_FIT_ROWS = (
-    "The dataset is too large for the surrogate; the optimizer targets the "
-    f"small-sample regime, N<={MAX_FIT_ROWS}."
-)
 # A numerically-hard-but-valid file (near-duplicate or ill-conditioned rows) that
 # defeats even the jittered fit retry gets its OWN message, so it is not confused
 # with the generic parse failure.
@@ -48,10 +44,6 @@ _ERR_FIT = (
     "The model could not be fit on this data - likely near-duplicate or "
     "ill-conditioned rows."
 )
-
-
-class UploadRejected(ValueError):
-    """A client upload failed a safety guard. Carries a generic, safe message."""
 
 
 _SHEET_XML_RE = re.compile(r"^xl/worksheets/sheet\d+\.xml$")
