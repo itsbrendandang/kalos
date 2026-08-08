@@ -287,8 +287,13 @@ def _run_uploaded_sync(
         # break the upload response the client is waiting on.
         from kalos.portal.campaign import get_campaign_store
 
+        # `features`, NOT `proposal_features`: the latter is the top-few
+        # drivers the UI shows in a proposal table, so seeding with it declared
+        # a campaign schema narrower than the recipes the engine actually
+        # proposes — and a run started against that narrow schema folded back
+        # in with the omitted features blank (read as zero by `_analyze`).
         get_campaign_store().seed(
-            df, result["target"], result["proposal_features"], tenant=tenant
+            df, result["target"], result["features"], tenant=tenant
         )
     except Exception:  # noqa: BLE001 - seeding must never fail the upload
         log.exception("failed to seed the campaign from an uploaded run sheet")
