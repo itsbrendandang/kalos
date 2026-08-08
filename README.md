@@ -26,7 +26,6 @@ kalos/
     __init__.py        torch-free facade re-exporting splits/drivers/conformal/gates/anonymizer
   data/
     anonymizer.py      strip identity, hash grouping keys
-    barcode_registry.py  legacy run registry (not part of the Experiment pipeline)
   store/
     models.py          Experiment record + Status lifecycle (DRAFT -> READY -> PROCESSING -> DONE|FAILED)
     sqlite_store.py    SQLite experiment store (~/.kalos/experiments.db)
@@ -53,7 +52,7 @@ kalos/
   portal/
     app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
-examples/            demos + run_on_media_data.py + organize_data.py (legacy barcode-registry demo)
+examples/            demos + run_on_media_data.py
 experiments/         off-path research prototypes; NOT part of the shipped package or its guarantees (e.g. missingness_indicator/)
 tests/               pytest
 ```
@@ -71,9 +70,8 @@ pulls it, runs the BO engine, and writes the result back
 `~/.kalos/experiments.db`. See `docs/M2_INTEGRATION.md` for the full contract.
 
 Client/strain identity can be stripped and grouping keys hashed on upload via the
-anonymizer. A separate legacy barcode registry
-(`kalos/data/barcode_registry.py`, `examples/organize_data.py`) predates this
-pipeline and is not part of it.
+anonymizer (`kalos/data/anonymizer.py`), so a run stays groupable for
+leakage-safe CV without carrying who it belongs to.
 
 ## The campaign loop (`/api/campaign*`)
 

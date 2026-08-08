@@ -2,6 +2,22 @@
 
 Newest first.
 
+## 2026-08-08 (cleanup: remove the barcode registry)
+
+### Removed - `kalos.data.barcode_registry` and its demo
+
+Barcoding is explicitly off the roadmap (2026-07-14: keep the data model simple), and the registry had no caller in the product path - only a re-export, one test, and a demo script entirely about it. Removed rather than left to rot:
+
+- `kalos/data/barcode_registry.py` (145 lines) and `examples/organize_data.py`.
+- `kalos/data/__init__.py`: dropped the `BarcodeRegistry` / `RunRecord` re-exports.
+- `kalos/data/anonymizer.py`: `run_barcode`, `dataset_barcode`, and the `_stable_payload` helper went with it - the registry was their only caller, so keeping them would have left dead code behind the thing that was removed to avoid dead code. The `Anonymizer` class itself stays; it is used across `kalos.normalize`, the `kit` facade, and the analyze path.
+
+**Coverage was preserved, not dropped.** `anonymize_meta` had no test of its own - its only exercise rode along inside the barcode-registry test. Since it is the function standing between a client's identity and anything the engine persists, it now has a direct test asserting the full contract: identity keys (client/strain/operator) dropped entirely, grouping ids (campaign/lot) kept but irreversibly hashed so CV can still group by them, ordinary metadata passed through, hashing deterministic under a fixed salt and salt-dependent across tenants.
+
+Audited the other dead-code candidates before touching anything and kept them all: `core/gates.py` (public API with tests, though still not wired into the portal - a real follow-up), `core/feasibility.py` (used by the benchmark sweep), `features/protein.py` (ESM-2, on hold but planned), `core/multiobjective.py` (used by the portal).
+
+Suite: 356 passed, 1 skipped. ruff and mypy clean (65 source files, down from 66).
+
 ## 2026-08-08 (campaign store schema repair)
 
 ### Fixed - an incompatible `campaigns` table silently discarded every campaign write
