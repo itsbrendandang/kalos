@@ -39,6 +39,17 @@ kalos/
     profile.py         torch-free ColumnRoles / DesignSpace + DomainProfile (declared roles, mixed spaces)
     bioprocess.py      the default bioprocess role-hint profile (legacy behavior)
     generic.py         a domain-neutral profile for non-bio tabular optimization
+  validation/
+    bounds.py          physically-possible ranges per measurement dimension (physics vs convention, each justified)
+    checks.py          the nine data-quality checks (units, bounds, duplicates, missingness, outliers, provenance, replicates, controls, constants)
+    runner.py          validate_frame: runs every check, never raises, + apply_unit_conversions
+    report.py          Finding / UnitConversion / ValidationReport, JSON-safe serialization
+  normalize/
+    units.py           the canonical unit registry: parse "34.6 C", convert to a base unit
+    synonyms.py        deterministic header -> canonical column mapping
+    llm.py             optional LLM-assisted mapping (needs ANTHROPIC_API_KEY; offline fallback always works)
+  providers/
+    registry.py        external-provider credential slots (Anthropic / BioNeMo / Benchling), all keyless-by-default
   portal/
     app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
@@ -99,8 +110,30 @@ batch). Because the sheet comes from an external client, the upload path is guar
   sheet but is constant on the target-present rows the GP actually fits is dropped and flagged
   (`dropped_constant_on_fitted_rows`), never silently pinned to a zero-width bound. No more silent
   column drops.
+- **Data validation gate.** Before any column is typed or dropped, the sheet runs through
+  `kalos.validation`: nine checks covering unit consistency, physical bounds, duplicates vs
+  replicates, missingness, outliers, provenance metadata, replicate adequacy, controls presence,
+  and constant columns. The report is returned as `validation`, with `status` one of `pass`,
+  `pass_with_warnings`, or `fail`. An **error** is a physics violation (pH 40, a negative titer, one
+  column mixing g/L and mg/mL); a **warning** is possible but operationally suspect. Row lists are
+  capped at 20 with the true total in `detail.n_rows_affected`, so a finding never implies its list
+  is complete. `KALOS_VALIDATION_MODE=strict` refuses a `fail` upload; the default `warn` analyzes
+  it anyway and returns the findings, so adding the gate did not change what the API accepts.
+- **Units are converted, not discarded.** A column written `"34.6 C"` parses at 0% as a bare number,
+  so it used to fail the >=80% numeric test and come back `dropped_sparse` - a real process input
+  silently thrown away. Single-unit columns are now converted to their base unit before feature
+  selection and reported in `validation.conversions` with a human label (`"Celsius"`). Only units the
+  registry can actually convert are rewritten: a vessel column of `"5L"`/`"500L"` uses an
+  unrecognized token, and rewriting it would turn an identifier into a measurement, so it is left
+  alone and the client is told.
+- **Proposals stay physically possible.** The design box for each continuous feature is built from
+  physically valid observations only, so one `-999` sensor sentinel can no longer widen the search
+  space into impossible recipes (it previously produced proposals at -422 C, below absolute zero).
+  Any narrowing is reported in `design_box_exclusions`, never silent. This holds in every validation
+  mode - it does not depend on the client reading the report.
 - **Reproducibility.** The analyze path is seeded, so the same upload yields identical proposals;
-  the response carries `seed`, `timestamp`, and `engine_version`.
+  the response carries `seed`, `timestamp`, and `engine_version`. Protein embeddings pin the ESM-2
+  checkpoint to an immutable commit, so upstream cannot change model features without a diff here.
 - **Opt-in anonymization.** Pass the form field `anonymize=true` to pseudonymize identifier-type
   columns in the response. Feature and target names are kept as-is (the owner UI legitimately shows
   drivers like "Methanol").

@@ -6,6 +6,7 @@ so the model never "predicts" titer from another measured output (leakage).
 from __future__ import annotations
 
 import gc
+import os
 import time
 from typing import Any
 
@@ -27,6 +28,8 @@ from kalos.domains import (
 )
 from kalos.portal.uploads import MAX_FIT_ROWS, UploadRejected, _ERR_TOO_MANY_FIT_ROWS
 from kalos.portal.validate import column_provenance, provenance_dicts
+from kalos.validation import apply_unit_conversions, report_dict, validate_frame
+from kalos.validation.bounds import DIMENSION_BOUNDS, infer_dimension
 
 # NOTE: `kalos.core.evaluation` (which imports `kalos.core.surrogate`),
 # `kalos.core.optimize`, and `torch` itself are intentionally NOT imported at
@@ -40,6 +43,34 @@ from kalos.portal.validate import column_provenance, provenance_dicts
 # The default (bioprocess) column-role hints, kept as module-level names because
 # `_anonymize_result` and the provenance defaults reference them. Sourced from
 # BIOPROCESS_PROFILE so a run with no declared roles behaves exactly as before.
+_ERR_VALIDATION_FAILED = (
+    "The uploaded run sheet failed data validation. Fix the errors listed in "
+    "`validation.findings` and upload again, or set KALOS_VALIDATION_MODE=warn "
+    "to analyze it anyway and receive the findings as warnings."
+)
+
+
+def validation_mode() -> str:
+    """Policy for what an error-severity validation finding does to an upload.
+
+    - "warn" (the DEFAULT): analyze the sheet anyway and return the findings in
+      the response. Chosen as the default deliberately, so adding this gate
+      cannot start rejecting data that clients push through today - a validation
+      gate that silently changes what the API accepts is its own outage.
+    - "strict": refuse the upload with `UploadRejected` when the report's status
+      is "fail". This is what a regulated workflow should run, and what a client
+      who wants the sheet vetted before it reaches a model should ask for.
+
+    Note that "warn" does NOT mean impossible values can reach a recommendation:
+    the design box is built from physically valid observations regardless of
+    mode (see `_physical_range`). Mode governs reporting, not that safety
+    property. Read at call time, not import time, so a deployment can change it
+    without a restart and tests can monkeypatch it.
+    """
+    mode = os.environ.get("KALOS_VALIDATION_MODE", "warn").strip().lower()
+    return mode if mode in {"warn", "strict"} else "warn"
+
+
 _OUTCOME_HINT = BIOPROCESS_PROFILE.outcome_hint
 _TARGET_PREF = BIOPROCESS_PROFILE.target_pref
 _ID_HINT = BIOPROCESS_PROFILE.id_hint
@@ -256,6 +287,48 @@ def _noise_block(
     }
 
 
+def _physical_range(name: str, col: np.ndarray) -> tuple[float, float, int]:
+    """Observed range of `col`, computed over PHYSICALLY POSSIBLE values only.
+
+    The design box handed to the optimizer is the observed [min, max] of each
+    feature, so a single impossible cell silently widens the search space to
+    include impossible recipes. This is not hypothetical: one `-999` "sensor
+    offline" sentinel in a temperature column stretched the box to [-999, 37]
+    and the optimizer duly proposed a bioreactor run at -422 C, below absolute
+    zero, with a confidence interval attached. A recommendation engine must not
+    be able to emit that, in any mode, whatever the validation report says.
+
+    So values outside the column's HARD physical bounds
+    (`kalos.validation.bounds`) are excluded from the min/max, and the count of
+    excluded cells is returned so the caller can report the narrowing rather
+    than perform it silently. Note this only shapes the SEARCH SPACE - the rows
+    themselves still reach the surrogate, and the validation gate is what tells
+    the client their data has impossible values in it.
+
+    A column whose header maps to no known dimension is returned unchanged
+    (`infer_dimension` is deliberately silent rather than guessing), as is a
+    column with no physically valid values at all - clamping the latter would
+    invent a range from nothing, which is a worse lie than reporting the real
+    one alongside an error-severity finding.
+    """
+    lo_obs, hi_obs = float(col.min()), float(col.max())
+    dim = infer_dimension(name)
+    if dim is None:
+        return lo_obs, hi_obs, 0
+    b = DIMENSION_BOUNDS[dim]
+    valid = col[(col >= b.hard_lo) & (col <= b.hard_hi)]
+    n_excluded = int(col.size - valid.size)
+    if n_excluded == 0 or valid.size == 0:
+        return lo_obs, hi_obs, 0 if valid.size else n_excluded
+    lo, hi = float(valid.min()), float(valid.max())
+    if hi <= lo:
+        # The valid cells are all one value: a zero-width box would collapse the
+        # dimension. Keep the real observed span rather than emit a degenerate
+        # design; the validation report carries the impossible-value error.
+        return lo_obs, hi_obs, n_excluded
+    return lo, hi, n_excluded
+
+
 def _analyze(
     df: pd.DataFrame,
     target: str | None = None,
@@ -289,6 +362,24 @@ def _analyze(
 
     _seed_everything()
     df = _dedupe_columns(df.dropna(axis=1, how="all"))
+
+    # The validation gate runs FIRST, on the sheet as uploaded, before any
+    # column is typed or dropped - it has to see the raw cells to catch a mixed
+    # g/L-and-mg/mL column or a "34.6 C" string, both of which are invisible
+    # once `_numeric_cols` has already discarded them as non-numeric.
+    mode = validation_mode()
+    validation = validate_frame(df, target=target, profile=profile, mode=mode)
+    if mode == "strict" and validation.status == "fail":
+        raise UploadRejected(_ERR_VALIDATION_FAILED)
+    # Convert every single-unit column to its base unit before feature
+    # selection. This is not merely cosmetic: a temperature column written
+    # "34.6 C" fails the >=80% numeric-parse test and is silently DROPPED as
+    # non-numeric today, so converting first recovers real process features
+    # that were being thrown away. Only units the registry actually knows are
+    # converted (see `check_units_consistency`).
+    if validation.conversions:
+        df = apply_unit_conversions(df, list(validation.conversions))
+
     num = _numeric_cols(df)
     if not num:
         raise ValueError("no numeric columns found")
@@ -388,9 +479,15 @@ def _analyze(
     # required; it just keeps X and the continuous driver slice `X[:, :n_cont]` simple.
     dims: list[Dimension] = []
     cont_arr = Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0))
+    box_exclusions: list[dict] = []
     for j, c in enumerate(cont_feats):
         col = cont_arr[:, j]
-        dims.append(Dimension(str(c), "continuous", lower=float(col.min()), upper=float(col.max())))
+        lower, upper, n_excluded = _physical_range(str(c), col)
+        if n_excluded:
+            box_exclusions.append(
+                {"column": str(c), "n_excluded": n_excluded, "lower": lower, "upper": upper}
+            )
+        dims.append(Dimension(str(c), "continuous", lower=lower, upper=upper))
     for c in kept_cats:
         dims.append(Dimension(str(c), "categorical", levels=cat_dims_map[c]))
     design = DesignSpace(tuple(dims))
@@ -578,6 +675,11 @@ def _analyze(
         "proposals": _annotate(batch, p_mean, p_std, incumbent, cols=show_idx, design=design),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
         "provenance": provenance,
+        "validation": report_dict(validation),
+        # Features whose search range was narrowed because some observed cells
+        # were physically impossible. Reported, never silent: the client needs to
+        # know the box they are being optimized over is not their full data range.
+        "design_box_exclusions": box_exclusions,
         "seed": ANALYZE_SEED,
         "timestamp": int(time.time()),
         "engine_version": ENGINE_VERSION,

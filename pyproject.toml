@@ -36,7 +36,16 @@ normalize = ["anthropic>=0.40"]
 # a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
 # portal test errors at import. Pinned below starlette's httpx2 cutover to keep
 # the proven, locally-green transport. See CHANGELOG 2026-07-21 (later).
-dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs", "httpx>=0.27,<1"]
+# `anthropic` is here as well as in the `normalize` extra: tests/test_normalize_llm.py
+# imports the SDK to build mocked response objects for the live-LLM path. Those
+# tests are fully hermetic (no network, no key), but a bare `import anthropic`
+# still needs the package present, and CI installs `.[ml,portal,dev]` only - so
+# without this the two mocked-live tests error out on a fresh CI checkout. Listing
+# it in `dev` keeps that path genuinely covered instead of silently skipped.
+dev = [
+  "pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs",
+  "httpx>=0.27,<1", "anthropic>=0.40",
+]
 
 [tool.setuptools.packages.find]
 include = ["kalos*"]

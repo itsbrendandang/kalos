@@ -166,11 +166,31 @@ def test_provenance_reports_every_column_status():
     assert "Methanol.1" in statuses
     assert statuses["Methanol.1"] == "kept_feature"
 
-    # units-in-cells columns were coerced; the non-numeric cell count is surfaced
-    temp = next(r for r in prov if r["name"] == "Temp")
-    assert temp["coerced_cells"] >= 1  # "34.6 C" does not parse as a bare number
-    load = next(r for r in prov if r["name"] == "Load_pct")
-    assert load["coerced_cells"] >= 1
+    # Units-in-cells columns are now CONVERTED before feature selection, not
+    # merely counted as coerced. This assertion changed deliberately when the
+    # validation gate landed, and the new behavior is strictly better: "34.6 C"
+    # parses at 0% as a bare number, so `Temp` used to fail the >=80% numeric
+    # test and come back `dropped_sparse` - a real temperature input silently
+    # discarded, with a coercion count as the only hint. Converting to the base
+    # unit first keeps it as a usable feature, and the conversion is reported
+    # explicitly in the `validation` block instead of implied by a count.
+    statuses_after_conversion = {"Temp", "Load_pct"}
+    assert statuses_after_conversion <= set(out["features"]), (
+        "unit-tagged columns should be converted and kept, not dropped as sparse"
+    )
+    for name in statuses_after_conversion:
+        assert statuses[name] == "kept_feature"
+        # Converted cells are clean numbers by the time provenance runs, so there
+        # is nothing left to report as coerced.
+        row = next(r for r in prov if r["name"] == name)
+        assert row["coerced_cells"] == 0
+
+    # The information did not disappear, it moved somewhere more honest: the
+    # client is told which column was converted, from what, and to what.
+    conversions = {c["column"]: c for c in out["validation"]["conversions"]}
+    assert conversions["Temp"]["from_units"] == ["C"]
+    assert conversions["Temp"]["to_unit_label"] == "Celsius"
+    assert conversions["Load_pct"]["to_unit_label"] == "percent"
 
 
 # --- privacy / anonymize ----------------------------------------------------- #

@@ -54,6 +54,7 @@ from kalos.portal.uploads import (
     _ERR_TOO_MANY_FIT_ROWS,
     _parse_upload,
 )
+from kalos.providers import provider_status
 
 log = logging.getLogger("kalos.portal")
 
@@ -168,6 +169,14 @@ def latest(principal: Principal = Depends(require_scope(READ))) -> dict:
     if not data:
         return {"has_data": False}
     return {"has_data": True, **data}
+
+
+@app.get("/api/providers")
+def providers(principal: Principal = Depends(require_scope(READ))) -> dict:
+    """Credential status for every external-provider slot (kalos.providers) -
+    which ones are live, which are keyless fallbacks, and what each unlocks.
+    Never leaks a credential value, only env var names."""
+    return {"providers": provider_status()}
 
 
 @app.get("/", response_class=HTMLResponse)
