@@ -125,6 +125,54 @@ def parse_value(raw: str | float | int) -> tuple[float | None, str | None]:
     return value, (unit_token if unit_token else None)
 
 
+# Human-readable label for each canonical suffix. The suffixes above ("_c",
+# "_g_l") are internal column-name fragments, not something to show a scientist.
+# Without this table every consumer invents its own mapping - the web UI had to
+# hand-build a Celsius/Fahrenheit lookup and guess at the rest - which means the
+# label a client reads depends on which surface they read it from. One table
+# here, so "converted to Celsius" reads the same everywhere.
+_BASE_UNIT_LABELS: dict[str, str] = {
+    "_c": "Celsius",
+    "_pct": "percent",
+    "_g_l": "g/L",
+    "_ml_h": "mL/h",
+    "_h": "hours",
+    "": "dimensionless",
+}
+
+
+def base_unit_label(suffix: str) -> str:
+    """Human-readable name for a canonical suffix returned by `canonical_suffix`.
+
+    `base_unit_label("_c") == "Celsius"`. An unrecognized suffix returns itself
+    unchanged rather than raising, so a new suffix added to `_UNIT_TABLE` without
+    a label here degrades to showing the raw fragment instead of breaking a
+    response.
+    """
+    return _BASE_UNIT_LABELS.get(suffix, suffix)
+
+
+def is_known_unit(unit_token: str | None) -> bool:
+    """Whether `unit_token` is a unit this registry can actually convert.
+
+    This exists because `canonical_suffix` cannot answer the question: it
+    returns `""` both for an UNKNOWN token and for a genuinely dimensionless
+    known one (pH, OD), so a caller inspecting the suffix alone cannot tell
+    "this is unitless" from "I have no idea what this is".
+
+    That distinction decides whether it is safe to rewrite a column. Converting
+    a column of `"37 C"` to Celsius is a correct normalization; "converting" a
+    column of vessel labels like `"5L"` (where `L` is not in the registry)
+    would strip the label and leave a bare number, silently turning an
+    identifier into a measurement. Callers must only auto-convert tokens this
+    function accepts. `None` (a bare number, no unit) is not a known unit -
+    there is nothing to convert.
+    """
+    if unit_token is None:
+        return False
+    return _normalize_unit_token(unit_token) in _UNIT_TABLE
+
+
 def canonical_suffix(unit_token: str | None) -> str:
     """Return the canonical column-name suffix for a unit token.
 
@@ -155,4 +203,4 @@ def convert(value: float, unit_token: str | None) -> tuple[float, str]:
     return unit_def.to_base(value), unit_def.suffix
 
 
-__all__ = ["parse_value", "convert", "canonical_suffix"]
+__all__ = ["parse_value", "convert", "canonical_suffix", "is_known_unit", "base_unit_label"]

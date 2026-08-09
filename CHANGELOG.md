@@ -2,6 +2,109 @@
 
 Newest first.
 
+## 2026-08-08 (identifier columns: privacy + spurious drivers)
+
+### Fixed - a numeric identifier column was being modeled as a process input
+
+Given a sheet carrying `run_number` and `batch_id`, the engine fit on both, reported both as significant drivers at rho = 1.0, and proposed a recipe instructing the scientist to **"set batch_id = 100.037"**. A run index rises monotonically with time, so it correlates with any drift or learning trend across a campaign and will almost always rank as a top driver. That is a spurious correlation presented as process insight, which is the failure mode this codebase works hardest everywhere else to prevent.
+
+### Fixed - identifier column names survived `anonymize=True`
+
+The same root cause: `DomainProfile.id_hint` is anchored to whole tokens (`^(id|name|run|batch|campaign|lot|...)$`), which matches a column called exactly `run` but not `run_number`, `batch_id`, `campaign_id` or `lot_number` - and compound names are what real run sheets use. So `anonymize=True` published those names verbatim while claiming to pseudonymize identifier columns. The codebase already contradicted itself here: the metadata scrubber's `HASH_EXACT` does list `campaign_id`, so one id was hashed as metadata and published as a column name in the same response.
+
+- `kalos/portal/analysis.py`: `identifier_pattern` unions a profile's own `id_hint` with the compound-identifier pattern, and feature selection, provenance, and anonymization all now resolve through it, so they cannot disagree about what an identifier is. Union, never intersection - it can only classify more names as identifiers, never fewer. `id_hint` itself is untouched, because it also drives role classification and narrowing it would discard real measurements like `batch_titer`.
+- `_anonymize_result` now covers the `validation` block and `design_box_exclusions`, not just `group_col` and `provenance`. A finding names its column twice - a `column` field and the sentence built around it - so both are rewritten together. Aliasing the structured field while leaving the name in the prose beside it would have been anonymization worth nothing.
+- Precision holds in the other direction: `Methanol`, `pH`, `scale_L`, `lipase_titer`, `batch_titer` and `run_duration_days` are all still treated as real columns.
+
+`tests/test_identifier_privacy.py` (+29): the pattern in both directions, identifiers never becoming features / drivers / recipe entries, provenance agreeing, no identifier surviving `anonymize=True` (including inside message prose), real feature names preserved, pseudonyms stable, and opt-in behavior unchanged when `anonymize=False`.
+
+Also recorded as a test rather than silently changed: `id_hint` carries a `sample.*` glob, so a genuine measurement named `sample_volume_L` is classified as an identifier and dropped. That is pre-existing behavior and narrowing it is a scientific decision, not a drive-by edit inside a privacy fix.
+
+Suite: 385 passed, 1 skipped. ruff and mypy clean.
+
+## 2026-08-08 (cleanup: remove the barcode registry)
+
+### Removed - `kalos.data.barcode_registry` and its demo
+
+Barcoding is explicitly off the roadmap (2026-07-14: keep the data model simple), and the registry had no caller in the product path - only a re-export, one test, and a demo script entirely about it. Removed rather than left to rot:
+
+- `kalos/data/barcode_registry.py` (145 lines) and `examples/organize_data.py`.
+- `kalos/data/__init__.py`: dropped the `BarcodeRegistry` / `RunRecord` re-exports.
+- `kalos/data/anonymizer.py`: `run_barcode`, `dataset_barcode`, and the `_stable_payload` helper went with it - the registry was their only caller, so keeping them would have left dead code behind the thing that was removed to avoid dead code. The `Anonymizer` class itself stays; it is used across `kalos.normalize`, the `kit` facade, and the analyze path.
+
+**Coverage was preserved, not dropped.** `anonymize_meta` had no test of its own - its only exercise rode along inside the barcode-registry test. Since it is the function standing between a client's identity and anything the engine persists, it now has a direct test asserting the full contract: identity keys (client/strain/operator) dropped entirely, grouping ids (campaign/lot) kept but irreversibly hashed so CV can still group by them, ordinary metadata passed through, hashing deterministic under a fixed salt and salt-dependent across tenants.
+
+Audited the other dead-code candidates before touching anything and kept them all: `core/gates.py` (public API with tests, though still not wired into the portal - a real follow-up), `core/feasibility.py` (used by the benchmark sweep), `features/protein.py` (ESM-2, on hold but planned), `core/multiobjective.py` (used by the portal).
+
+Suite: 356 passed, 1 skipped. ruff and mypy clean (65 source files, down from 66).
+
+## 2026-08-08 (campaign store schema repair)
+
+### Fixed - an incompatible `campaigns` table silently discarded every campaign write
+
+`CREATE TABLE IF NOT EXISTS` is not a migration. It matches on table NAME and ignores shape, so a `campaigns` table with the wrong columns or key was accepted at startup, and the failure only surfaced per-write, as a `sqlite3.OperationalError` ("ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint") deep inside `_write_locked`. `/api/run` catches and logs that while continuing, so the portal looked healthy while persisting nothing - indefinitely, because nothing ever repaired the table.
+
+Observed, not hypothetical: a development database carried `PRIMARY KEY (tenant, campaign_id)` from an unmerged multi-campaign branch. `tenant` is *in* that key but is not the sole key, and SQLite's `ON CONFLICT(tenant)` requires exactly the latter. Every campaign write on `main` had been failing. The table was found empty, which is the proof - nothing had ever been persisted.
+
+- `kalos/portal/campaign.py`: `_ensure_campaigns_schema` checks the real shape via `PRAGMA table_info` (every required column present, and `tenant` the sole primary key) and repairs a mismatch. Repair is **non-destructive**: the old table is renamed to `campaigns_backup_N` and left in place, a correct table is created, and salvageable state is copied across. Where the old shape held several campaigns per tenant, the most recently updated one wins, since that is the campaign the single-campaign API would have been serving. Logged at WARNING, because an operator needs to know a table was renamed under them and where the rows went.
+- The backup name is the first unused `campaigns_backup_N`, so an upgrade/downgrade ping-pong never clobbers an earlier backup.
+- `tests/test_campaign_schema_migration.py` (+12): the exact composite-key shape found in the wild, newest-per-tenant selection, non-destructiveness, repeated migration, an unsalvageable same-name table, and both happy paths (a fresh database and reopening a correct one must not migrate or churn backups).
+
+Audited the sibling `kalos/store/sqlite_store.py` for the same hazard: it is sound, its `ALTER TABLE` tenant backfill having applied correctly.
+
+## 2026-08-08 (bioprocess data validation gate)
+
+### Fixed - the optimizer could propose physically impossible recipes
+
+Reproduced end-to-end through the real `_analyze` path, not hypothesized.
+A 12-row sheet with one `-999` "sensor offline" sentinel in its temperature column returned these recommendations:
+
+```
+recipe: {'feed_mL_h': -0.6,   'temp_C': -422.948, 'pH': 40.0}
+recipe: {'feed_mL_h': 0.75,   'temp_C': -350.659, 'pH': 36.759}
+```
+
+Bioreactor temperatures below absolute zero, negative pump rates, and an impossible pH, each with a confidence interval attached.
+The cause is short: the design box handed to the acquisition optimizer was the raw observed `[min, max]` of every feature, so a single sentinel widened the search space to `[-999, 37]`.
+Per-column provenance made it worse by reporting `coerced_cells=0` on all four columns - an active clean bill of health.
+
+- `kalos/portal/analysis.py`: `_physical_range` builds each continuous dimension's bounds from physically valid observations only, using the hard bounds in `kalos/validation/bounds.py`. The same sheet now proposes `temp_C` 37.3, `pH` 6.9, `feed_mL_h` 0.636. Narrowing is never silent: `design_box_exclusions` reports every affected column and how many cells were excluded.
+- This safety property holds in every validation mode. It does not depend on a client reading the report.
+
+### Added - `kalos/validation`: a nine-check ingest gate wired into `/api/run`
+
+`kalos/normalize/` (a complete, tested unit registry) had **zero imports from the product path** - so a titer column mixing g/L and mg/mL across rows passed ingest silently, as did a pH of 40. The registry is now live.
+
+- `kalos/validation/{report,bounds,checks,runner}.py` (new): units consistency, physical bounds, duplicates vs replicates, missingness, MAD-based outliers, provenance metadata, replicate adequacy, controls presence, constant columns. Errors are physics violations; warnings are operationally suspect but possible.
+- `kalos/portal/analysis.py`: the gate runs on the sheet as uploaded, before any column is typed or dropped, so it can still see `"34.6 C"` and a mixed-unit column. The report is served as `validation` in the `/api/run` response.
+- `KALOS_VALIDATION_MODE` = `warn` (default) or `strict`. Default is `warn` deliberately: adding a gate must not start rejecting data clients push through today. `strict` refuses an upload whose status is `fail`.
+- Unit-tagged columns are now **converted rather than discarded**. `"34.6 C"` parses at 0% as a bare number, so a real temperature input used to fail the >=80% numeric test and come back `dropped_sparse`. It is now a usable feature in Celsius, with the conversion reported explicitly.
+- Only units the registry can actually convert are rewritten. A vessel column of `"5L"`/`"500L"` uses an unrecognized token, and converting it would turn an identifier into a measurement; it is left untouched and the client is told. Backed by `kalos/normalize/units.py::is_known_unit`, which exists because `canonical_suffix` returns `""` for both an unknown unit and a genuinely dimensionless one (pH, OD).
+
+### Fixed - three defects found by running the gate against a real 55-batch mAb scale-up dataset
+
+- **Outliers on a designed scale ladder.** MAD z-scores assume a unimodal linear distribution. On a bioreactor ladder (0.01 to 2000 L) the median is 10 and the MAD about 10, so every run at 200 L or above scored `|z| > 5`: 20 of 55 rows flagged, plus every scale-proportional column. A strictly-positive column spanning >= 2 orders of magnitude is now assessed on log10, which is how a multiplicative quantity is actually distributed. False positives went from 11 warnings to 6, and all 6 survivors are correct - the 4 remaining flagged batches are the intentionally degraded runs, coherent across viability, monomer, aggregate and endotoxin at once.
+- **Provenance false alarm.** The check reused `DomainProfile.id_hint`, which is anchored (`^(...|batch|lot)$`) because `_analyze` uses it to decide whether a column is *entirely* an identifier. Asking "does an identifier exist" needs to match compound headers, so a sheet whose first two columns were `batch_id` and `run_number` was told it had no traceability. `_RUN_ID_RE` now handles compound names while still rejecting measurements like `batch_titer`.
+- **`inf` broke the response.** Unbounded dimensions carry `hard_hi = inf`, which reached `detail["hard_range"]`; Starlette's `JSONResponse` correctly refuses non-finite floats, so the gate's own finding turned a good analysis into a 400. `report_dict` sanitizes at the serialization boundary, mapping non-finite floats to `null` ("no bound").
+- `infer_dimension` coverage went from 7/25 to 22/25 against the real column vocabulary (glucose, lactate, glutamine, ammonium, sodium, osmolality, pCO2, VCD/TCD), and the pH hint no longer matches `phosphate`, `morphology`, `sulphate` or `phase` - a `phosphate_g_L` feed column was being given pH's 0-14 range and reported as impossible.
+
+### Added - `kalos/providers`: credential slots with keyless fallbacks
+
+Every provider is unavailable and every feature works without a key. No speculative client code for unwired services.
+
+- Anthropic (LLM column/unit normalization; falls back to the deterministic offline mapper), NVIDIA BioNeMo (a documented SLOT - there is no BioNeMo client in this codebase; the public non-gated ESM-2 checkpoint needs no token), Benchling (a SLOT; the honest source of the run-id/operator/date provenance the gate can currently only warn about).
+- `GET /api/providers` reports status. `ProviderStatus` carries env var NAMES only, never values.
+- `.env.example` documents every environment variable the codebase reads.
+
+### Fixed - reproducibility and CI
+
+- `kalos/features/protein.py`: `ESM2Embedder` pinned to an immutable commit (`DEFAULT_ESM2_REVISION`). `from_pretrained` with no `revision` resolves to a mutable branch, so upstream could change every embedding with no diff in our code - breaking reproducibility in the worst way, silently, under a fixed seed.
+- `pyproject.toml`: `anthropic` added to the `dev` extra. CI installs `.[ml,portal,dev]`, so the two mocked-live tests in `tests/test_normalize_llm.py` failed on a fresh checkout. Chosen over a skip guard so CI keeps genuinely covering that path.
+
+### Tests
+
+`tests/test_validation.py` (+25, checks in isolation) and `tests/test_validation_gate.py` (+14, the live path, led by the absolute-zero regression). Suite: 344 passed, 1 skipped. ruff and mypy clean.
+
 ## 2026-07-22 (P1: experiments tenancy)
 
 ### Fixed - production hardening P1: the experiments store is now tenant-scoped and auth-gated

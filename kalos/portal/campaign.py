@@ -24,6 +24,7 @@ unchanged — it lives inside the per-tenant `state` blob.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -35,6 +36,8 @@ from typing import Any
 
 import pandas as pd
 
+log = logging.getLogger("kalos.portal")
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns (
     tenant TEXT PRIMARY KEY,
@@ -42,6 +45,103 @@ CREATE TABLE IF NOT EXISTS campaigns (
     updated_at REAL NOT NULL
 )
 """
+
+# The columns this module's SQL requires, and the column its upsert conflicts on.
+_REQUIRED_COLUMNS = frozenset({"tenant", "state", "updated_at"})
+_CONFLICT_COLUMN = "tenant"
+
+
+def _campaigns_table_is_compatible(conn: sqlite3.Connection) -> bool:
+    """Whether an existing `campaigns` table can serve this module's queries.
+
+    Two things must hold. It must carry every column the SQL here names, and
+    `tenant` must be the table's SOLE primary key, because `_write_locked` does
+    `ON CONFLICT(tenant) DO UPDATE`, and SQLite only accepts that clause against
+    a UNIQUE or PRIMARY KEY constraint on exactly that column. A composite
+    `PRIMARY KEY (tenant, campaign_id)` satisfies neither, even though it
+    contains `tenant`.
+    """
+    info = conn.execute("PRAGMA table_info(campaigns)").fetchall()
+    if not info:
+        return False
+    # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk).
+    # `pk` is 0 for non-key columns and the 1-based position within the key
+    # otherwise, so a composite key shows more than one non-zero.
+    names = {str(row[1]) for row in info}
+    pk_columns = [str(row[1]) for row in info if row[5]]
+    return _REQUIRED_COLUMNS <= names and pk_columns == [_CONFLICT_COLUMN]
+
+
+def _backup_table_name(conn: sqlite3.Connection) -> str:
+    """First unused `campaigns_backup_N`. Deterministic, so a test can predict it
+    and a repeated migration never clobbers an earlier backup."""
+    existing = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    n = 1
+    while f"campaigns_backup_{n}" in existing:
+        n += 1
+    return f"campaigns_backup_{n}"
+
+
+def _ensure_campaigns_schema(conn: sqlite3.Connection) -> str | None:
+    """Create the `campaigns` table, migrating an incompatible existing one.
+
+    `CREATE TABLE IF NOT EXISTS` is not a migration: it sees a table of the same
+    NAME and does nothing, whatever that table's shape. When the shape is wrong
+    the failure surfaces per-write, deep inside a `sqlite3.OperationalError`
+    ("ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"),
+    which `/api/run` catches and logs while continuing. The visible result is a
+    portal that appears to work while silently persisting no campaign at all -
+    indefinitely, since nothing ever repairs the table.
+
+    This was not theoretical: a developer database carried
+    `PRIMARY KEY (tenant, campaign_id)` from an unmerged multi-campaign branch,
+    so every campaign write on `main` failed silently.
+
+    Migration is NON-DESTRUCTIVE and never loses a row. The incompatible table
+    is renamed to `campaigns_backup_N` and left in place, a correct table is
+    created, and any salvageable state is copied over. Where the old shape held
+    several campaigns per tenant, the most recently updated one per tenant wins,
+    because that is the campaign the single-campaign API would have been serving.
+
+    Returns a human-readable note when a migration happened, else None, so the
+    caller can log it once at startup rather than per query.
+    """
+    if _campaigns_table_is_compatible(conn):
+        return None
+
+    info = conn.execute("PRAGMA table_info(campaigns)").fetchall()
+    if not info:
+        with conn:
+            conn.execute(_SCHEMA)
+        return None
+
+    old_columns = {str(row[1]) for row in info}
+    backup = _backup_table_name(conn)
+    salvageable = _REQUIRED_COLUMNS <= old_columns
+    with conn:
+        conn.execute(f"ALTER TABLE campaigns RENAME TO {backup}")
+        conn.execute(_SCHEMA)
+        if salvageable:
+            # One row per tenant: the newest by updated_at. GROUP BY with a bare
+            # MAX() is well-defined in SQLite (bare columns come from the row
+            # that produced the max), which is exactly the row wanted here.
+            conn.execute(
+                "INSERT INTO campaigns (tenant, state, updated_at) "
+                f"SELECT tenant, state, MAX(updated_at) FROM {backup} GROUP BY tenant"
+            )
+    copied = conn.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
+    return (
+        f"campaigns table was incompatible (columns {sorted(old_columns)}); "
+        f"renamed to {backup} and recreated, "
+        + (
+            f"carrying over the newest campaign for each of {copied} tenant(s)"
+            if salvageable
+            else "with no state carried over (the old table lacked the required columns)"
+        )
+    )
 
 
 class CampaignError(ValueError):
@@ -89,8 +189,11 @@ class CampaignStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout = 5000")
-        with self._conn:
-            self._conn.execute(_SCHEMA)
+        migration_note = _ensure_campaigns_schema(self._conn)
+        if migration_note:
+            # WARNING, not INFO: an operator needs to know a table was renamed
+            # under them and where the original rows went.
+            log.warning("kalos campaign store: %s", migration_note)
 
     # --- persistence -------------------------------------------------------- #
 

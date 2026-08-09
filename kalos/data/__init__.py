@@ -1,5 +1,4 @@
-"""Data layer: anonymization + the barcode registry (the organized home for all run data)."""
+"""Data layer: anonymization for the analyze path."""
 from .anonymizer import Anonymizer, _hash
-from .barcode_registry import BarcodeRegistry, RunRecord
 
-__all__ = ["Anonymizer", "_hash", "BarcodeRegistry", "RunRecord"]
+__all__ = ["Anonymizer", "_hash"]

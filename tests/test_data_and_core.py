@@ -1,57 +1,53 @@
-"""Tests for the ported data layer (barcode registry) and core gems
+"""Tests for the data layer (identity anonymization) and core gems
 (leakage-controlled splits, bootstrap-Spearman drivers, split-conformal)."""
 from __future__ import annotations
-
-import os
-import tempfile
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from kalos import bootstrap_spearman, rank_drivers, split_conformal
-from kalos.data.barcode_registry import BarcodeRegistry
+from kalos.data.anonymizer import Anonymizer
 from kalos.core.splits import row_hash_groups, make_splits, assert_no_group_leakage
 
 
-def _sheet(n=12, seed=0):
-    rng = np.random.default_rng(seed)
-    return pd.DataFrame({
-        "pH": rng.uniform(5, 7, n).round(2),
-        "Glycerol": rng.uniform(0, 40, n).round(1),
-        "titer": rng.uniform(0, 1, n).round(3),
-        "strain": "X33",              # identity -> must be dropped
-        "campaign_id": "C-2026",      # pseudonymous -> must be hashed
-    })
+def test_anonymize_meta_drops_identity_and_hashes_grouping_ids():
+    """The privacy contract for client metadata, asserted directly.
 
+    This coverage previously rode along inside a barcode-registry test. The
+    registry was removed (barcoding is off the roadmap and nothing in the product
+    path used it), and `anonymize_meta` had no other test - so it is asserted here
+    on its own, since it is the function standing between a client's identity and
+    anything the engine persists or sends onward.
+    """
+    anon = Anonymizer(salt="test-salt")
+    clean = anon.anonymize_meta(
+        {
+            "client": "Acme Bio",      # identity -> dropped entirely
+            "strain": "X33",           # identity -> dropped entirely
+            "operator": "R. Chen",     # identity -> dropped entirely
+            "campaign_id": "C-2026",   # grouping id -> hashed, never dropped
+            "lot": "L-77",             # grouping id -> hashed
+            "scale_L": 200,            # ordinary metadata -> passes through
+        }
+    )
 
-def test_barcode_registry_register_query_persist():
-    df = _sheet()
-    reg = BarcodeRegistry()
-    info = reg.register_dataset("anagram", df, result_cols=["titer"], meta_cols=["campaign_id"])
-    assert info["dataset_barcode"].startswith("KAL-DS-")
-    assert len(info["barcodes"]) == len(df) and all(b.startswith("KAL-") for b in info["barcodes"])
+    for identity in ("client", "strain", "operator"):
+        assert identity not in clean, f"{identity} must not survive anonymization"
 
-    bc = info["barcodes"][0]
-    rec = reg.get(bc)
-    assert "pH" in rec.features and "titer" in rec.results
-    assert "strain" not in rec.meta and "strain" not in rec.features   # identity dropped
-    assert rec.meta.get("campaign_id") != "C-2026" and rec.meta["anonymized"]  # hashed
-    assert set(reg.filter("anagram")) == set(info["barcodes"])
+    # Grouping ids are kept (CV needs to group by them) but are irreversible.
+    assert clean["campaign_id"] != "C-2026"
+    assert clean["lot"] != "L-77"
+    assert clean["scale_L"] == 200
+    assert clean["anonymized"] is True
 
-    flat = reg.to_dataframe(reg.filter("anagram"))
-    assert "barcode" in flat.columns and "pH" in flat.columns and len(flat) == len(df)
-
-    # registering the SAME data is idempotent (content-stable barcodes)
-    reg.register_dataset("anagram", df, result_cols=["titer"], meta_cols=["campaign_id"])
-    assert len(reg) == len(df)
-
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        path = fh.name
-    reg.save(path)
-    reloaded = BarcodeRegistry.load(path)
-    assert len(reloaded) == len(reg) and reloaded.get(bc).results["titer"] == rec.results["titer"]
-    os.unlink(path)
+    # Deterministic under a fixed salt, or the same run would land in two groups.
+    again = Anonymizer(salt="test-salt").anonymize_meta({"campaign_id": "C-2026"})
+    assert again["campaign_id"] == clean["campaign_id"]
+    # Salt-dependent, so a leaked hash from one tenant cannot be matched against
+    # another's.
+    other = Anonymizer(salt="different-salt").anonymize_meta({"campaign_id": "C-2026"})
+    assert other["campaign_id"] != clean["campaign_id"]
 
 
 def test_splits_group_replicates_and_tripwire():

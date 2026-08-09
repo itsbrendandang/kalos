@@ -60,14 +60,63 @@ class KmerEmbedder:
         return vec / norm if norm > 0 else vec
 
 
+# Immutable commit pin for the default ESM-2 checkpoint.
+#
+# `from_pretrained("facebook/esm2_t6_8M_UR50D")` with no `revision` resolves to
+# whatever that repo's `main` branch points at TODAY. A branch name is mutable:
+# if the upstream repo is ever re-uploaded or its weights re-quantized, every
+# embedding this class produces changes, silently, with no diff in our own code.
+# That breaks the platform's reproducibility contract - a result must be
+# reproducible from committed code and config - and it breaks it in the worst
+# way, by changing model features under a fixed random seed while every test
+# still passes.
+#
+# So the default is pinned to an explicit commit SHA. Verified against
+# https://huggingface.co/api/models/facebook/esm2_t6_8M_UR50D on 2026-08-08:
+# sha c731040fcd8d73dceaa04b0a8e6329b345b0f5df, upstream lastModified
+# 2023-03-21. Bumping this pin is a deliberate, reviewable act: change the SHA,
+# re-run the embedding tests, and note the change, because it invalidates every
+# previously computed embedding.
+DEFAULT_ESM2_MODEL = "facebook/esm2_t6_8M_UR50D"
+DEFAULT_ESM2_REVISION = "c731040fcd8d73dceaa04b0a8e6329b345b0f5df"
+
+
 class ESM2Embedder:
     """ESM-2 protein language model (Hugging Face transformers) on MPS/CPU.
 
     Default model is the small `esm2_t6_8M_UR50D` (8M params, 320-dim, ~30 MB) so
     it runs fast locally; swap `model` for a larger ESM-2 for stronger features.
+
+    `revision` pins the checkpoint to an immutable commit (see
+    `DEFAULT_ESM2_REVISION` above for why this is not optional). Pass
+    `revision=None` to deliberately track the upstream branch instead, and
+    accept that embeddings then depend on when you ran the code rather than on
+    what you committed. When swapping `model` for a larger ESM-2, pass that
+    model's own commit SHA as `revision` - carrying the default pin over to a
+    different repo would raise, since the SHA does not exist there.
     """
 
-    def __init__(self, model: str = "facebook/esm2_t6_8M_UR50D", device: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str = DEFAULT_ESM2_MODEL,
+        device: str | None = None,
+        *,
+        revision: str | None = DEFAULT_ESM2_REVISION,
+    ) -> None:
+        # Argument validation first, before the heavy optional imports: a caller
+        # who mispaired model and revision should get a fast, clear error rather
+        # than one that only surfaces on machines with the `protein` extra
+        # installed, or a 404 raised deep inside transformers.
+        if revision == DEFAULT_ESM2_REVISION and model != DEFAULT_ESM2_MODEL:
+            # A commit SHA is repo-specific, so carrying the default pin over to
+            # a different checkpoint can never resolve.
+            raise ValueError(
+                f"revision {DEFAULT_ESM2_REVISION!r} is the pin for "
+                f"{DEFAULT_ESM2_MODEL!r} and does not exist in {model!r}; "
+                "pass that model's own commit SHA, or revision=None to "
+                "track its branch."
+            )
+
         import torch
         from transformers import AutoModel, AutoTokenizer
 
@@ -76,8 +125,11 @@ class ESM2Embedder:
             device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
         self.model_name = model
-        self.tokenizer = AutoTokenizer.from_pretrained(model)
-        self.model = AutoModel.from_pretrained(model).to(device).eval()
+        # Recorded so a run's provenance can state exactly which weights produced
+        # its features, not merely which model name was requested.
+        self.revision = revision
+        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
+        self.model = AutoModel.from_pretrained(model, revision=revision).to(device).eval()
         self.dim = int(self.model.config.hidden_size)
 
     def embed(self, sequence: str) -> np.ndarray:
@@ -104,4 +156,12 @@ def build_feature_table(
     return pd.DataFrame(rows)
 
 
-__all__ = ["ProteinEmbedder", "KmerEmbedder", "ESM2Embedder", "build_feature_table", "clean_sequence"]
+__all__ = [
+    "DEFAULT_ESM2_MODEL",
+    "DEFAULT_ESM2_REVISION",
+    "ESM2Embedder",
+    "KmerEmbedder",
+    "ProteinEmbedder",
+    "build_feature_table",
+    "clean_sequence",
+]

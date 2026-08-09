@@ -1,16 +1,17 @@
-"""Anonymizer + stable barcode minting.
+"""Strip client identity from run metadata.
 
-Ported from the lean engine's data_moat/anonymize.py. Two jobs:
-  1. Strip client identity from a run's metadata before it enters the registry
-     (drop client/strain/operator, hash campaign/lot to an irreversible pseudonym).
-  2. Mint a stable BARCODE for a run or dataset — a short, content-derived id so
-     the same run always gets the same barcode (idempotent registration) and no
-     raw identity is needed to reference it.
+Ported from the lean engine's data_moat/anonymize.py. One job: drop the columns
+that name a client (client/strain/operator) and replace grouping ids
+(campaign/lot/batch) with an irreversible salted hash, so a run can still be
+grouped for leakage-safe CV without carrying who it belongs to.
+
+The barcode-minting half of this module was removed along with
+`kalos.data.barcode_registry`: barcoding is explicitly off the roadmap, and the
+minting helpers had no caller left once the registry went.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -80,11 +81,6 @@ HASH_EXACT: frozenset[str] = frozenset({"campaign_id", "campaign", "lot", "batch
 HASH_SUBSTR: tuple[str, ...] = ("campaign", "experiment", "lot", "batch")
 
 
-def _stable_payload(parts: Dict) -> str:
-    # json with sorted keys -> deterministic regardless of dict order / float repr
-    return json.dumps(parts, sort_keys=True, default=str)
-
-
 @dataclass
 class Anonymizer:
     # All scrub rules come from the canonical lists above (single source of truth,
@@ -111,14 +107,6 @@ class Anonymizer:
                 clean[k] = v
         clean["anonymized"] = True
         return clean
-
-    def run_barcode(self, dataset_id: str, features: Dict, results: Dict, prefix: str = "KAL") -> str:
-        """Content-stable barcode for one run: same recipe+result -> same barcode."""
-        h = _hash(_stable_payload({"d": dataset_id, "f": features, "r": results}), self._salt())
-        return f"{prefix}-{h[:8].upper()}"
-
-    def dataset_barcode(self, name: str, prefix: str = "KAL-DS") -> str:
-        return f"{prefix}-{_hash(name, self._salt())[:6].upper()}"
 
 
 __all__ = [
