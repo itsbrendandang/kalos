@@ -534,17 +534,29 @@ def _analyze(
     cat_dims = design.cat_dims or None
     cat_cardinalities = design.cat_cardinalities or None
 
+    # RECIPE identity, on the RAW values (NaN preserved) so rows missing
+    # different components are never merged by the zero-fill. Built from the one
+    # leakage-checked, deterministic grouper; categorical labels join the key so
+    # identical recipes stay one replicate group.
+    #
+    # This is computed ALWAYS and kept SEPARATE from the CV group below, because
+    # the two answer different questions and conflating them is a bug in either
+    # direction. A declared group column is a LEAKAGE BARRIER and is deliberately
+    # coarser than a recipe - every run sharing a medium lot goes in one fold, but
+    # those runs are not replicates of each other. Using it as a recipe key would
+    # collapse genuinely different recipes into one and fabricate within-recipe
+    # variance; using a recipe key as the CV group would let a lot straddle folds.
+    recipe_gf = Xc_raw.copy()
+    for c in kept_cats:
+        recipe_gf[c] = df.loc[keep_index, c].fillna("").astype(str)
+    recipe_key = row_hash_groups(recipe_gf)
+
     if gcol:
         groups = df.loc[keep_index, gcol].astype(str).tolist()
     else:
-        # group on the RAW values (NaN preserved) so rows missing different
-        # components are not merged into one replicate group by the zero-fill —
-        # via the one leakage-checked, deterministic grouper. Categorical labels
-        # join the grouping key so identical recipes stay one replicate group.
-        gf = Xc_raw.copy()
-        for c in kept_cats:
-            gf[c] = df.loc[keep_index, c].fillna("").astype(str)
-        groups = row_hash_groups(gf)
+        # No declared barrier, so the recipe itself is the safest CV group: two
+        # replicates of one recipe must never straddle a fold.
+        groups = recipe_key
 
     # honest grouped cross-validation: pooled out-of-fold predictions + a
     # group-level bootstrap CI, all through the single leakage-checked splitter.
@@ -643,13 +655,13 @@ def _analyze(
     # raw rows - they are already replicate-grouped for leakage and describe the
     # as-measured signal; only the proposed batch switches to the reproducible
     # objective.
-    nr = noise_report(X, y)
+    nr = noise_report(X, y, groups=recipe_key)
     best_single = float(y.max())
     best_reproducible: float | None = None
     replicate_aware = False
     incumbent = best_single
     if nr["n_replicated"] >= 1:
-        Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y)
+        Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y, groups=recipe_key)
         best_reproducible = float(yf.max())
         sigma2 = nr["noise_var"]
         # Only swap in the reproducible objective when there are enough distinct

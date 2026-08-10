@@ -15,9 +15,35 @@ explicitly instead of inferring from scratch on a handful of points.
 """
 from __future__ import annotations
 
+from typing import Sequence, Union
+
 import numpy as np
 
+# Per-row recipe keys. An ndarray is included because `kalos.core.splits.
+# row_hash_groups` - the canonical grouper callers should be passing - returns
+# one; iterating either type yields the per-row key.
+GroupKeys = Union[Sequence[object], np.ndarray]
+
 __all__ = ["aggregate_replicates", "estimate_noise_floor", "noise_report"]
+
+
+def _group_indices_from_keys(keys: GroupKeys) -> list[np.ndarray]:
+    """Group row indices by an EXPLICIT recipe key, in first-occurrence order.
+
+    Preferred over `_group_indices` whenever the caller knows which rows are the
+    same recipe, because deriving it from the feature matrix cannot distinguish a
+    genuine zero from an absent value that was filled with zero. See
+    `aggregate_replicates`'s `groups` argument for why that distinction changed
+    a headline statistic.
+    """
+    seen: dict[object, list[int]] = {}
+    order: list[object] = []
+    for i, key in enumerate(keys):
+        if key not in seen:
+            seen[key] = []
+            order.append(key)
+        seen[key].append(i)
+    return [np.asarray(seen[k], dtype=int) for k in order]
 
 
 def _group_indices(X: np.ndarray, decimals: int) -> list[np.ndarray]:
@@ -40,7 +66,11 @@ def _group_indices(X: np.ndarray, decimals: int) -> list[np.ndarray]:
 
 
 def aggregate_replicates(
-    X: np.ndarray, y: np.ndarray, *, decimals: int = 6
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    decimals: int = 6,
+    groups: GroupKeys | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Collapse replicate rows (identical rounded feature vectors) to one row each.
 
@@ -62,15 +92,20 @@ def aggregate_replicates(
     if Xa.shape[0] != ya.shape[0]:
         raise ValueError("X and y must have the same number of rows")
 
-    groups = _group_indices(Xa, decimals)
-    n_groups = len(groups)
+    if groups is not None:
+        if len(groups) != Xa.shape[0]:
+            raise ValueError("groups must have one entry per row of X")
+        row_groups = _group_indices_from_keys(list(groups))
+    else:
+        row_groups = _group_indices(Xa, decimals)
+    n_groups = len(row_groups)
     d = Xa.shape[1]
     X_unique = np.empty((n_groups, d), dtype=float)
     y_mean = np.empty(n_groups, dtype=float)
     y_var = np.empty(n_groups, dtype=float)
     n_reps = np.empty(n_groups, dtype=int)
 
-    for g, idx in enumerate(groups):
+    for g, idx in enumerate(row_groups):
         X_unique[g] = Xa[idx[0]]
         vals = ya[idx]
         y_mean[g] = vals.mean()
@@ -80,7 +115,9 @@ def aggregate_replicates(
     return X_unique, y_mean, y_var, n_reps
 
 
-def estimate_noise_floor(X: np.ndarray, y: np.ndarray, *, decimals: int = 6) -> float:
+def estimate_noise_floor(
+    X: np.ndarray, y: np.ndarray, *, decimals: int = 6, groups: GroupKeys | None = None
+) -> float:
     """Estimate the pooled within-replicate (assay noise) variance, sigma^2.
 
     Assumes approximately homoscedastic assay noise across recipes: the
@@ -88,14 +125,16 @@ def estimate_noise_floor(X: np.ndarray, y: np.ndarray, *, decimals: int = 6) -> 
     groups with at least 2 replicates (a singleton contributes no noise
     information). Returns `float("nan")` if no group has 2+ replicates.
     """
-    _, _, y_var, n_reps = aggregate_replicates(X, y, decimals=decimals)
+    _, _, y_var, n_reps = aggregate_replicates(X, y, decimals=decimals, groups=groups)
     replicated = n_reps >= 2
     if not np.any(replicated):
         return float("nan")
     return float(y_var[replicated].mean())
 
 
-def noise_report(X: np.ndarray, y: np.ndarray, *, decimals: int = 6) -> dict:
+def noise_report(
+    X: np.ndarray, y: np.ndarray, *, decimals: int = 6, groups: GroupKeys | None = None
+) -> dict:
     """Summarize replicate structure and signal-to-noise for a design matrix.
 
     Returns a dict with:
@@ -111,7 +150,9 @@ def noise_report(X: np.ndarray, y: np.ndarray, *, decimals: int = 6) -> dict:
         differences rather than assay noise; `nan` if either input is `nan`
         or the denominator is 0.
     """
-    X_unique, y_mean, y_var, n_reps = aggregate_replicates(X, y, decimals=decimals)
+    X_unique, y_mean, y_var, n_reps = aggregate_replicates(
+        X, y, decimals=decimals, groups=groups
+    )
     n_recipes = X_unique.shape[0]
     replicated = n_reps >= 2
     n_replicated = int(replicated.sum())
