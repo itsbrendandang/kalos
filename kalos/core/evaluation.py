@@ -112,4 +112,51 @@ def grouped_cv_report(
     }
 
 
-__all__ = ["grouped_cv_spearman", "grouped_cv_report", "grouped_folds"]
+def producer_only_spearman(
+    oof_actual, oof_pred, *, threshold: float = 0.0
+) -> dict:
+    """Rank agreement restricted to the rows that actually PRODUCED.
+
+    WHY THE POOLED NUMBER IS NOT ENOUGH. `grouped_cv_report`'s Spearman is taken
+    over every held-out row, producers and non-producers together. On a sheet with
+    a substantial fraction of non-producers, a model can score well on that number
+    by doing nothing more than separating zeros from non-zeros - which is a
+    feasibility classifier, not a ranking of recipes. The client's decision is
+    "which of my producing recipes is best", and that is a different question.
+
+    `BENCHMARK.md` documents this concretely: on the real media DoE the pooled
+    held-out Spearman was a plausible-looking 0.37-0.52 while feasibility was
+    "mostly a stable property" and never the bottleneck, so most of that pooled
+    agreement was the easy part of the problem.
+
+    `threshold` is the value above which a measurement counts as production. The
+    default 0.0 means "any non-zero measurement", which is a PROXY. The correct
+    value is the assay's limit of detection: below LOD a reading is censored, not
+    zero, and treating it as a true zero is a different modelling error. Pass the
+    LOD when it is known and say so in the report.
+
+    Returns `spearman` as `nan` when it cannot be computed - fewer than three
+    producing rows, or no variation among them - rather than a number that looks
+    like a measurement. `evaluable` says which case you are in.
+    """
+    actual = np.asarray(oof_actual, dtype=float).reshape(-1)
+    pred = np.asarray(oof_pred, dtype=float).reshape(-1)
+    if actual.shape != pred.shape:
+        raise ValueError("oof_actual and oof_pred must be the same length")
+
+    mask = np.isfinite(actual) & np.isfinite(pred) & (actual > threshold)
+    n_prod = int(mask.sum())
+    n_total = int(np.isfinite(actual).sum())
+    rho = _spearman(pred[mask], actual[mask]) if n_prod >= 3 else float("nan")
+    return {
+        "spearman": rho,
+        "n_producers": n_prod,
+        "n_total": n_total,
+        "threshold": float(threshold),
+        # A pooled score can look fine while this is unmeasurable, so the caller
+        # must be able to tell "no signal" from "not enough producers to ask".
+        "evaluable": bool(n_prod >= 3 and rho == rho),
+    }
+
+
+__all__ = ["grouped_cv_spearman", "grouped_cv_report", "grouped_folds", "producer_only_spearman"]
