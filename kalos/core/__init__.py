@@ -3,11 +3,16 @@ from .splits import row_hash_groups, make_splits, assert_no_group_leakage
 from .drivers import spearman_driver_matrix, bootstrap_spearman, rank_drivers
 from .conformal import split_conformal, conformal_interval
 
-# These transitively import torch/botorch/gpytorch (~220 MB of RSS). Loaded
-# lazily via `__getattr__` (PEP 562) so importing any sibling submodule of
-# `kalos.core` (which always runs this `__init__.py` first) does not pay the
-# torch tax before one of these is actually touched. See `kalos/__init__.py`
-# for the matching top-level lazy exports.
+# `kalos.core` is torch-free except for three modules with top-level
+# torch/botorch/gpytorch imports (~220 MB of RSS): surrogate.py, optimize.py,
+# and multiobjective.py. Loaded lazily via `__getattr__` (PEP 562) below, so
+# importing any sibling submodule of `kalos.core` (which always runs this
+# `__init__.py` first) does not pay the torch tax before one of these is
+# actually touched. Callers elsewhere in the codebase (e.g. the portal and
+# the `--watch` poller) preserve the same contract by importing
+# `multiobjective` lazily too, deferring the import until a fit actually
+# runs rather than at module load time. See `kalos/__init__.py` for the
+# matching top-level lazy exports.
 _LAZY = {
     "Surrogate": (".surrogate", "Surrogate"),
     "propose": (".optimize", "propose"),
