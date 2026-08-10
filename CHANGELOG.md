@@ -2,6 +2,38 @@
 
 Newest first.
 
+## 2026-08-09 (driver multiplicity + stated coverage)
+
+### Fixed - the driver panel manufactured false process insights
+
+The panel tests every continuous feature against the target, then ships the strongest by `|rho|`, and until now applied no multiplicity correction at all. Measured over 400 simulated reports on 30 pure-noise features against an independent target:
+
+```
+reports containing >=1 false "significant" driver
+  uncorrected per-feature 95% CI:   78.8%
+  Benjamini-Hochberg at q = 0.05:    3.5%
+```
+
+Nearly four in five reports would show a fabricated driver. Selection makes it worse than the raw rate implies, because ranking by `|rho|` preferentially surfaces exactly the flukes, and the frontend then labelled them "confirmed driver" with causal verbs ("raises", "lowers"). This is the same failure class as the `run_number` rho = 1.0 incident: a statistic that is technically computed correctly and scientifically meaningless.
+
+Demonstrated on one realistic sheet (1 real driver, 14 noise columns, n=60): `noise_1` (p=0.032) and `noise_10` (p=0.047) both had bootstrap CIs excluding zero and would both have shipped as significant. Both are now correctly rejected, leaving only the real driver.
+
+- `kalos/core/drivers.py`: `benjamini_hochberg(pvals, q)`, a step-up FDR procedure. BH rather than Bonferroni because it controls the expected PROPORTION of false findings, which is the right error rate when a scientist acts on several drivers; Bonferroni at 30 collinear media-DoE features would suppress the real drivers too. The docstring states the positive-dependence assumption and that surviving does not make a driver causal.
+- `kalos/portal/analysis.py`: `significant` now requires BOTH the bootstrap CI excluding zero AND surviving BH. Applied over ALL tested features before the top-k cut, never after - correcting for the 8 shipped when 30 were tested would understate the multiplicity it exists to control. Each driver also carries `p`, `ci_excludes_zero` and `survives_fdr` so a reviewer can see which test a borderline feature failed.
+- New `driver_selection` block reports `n_tested`, `n_reported`, `top_k`, `fdr_method`, `fdr_q`, `n_bootstrap` and `ranked_by`. Selecting the strongest of many tested features is itself a statistical act, and the client needs to see that it happened rather than being shown eight drivers as though eight were tested.
+
+Known limitation, stated rather than hidden: `n_bootstrap` stays at 200, so the 2.5% CI percentile rests on roughly the 5th order statistic and is coarse. Raising it to 2000 was measured at 5.1s (n=55) and 15.8s (n=2000), which would triple analyze latency, and BH on exact p-values is now the primary gate with the CI as a secondary check. The count is reported so the coarseness is visible.
+
+### Fixed - the response now states the coverage it actually computed
+
+The band is computed at `alpha=0.1`, a 90% band. The frontend had drifted to labelling that same band "95%" on `/decide` and "90%" on the Voyager surface. A stated coverage number that is wrong on screen is an overclaim, not a hedge.
+
+- `kalos/portal/analysis.py`: `CONFORMAL_ALPHA` is now a named constant and the response carries `conformal_coverage` (0.9), so no consumer has to hardcode a percentage. Coverage is a property of the method, not the data, so it is reported even when the band itself is `None` for want of out-of-fold residuals.
+
+`tests/test_driver_multiplicity.py` (+15): the BH primitive (step-up behaviour, carry-along, order alignment, empty/NaN), only-the-real-driver-is-significant, the specific rescue of a noise feature whose CI excludes zero by chance, `significant` as a strict conjunction, selection disclosure, FDR applied over all tested features, and coverage reported with and without a band.
+
+Suite: 400 passed, 1 skipped. ruff and mypy clean.
+
 ## 2026-08-08 (identifier columns: privacy + spurious drivers)
 
 ### Fixed - a numeric identifier column was being modeled as a process input
