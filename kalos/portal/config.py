@@ -16,6 +16,8 @@ import ipaddress
 import logging
 import os
 
+from kalos.data.anonymizer import salt_configured
+
 log = logging.getLogger("kalos.portal")
 
 # Dev/pilot default: any loopback origin on any port (matches the pre-1c behavior).
@@ -115,8 +117,32 @@ def is_loopback_bind(host: str | None) -> bool:
         return False
 
 
-def assert_safe_bind(host: str | None, *, auth_configured: bool) -> None:
-    """Refuse to start an unauthenticated portal on an interface reachable off-box.
+def assert_safe_exposure(host: str | None, *, auth_configured: bool) -> None:
+    """Refuse to publish the portal off-box with a silently-broken security posture.
+
+    Two things block startup on a non-loopback bind, and they were chosen on one
+    principle: BLOCK THE SILENT FAILURES, WARN ON THE LOUD ONES.
+
+      - Authentication not enforced. Silent: the portal serves happily and nothing
+        tells the operator that every caller is getting anonymous read+write.
+      - `KALOS_ANON_SALT` unset. Silent: pseudonyms are emitted successfully and
+        look fine, while being derived from a published dev salt and therefore
+        dictionary-attackable by anyone who reads this source. The whole purpose of
+        the salt is that these hashes leave the machine.
+
+    `KALOS_CORS_ORIGINS` deliberately does NOT block. It is worth being precise
+    about why, because "permissive CORS" oversells it: the default is
+    `allow_origin_regex` restricted to `http://localhost` and `http://127.0.0.1`,
+    with `allow_credentials` off. It rejects `evil.com`, `localhost.evil.com` and
+    even `https://localhost`, and with credentials disabled a third-party page
+    cannot ride a user's token. So it is not a credential-theft vector. What it
+    does do on a real deployment is block the legitimate browser client at, say,
+    `https://app.acme.com` - a failure that announces itself in the first request
+    anyone makes, which is exactly the kind that does not need a startup refusal.
+    It gets a specific warning instead.
+
+    Loopback binds are untouched, so `python -m kalos.portal` and local
+    development keep working exactly as before.
 
     With no tokens provisioned the API grants an anonymous read+write principal on
     the `default` tenant, so binding it to a non-loopback interface publishes
@@ -128,18 +154,33 @@ def assert_safe_bind(host: str | None, *, auth_configured: bool) -> None:
     development keep working exactly as before. Set `KALOS_AUTH_TOKENS[_FILE]` to
     fix it properly, or `KALOS_ALLOW_OPEN_ACCESS=1` to accept the risk knowingly.
     """
-    if auth_configured or is_loopback_bind(host) or open_access_explicitly_allowed():
+    if is_loopback_bind(host) or open_access_explicitly_allowed():
         return
+
+    problems: list[str] = []
+    if not auth_configured:
+        problems.append(
+            "authentication is not enforced, so every caller would get an anonymous "
+            "read+write principal on the 'default' tenant - set "
+            "KALOS_AUTH_TOKENS_FILE (or KALOS_AUTH_TOKENS) to a list with at least "
+            "one token"
+        )
+    if not salt_configured():
+        problems.append(
+            "KALOS_ANON_SALT is unset, so identity pseudonyms would be derived from "
+            "the published dev salt and are dictionary-attackable by anyone who "
+            "reads this source - set it to a secret value"
+        )
+    if not problems:
+        # Posture is sound for an exposed deployment; CORS is a separate, loud
+        # failure and is warned about in `log_security_posture`.
+        return
+
+    joined = "; ".join(f"({i + 1}) {p}" for i, p in enumerate(problems))
     raise InsecureBindError(
-        f"refusing to serve the portal on {host!r} with authentication disabled: "
-        "with no tokens configured every caller gets an anonymous read+write "
-        "principal, so this would publish uploads, analyses and campaign changes "
-        "to anyone who can reach this host. Set KALOS_AUTH_TOKENS_FILE (or "
-        "KALOS_AUTH_TOKENS) to enforce authentication, bind 127.0.0.1 to stay "
-        f"local, or set {_ALLOW_OPEN_VAR}=1 to accept this deliberately. Note that "
-        "KALOS_ANON_SALT should also be set before identity hashes leave this "
-        "machine, and KALOS_CORS_ORIGINS before a browser on another origin can "
-        "call the engine (docs/HARDENING.md)."
+        f"refusing to serve the portal on {host!r}: {joined}. Bind 127.0.0.1 to "
+        f"stay local, fix the above, or set {_ALLOW_OPEN_VAR}=1 to accept this "
+        "deliberately (docs/HARDENING.md)."
     )
 
 
@@ -153,9 +194,27 @@ def log_security_posture(*, auth_enforced: bool) -> None:
         "enforced" if auth_enforced else "OPEN (no tokens configured)",
         cors,
     )
-    if not auth_enforced or not origins:
+    if not auth_enforced:
         log.warning(
-            "kalos portal is not fully locked down: set KALOS_AUTH_TOKENS[_FILE] to "
-            "enforce authentication and KALOS_CORS_ORIGINS to restrict CORS before "
-            "exposing the portal beyond localhost (docs/HARDENING.md)."
+            "kalos portal auth is OPEN: every caller gets an anonymous read+write "
+            "principal. Remote callers are refused while this is true; set "
+            "KALOS_AUTH_TOKENS_FILE to serve them (docs/HARDENING.md)."
+        )
+    if not salt_configured():
+        log.warning(
+            "KALOS_ANON_SALT is unset, so identity pseudonyms use the published dev "
+            "salt and are dictionary-attackable. Set it before anonymized output "
+            "leaves this machine."
+        )
+    if not origins:
+        # Stated precisely, because "permissive CORS" would overstate it: the
+        # default admits only http://localhost and http://127.0.0.1 origins, with
+        # credentials disabled, so it is not a credential-theft vector. The real
+        # consequence is that a production browser client on its own origin is
+        # rejected - which surfaces on the first request rather than silently.
+        log.warning(
+            "KALOS_CORS_ORIGINS is unset, so only http://localhost and "
+            "http://127.0.0.1 origins may call this engine from a browser. A "
+            "deployed frontend on any other origin will be rejected; set it to a "
+            "comma-separated allowlist of the origins that should be able to."
         )

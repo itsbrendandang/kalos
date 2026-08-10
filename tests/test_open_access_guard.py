@@ -7,7 +7,7 @@ who can route to the host, and until now the only guard was a startup WARNING.
 
 Two layers, because either alone is insufficient:
 
-  - `assert_safe_bind`, called from `python -m kalos.portal`, fails fast with an
+  - `assert_safe_exposure`, called from `python -m kalos.portal`, fails fast with an
     actionable message. It is bypassed entirely by `uvicorn kalos.portal.app:app
     --host 0.0.0.0`, which is what a real deployment does.
   - a peer-address guard in the app, which cannot be bypassed by choosing a
@@ -22,7 +22,7 @@ import pytest
 
 from kalos.portal.config import (
     InsecureBindError,
-    assert_safe_bind,
+    assert_safe_exposure,
     is_local_client,
     is_loopback_bind,
     open_access_explicitly_allowed,
@@ -40,6 +40,9 @@ def _clean_auth_env(monkeypatch):
     """Every test starts from genuinely open, with no opt-out in force."""
     for var in ("KALOS_AUTH_TOKENS", "KALOS_AUTH_TOKENS_FILE", "KALOS_ALLOW_OPEN_ACCESS"):
         monkeypatch.delenv(var, raising=False)
+    # A real salt by default so the auth assertions below isolate auth. The salt
+    # requirement has its own tests further down.
+    monkeypatch.setenv("KALOS_ANON_SALT", "test-salt-not-the-dev-one")
 
 
 # --- classifying a peer address --------------------------------------------- #
@@ -90,7 +93,7 @@ def test_wildcard_and_routable_binds_are_not_loopback(host):
 
 def test_open_on_a_wildcard_bind_is_refused():
     with pytest.raises(InsecureBindError) as exc:
-        assert_safe_bind("0.0.0.0", auth_configured=False)
+        assert_safe_exposure("0.0.0.0", auth_configured=False)
     msg = str(exc.value)
     # The message has to tell an operator what to actually do.
     assert "KALOS_AUTH_TOKENS" in msg
@@ -99,17 +102,17 @@ def test_open_on_a_wildcard_bind_is_refused():
 
 def test_open_on_loopback_is_allowed():
     """Local development must be untouched by this."""
-    assert_safe_bind("127.0.0.1", auth_configured=False)
+    assert_safe_exposure("127.0.0.1", auth_configured=False)
 
 
 def test_authenticated_on_a_wildcard_bind_is_allowed():
-    assert_safe_bind("0.0.0.0", auth_configured=True)
+    assert_safe_exposure("0.0.0.0", auth_configured=True)
 
 
 def test_the_opt_out_is_honoured_when_set_deliberately(monkeypatch):
     monkeypatch.setenv("KALOS_ALLOW_OPEN_ACCESS", "1")
     assert open_access_explicitly_allowed() is True
-    assert_safe_bind("0.0.0.0", auth_configured=False)
+    assert_safe_exposure("0.0.0.0", auth_configured=False)
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "", "maybe"])
@@ -119,7 +122,7 @@ def test_the_opt_out_needs_an_affirmative_value(monkeypatch, value):
     monkeypatch.setenv("KALOS_ALLOW_OPEN_ACCESS", value)
     assert open_access_explicitly_allowed() is False
     with pytest.raises(InsecureBindError):
-        assert_safe_bind("0.0.0.0", auth_configured=False)
+        assert_safe_exposure("0.0.0.0", auth_configured=False)
 
 
 # --- the bypass this guard originally had ----------------------------------- #
@@ -141,7 +144,7 @@ def test_an_empty_token_list_does_not_count_as_enforcing(monkeypatch):
     # and the anonymous principal is what a caller would actually receive
     assert auth.principal_for(None).anonymous is True
     with pytest.raises(InsecureBindError):
-        assert_safe_bind("0.0.0.0", auth_configured=auth.enforces())
+        assert_safe_exposure("0.0.0.0", auth_configured=auth.enforces())
 
 
 def test_a_real_token_does_count_as_enforcing(monkeypatch):
@@ -197,3 +200,82 @@ def test_the_guard_covers_mutating_routes_too(monkeypatch):
     """An open portal's real exposure is write access, not reads."""
     with TestClient(app, client=("198.51.100.4", 52000)) as client:
         assert client.post("/api/campaign/start", json={}).status_code == 503
+
+
+# --- the salt requirement ---------------------------------------------------- #
+
+
+def test_exposing_without_a_salt_is_refused(monkeypatch):
+    """A silent failure, so it blocks.
+
+    Pseudonyms are emitted successfully and look fine while being derived from a
+    dev salt that is published in this repository, so anyone who reads the source
+    can dictionary-attack them. The entire point of the salt is that these hashes
+    leave the machine.
+    """
+    monkeypatch.delenv("KALOS_ANON_SALT", raising=False)
+    with pytest.raises(InsecureBindError) as exc:
+        assert_safe_exposure("0.0.0.0", auth_configured=True)
+    assert "KALOS_ANON_SALT" in str(exc.value)
+
+
+def test_missing_salt_is_fine_on_loopback(monkeypatch):
+    """Nothing leaves the machine, so nothing to protect."""
+    monkeypatch.delenv("KALOS_ANON_SALT", raising=False)
+    assert_safe_exposure("127.0.0.1", auth_configured=False)
+
+
+def test_both_problems_are_reported_together(monkeypatch):
+    """An operator should learn everything they must fix in one attempt, not
+    discover the second problem only after fixing the first."""
+    monkeypatch.delenv("KALOS_ANON_SALT", raising=False)
+    with pytest.raises(InsecureBindError) as exc:
+        assert_safe_exposure("0.0.0.0", auth_configured=False)
+    msg = str(exc.value)
+    assert "(1)" in msg and "(2)" in msg
+    assert "KALOS_AUTH_TOKENS" in msg
+    assert "KALOS_ANON_SALT" in msg
+
+
+def test_a_sound_posture_is_allowed(monkeypatch):
+    monkeypatch.setenv("KALOS_ANON_SALT", "a-real-secret")
+    assert_safe_exposure("0.0.0.0", auth_configured=True)
+
+
+def test_cors_alone_does_not_block_exposure(monkeypatch):
+    """CORS is deliberately NOT a blocker, and the reasoning matters.
+
+    The default is `allow_origin_regex` limited to http://localhost and
+    http://127.0.0.1 with credentials disabled, so it is not a credential-theft
+    vector - it rejects evil.com, localhost.evil.com and even https://localhost.
+    Its real consequence on a deployment is that the production browser client is
+    rejected, which surfaces on the very first request. Loud failures get warnings,
+    silent ones get refusals.
+    """
+    monkeypatch.delenv("KALOS_CORS_ORIGINS", raising=False)
+    monkeypatch.setenv("KALOS_ANON_SALT", "a-real-secret")
+    assert_safe_exposure("0.0.0.0", auth_configured=True)
+
+
+def test_the_dev_cors_regex_admits_only_loopback_origins():
+    """Pinning the claim the decision above rests on."""
+    import re
+
+    from kalos.portal.config import _DEV_ORIGIN_REGEX, cors_config
+
+    pattern = re.compile(_DEV_ORIGIN_REGEX)
+    assert pattern.fullmatch("http://localhost:3000")
+    assert pattern.fullmatch("http://127.0.0.1:8050")
+    for hostile in ("https://evil.com", "http://evil.com", "http://localhost.evil.com", "https://localhost:3000"):
+        assert not pattern.fullmatch(hostile), hostile
+    # credentials are not enabled, so a third-party page cannot ride a user's token
+    assert "allow_credentials" not in cors_config()
+
+
+def test_salt_configured_reflects_the_environment(monkeypatch):
+    from kalos.data.anonymizer import salt_configured
+
+    monkeypatch.delenv("KALOS_ANON_SALT", raising=False)
+    assert salt_configured() is False
+    monkeypatch.setenv("KALOS_ANON_SALT", "x")
+    assert salt_configured() is True
