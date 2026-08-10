@@ -18,6 +18,7 @@ import pandas as pd
 from kalos.core.drivers import benjamini_hochberg, bootstrap_spearman, spearman_driver_matrix
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
+from kalos.core.gp_shape import gp_shape_report
 from kalos.core.replicates import aggregate_replicates, noise_report
 from kalos.core.splits import row_hash_groups
 from kalos.data.anonymizer import _hash
@@ -148,6 +149,12 @@ CONFORMAL_ALPHA = 0.1
 # frontend had drifted to labelling this same band "95%" on one surface and
 # "90%" on another; a stated coverage that is wrong on screen is an overclaim,
 # not a hedge, so the engine now ships the number it actually computed.
+
+RELIABILITY_SPEARMAN_FLOOR = 0.20
+# The one out-of-fold Spearman floor this module uses, for the reliability verdict
+# AND for gating the GP shape report. It was previously a bare 0.20 literal in two
+# places here; a single name means the verdict and the shapes can never be held to
+# different bars, and a future change to the bar cannot move one without the other.
 
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
@@ -558,8 +565,8 @@ def _analyze(
     reliability = {
         "spearman": None if rho != rho else round(rho, 3),
         "ci95": ci95,
-        "spearman_floor": 0.20,
-        "clears_floor": bool(rho == rho and rho >= 0.20),
+        "spearman_floor": RELIABILITY_SPEARMAN_FLOOR,
+        "clears_floor": bool(rho == rho and rho >= RELIABILITY_SPEARMAN_FLOOR),
         "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
         "unmodeled": ["feasibility probability", "calibration (ECE)", "scale-up transfer"],
     }
@@ -663,6 +670,31 @@ def _analyze(
     for d in drv:
         d.pop("_idx", None)  # internal-only; not part of the returned API surface
     p_mean, p_std = s.posterior(batch)
+
+    # Response SHAPES, read off this same fitted GP before it is released. This is
+    # what closes the Spearman blind spot: a titer peaking at pH 7.0 gives a rank
+    # correlation near zero, so the driver panel reports "no signal" for the most
+    # important variable on the sheet, and the rho sign points the wrong way.
+    #
+    # Deliberately read from THIS surrogate rather than from a second model. The
+    # shapes then describe the posterior that actually produced `proposals`, the
+    # posterior's own standard deviation gates the interior-optimum claim, and ARD
+    # lengthscales supply per-feature relevance already paid for during the fit.
+    # Conditioned on `rho` (the out-of-fold Spearman the reliability verdict
+    # already uses), so a model that cannot predict held-out runs reports no
+    # shapes at all rather than describing the shape of its own overfitting.
+    #
+    # Continuous features only, matching the driver panel: a swept axis has to be
+    # a measurement, not an integer category code.
+    gp_shapes = gp_shape_report(
+        s,
+        Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0)),
+        y,
+        feature_names=[str(c) for c in cont_feats],
+        cv_spearman=None if rho != rho else float(rho),
+        rho_floor=RELIABILITY_SPEARMAN_FLOOR,
+    ).to_dict()
+
     # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
     # break) as soon as its last use is done, rather than waiting on `_analyze`
@@ -730,6 +762,9 @@ def _analyze(
         "best": round(best_single, 4),
         "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware),
         "drivers": drv,
+        # Response shape per feature, read off the same GP that proposed the
+        # batch. Closes the interior-optimum blind spot in the rank drivers.
+        "gp_shapes": gp_shapes,
         "proposal_features": show,
         "proposals": _annotate(batch, p_mean, p_std, incumbent, cols=show_idx, design=design),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
