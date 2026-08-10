@@ -31,6 +31,15 @@ portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"
 # The torch-free deterministic core (units/synonyms/plan/apply) and the
 # offline fallback in llm.py need none of this.
 normalize = ["anthropic>=0.40"]
+# The out-of-fold XGBoost nonlinear-driver report (kalos/core/nonlinear_drivers.py).
+# EXPLANATORY ONLY - never imported by the GP/BoTorch acquisition path, so
+# nothing else in `ml` needs it and it needs nothing from `ml`. Imported
+# lazily inside `nonlinear_drivers()`, never at module scope, so the module
+# still imports cleanly (and returns `available=False`) with this extra
+# absent. On macOS xgboost also needs an OpenMP runtime Python packaging does
+# not bundle - `brew install libomp` - so a missing/broken xgboost here is
+# the NORMAL state on a fresh Mac, not a bug.
+xgb = ["xgboost>=2.0"]
 # `httpx` is the transport `starlette.testclient.TestClient` (used across the
 # portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
 # a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
