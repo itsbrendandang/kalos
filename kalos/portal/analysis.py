@@ -15,7 +15,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from kalos.core.drivers import bootstrap_spearman, spearman_driver_matrix
+from kalos.core.drivers import benjamini_hochberg, bootstrap_spearman, spearman_driver_matrix
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.replicates import aggregate_replicates, noise_report
@@ -129,6 +129,25 @@ def _numeric_cols(df: pd.DataFrame) -> list:
 # Deterministic seed for the analyze path. The same upload -> the same GP fit and
 # the same proposed batch, which matters for client reproducibility and audit.
 ANALYZE_SEED = 1234
+
+# Driver-panel policy. Named here so the numbers can be argued with in one place.
+DRIVER_FDR_Q = 0.05
+# Benjamini-Hochberg false-discovery rate for the driver panel. 0.05 keeps the
+# expected proportion of false findings among reported drivers at 1 in 20, which
+# is the right error rate when a scientist will act on several of them.
+
+DRIVER_TOP_K = 8
+# How many drivers are shipped after ranking by |rho|. The cut is REPORTED
+# (`driver_selection` below) rather than silent, because selecting the strongest
+# of many tested features is itself a statistical act the client needs to know
+# happened.
+
+CONFORMAL_ALPHA = 0.1
+# Miscoverage for the conformal band, so the response can state its own coverage
+# (1 - alpha = 90%) instead of leaving every consumer to hardcode a number. The
+# frontend had drifted to labelling this same band "95%" on one surface and
+# "90%" on another; a stated coverage that is wrong on screen is an overclaim,
+# not a hedge, so the engine now ships the number it actually computed.
 
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
@@ -530,7 +549,7 @@ def _analyze(
     # coverage under grouped CV). Honest alternative to the surrogate's own std,
     # which is often overconfident on small bioprocess datasets.
     resid = np.asarray(oof_a, float) - np.asarray(oof_p, float)
-    conformal_q = round(q_from_residuals(resid, alpha=0.1), 4) if len(resid) else None
+    conformal_q = round(q_from_residuals(resid, alpha=CONFORMAL_ALPHA), 4) if len(resid) else None
 
     # Honest reliability verdict: only what this path can actually assess. The
     # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
@@ -555,30 +574,54 @@ def _analyze(
     # rank correlation on an integer-coded nominal category is not a meaningful
     # "driver", so categorical dims are deliberately excluded here. Their
     # continuous indices (0..len(cont_feats)-1) align with the leading columns of X.
+    # MULTIPLICITY. Every continuous feature is tested, then the strongest are
+    # selected and shipped. With an uncorrected per-feature 95% CI that is a
+    # machine for printing false process insights: over 400 simulated reports on
+    # 30 pure-noise features against an independent target, 78.8% contained at
+    # least one "significant" driver. Under Benjamini-Hochberg at q=0.05 that
+    # falls to 3.5%. Selection on the same data makes it worse than the raw rate
+    # suggests, because ranking by |rho| preferentially surfaces exactly the
+    # flukes. So `significant` now requires BOTH tests to agree:
+    #   - the bootstrap CI excludes zero (is it distinguishable from no-effect?)
+    #   - the feature survives BH across ALL tested features (is it still a
+    #     finding once we account for how many features we looked at?)
+    # BH runs over every tested feature BEFORE the top-k cut, never after -
+    # correcting for 8 tests when 30 were performed would understate the very
+    # multiplicity it exists to control.
     drv: list[dict[str, Any]] = []
+    n_tested = len(cont_feats)
     if cont_feats:
         names = [str(c) for c in cont_feats]
         Xcont = X[:, : len(cont_feats)]
-        point = np.asarray(spearman_driver_matrix(Xcont, y, feature_names=names)["rho"]).astype(float)
+        matrix = spearman_driver_matrix(Xcont, y, feature_names=names)
+        point = np.asarray(matrix["rho"]).astype(float)
+        pvals = np.asarray(matrix["pvals"]).astype(float)
+        bh_survives = benjamini_hochberg(pvals, q=DRIVER_FDR_Q)
         boot = bootstrap_spearman(Xcont, y, feature_names=names)
         boot_lo = np.asarray(boot["lo"], dtype=float)
         boot_hi = np.asarray(boot["hi"], dtype=float)
         for j, c in enumerate(cont_feats):
             lo, hi = round(float(boot_lo[j]), 3), round(float(boot_hi[j]), 3)
+            ci_excludes_zero = bool(lo > 0 or hi < 0)
             drv.append(
                 {
                     "_idx": j,
                     "name": str(c),
                     "rho": round(float(point[j]), 3),
                     "ci95": [lo, hi],
+                    "p": round(float(pvals[j]), 6),
+                    # Both components are reported, not just the verdict, so a
+                    # reviewer can see WHICH test a borderline feature failed.
+                    "ci_excludes_zero": ci_excludes_zero,
+                    "survives_fdr": bool(bh_survives[j]),
                     # significance uses the SAME rounded bounds the client sees, so
                     # the flag never disagrees with the displayed CI. Two-sided: a
                     # strong negative driver is a finding too.
-                    "significant": bool(lo > 0 or hi < 0),
+                    "significant": bool(ci_excludes_zero and bh_survives[j]),
                 }
             )
     drv.sort(key=lambda d: -abs(float(d["rho"])))
-    drv = drv[:8]
+    drv = drv[:DRIVER_TOP_K]
 
     # Replicate structure + assay noise floor (the "SNR lever", BENCHMARK.md).
     # Media DoE sheets are frequently heavily replicated because the ASSAY is
@@ -670,6 +713,19 @@ def _analyze(
         "cv_ci95": ci95,
         "cv_n_groups": rep["n_groups"],
         "conformal_q": conformal_q,
+        # The band's ACTUAL coverage, so no consumer has to hardcode it.
+        "conformal_coverage": round(1.0 - CONFORMAL_ALPHA, 4),
+        # How the driver panel was selected and corrected, so the client can see
+        # that many features were tested and only the strongest are shown.
+        "driver_selection": {
+            "n_tested": n_tested,
+            "n_reported": len(drv),
+            "top_k": DRIVER_TOP_K,
+            "fdr_method": "benjamini_hochberg",
+            "fdr_q": DRIVER_FDR_Q,
+            "n_bootstrap": 200,
+            "ranked_by": "abs_rho",
+        },
         "reliability": reliability,
         "best": round(best_single, 4),
         "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware),

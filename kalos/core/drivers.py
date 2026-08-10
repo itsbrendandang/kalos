@@ -39,6 +39,57 @@ def spearman_driver_matrix(
     return {"rho": rhos, "pvals": pvals, "feature_names": names}
 
 
+def benjamini_hochberg(pvals: ArrayLike, q: float = 0.05) -> np.ndarray:
+    """Benjamini-Hochberg step-up: which of `pvals` survive at false-discovery rate `q`.
+
+    Returns a boolean mask aligned to `pvals`.
+
+    WHY THIS EXISTS. A driver panel tests every continuous feature on the sheet
+    against the target and then reports the strongest. With 30 features and an
+    uncorrected 95% per-feature threshold you expect about 1.5 features to look
+    significant by chance alone in EVERY report, and because the panel then
+    selects the largest |rho| it preferentially surfaces exactly those flukes.
+    That is a mechanism for printing a false process insight, and a scientist
+    acts on drivers and repeats them in meetings.
+
+    BH controls the expected PROPORTION of false findings among those declared
+    significant, which is the right error rate here. The alternative,
+    Bonferroni, controls the probability of any false finding at all and at 30
+    collinear media-DoE features would suppress nearly every real driver too -
+    trading a false-positive problem for a false-negative one on data this
+    small.
+
+    Applied over ALL tested features, never over the surviving subset: running
+    it after selecting the top 8 would correct for 8 tests when 30 were
+    performed, which understates the multiplicity it exists to control.
+
+    Assumption worth stating: BH assumes independent or positively-dependent
+    tests. Media-DoE columns are often collinear by construction, which is
+    positive dependence, so BH remains valid (Benjamini-Yekutieli would be the
+    conservative choice under arbitrary dependence). This does NOT make a
+    surviving driver causal - it remains an association, subject to confounding
+    with any collinear column.
+    """
+    p = np.asarray(pvals, dtype=float).reshape(-1)
+    m = p.size
+    if m == 0:
+        return np.zeros(0, dtype=bool)
+    # NaN cannot be ranked against real p-values; treat it as "no evidence".
+    p = np.where(np.isnan(p), 1.0, p)
+    order = np.argsort(p, kind="stable")
+    ranked = p[order]
+    thresholds = (np.arange(1, m + 1) / m) * q
+    passing = ranked <= thresholds
+    reject = np.zeros(m, dtype=bool)
+    if passing.any():
+        # Step-up: the largest rank that passes sets the cutoff, and every
+        # smaller p-value is rejected with it - including any that individually
+        # failed its own threshold. That is the step-up procedure, not a bug.
+        k = int(np.nonzero(passing)[0].max())
+        reject[order[: k + 1]] = True
+    return reject
+
+
 def bootstrap_spearman(
     Z: np.ndarray, signal: ArrayLike, B: int = 200, random_state: int = 42,
     ci: float = 0.95, feature_names: Optional[Sequence[str]] = None,
@@ -79,4 +130,4 @@ def rank_drivers(summary: Dict[str, object], top_k: int = 5, direction: str = "a
     return [(names[i], float(scores[i])) for i in order[:top_k]]
 
 
-__all__ = ["spearman_driver_matrix", "bootstrap_spearman", "rank_drivers"]
+__all__ = ["spearman_driver_matrix", "bootstrap_spearman", "rank_drivers", "benjamini_hochberg"]
