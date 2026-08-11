@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
@@ -249,6 +249,23 @@ def providers(principal: Principal = Depends(require_scope(READ))) -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _HTML
+
+
+@app.get("/fonts/Satoshi-Variable.woff2")
+def satoshi_font() -> FileResponse:
+    """Serve the one brand typeface the portal page needs.
+
+    Satoshi is the kalos brand face (DESIGN.md) and is not on Google Fonts, so
+    it ships vendored beside index.html under the Fontshare license in
+    `fonts/SATOSHI-LICENSE.txt`. Served as a single explicit route rather than
+    a StaticFiles mount so the portal never exposes a browsable directory.
+    Immutable + long max-age: the filename changes if the font ever does.
+    """
+    return FileResponse(
+        Path(__file__).parent / "fonts" / "Satoshi-Variable.woff2",
+        media_type="font/woff2",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/api/single")

@@ -1,75 +1,84 @@
 # Design notes — Kalos
 
-Authored for this repo. The source of truth for how Kalos looks and feels.
-Standalone identity, deliberately unlike any prior project.
+How the Kalos **engine portal** (`kalos/portal/index.html`, served at :8050) looks and feels.
+
+> **Current as of 2026-08-11, confirmed directly by the product owner: the engine portal is kalos blue on Satoshi, matching kalos-web.**
+> The emerald-and-clay direction below is **superseded**, including its "no cobalt" rule, and must not be reinstated.
+>
+> This was asked and answered explicitly, because the two repos contradicted each other in writing.
+> `kalos-web/DESIGN.md` (2026-08-08) recorded owner confirmation that kalos owns a blue hue on Satoshi; this file (2026-06-29) named emerald the one brand color and banned cobalt outright.
+> Both were faithfully implemented, so the same product had two front doors with two identities.
+> Blue is the live direction for both.
+> If a future note claims otherwise, it needs a date later than this one and its own owner confirmation.
+>
+> **`kalos-web/app/globals.css` `:root` is the single source of truth for live token values.**
+> The `:root` block in `kalos/portal/index.html` is a mirror of it, not a second source; when a brand value changes there, update the portal to match.
+> Only the brand family and the type stack changed in this re-hue.
+> Layout, shape, spacing, motion, and the anti-slop rules below are untouched, so this is a re-hue rather than a redesign.
 
 ## The memorable thing
 
-After someone sees Kalos once, they should remember: **a calm, optimistic
-tool about growth.** Bright and warm, not a dark instrument console. Precise
-where it counts, friendly everywhere else. Every choice below serves that.
+After someone sees Kalos once, they should remember: **a calm, precise tool that tells you what to run next.**
+Bright and light, not a dark instrument console.
+Precise where it counts, friendly everywhere else.
+Every choice below serves that.
 
 ## Color
 
-Two hues, used for meaning, never decoration.
+Two tones, used for meaning, never decoration.
 
-- **Emerald `--accent: #15A375`** is the one brand color (cultivation = growth).
-  It marks the live series, the primary action, the active nav, and good
-  outcomes. Hover `#0E7C57`. Soft fill `#E4F4ED` for accent tints and chips.
-- **Clay `--explore: #C77E2E`** is the only second hue. It marks "explore"
-  (high-uncertainty) vs emerald "exploit", and warnings. Soft fill `#FBEFDD`.
-- **Surfaces:** warm paper page `--bg: #EFF1EA`, white cards `--card: #FFFFFF`,
-  and a single grounding deep-green sidebar `--ink-surface: #13231C`. The dark
-  sidebar is the only dark element; it anchors the bright canvas.
-- **Ink:** `--fg: #15241C` (near-black with a green cast), `--muted: #586A5E`
-  (darkened to clear WCAG AA 4.5:1 on the warm paper), faint `--muted-2: #98A69C`.
-- **Lines:** `--border: #E8ECE3`, soft. Used sparingly; depth comes from
-  elevation, not boxes.
-- **Diverging data** (correlations, signed drivers): emerald for positive, clay
-  for negative, with a neutral `#D8DCD2` midpoint. Never red/green traffic light.
+- **Kalos blue `--accent: #204AF4`** is the one brand color.
+  It marks the live series, the primary action, the active nav, and good outcomes.
+  Hover `#1442BE` (darker, so white button text keeps its ratio), deep `#123EB2` for the filled hero card, soft fill `#EEF4FE` for tints and chips.
+- **Explore `--explore: #9CA3AF` is achromatic on purpose.**
+  It marks "explore" (high-uncertainty) against blue "exploit", so the pair reads as a hue contrast rather than two similar blues.
+  Deep text `#52525B` on soft fill `#EDEDED`.
+- **Status carries meaning, never decoration:** amber `#9A5B00` on `#FFF3E0` for warnings and for labelling demo or benchmark-only numbers.
+  Severity is never conveyed by color alone; every status also carries a label or an icon.
+- **Surfaces:** page `--bg: #F6F8FC`, white cards `--card: #FFFFFF`.
+- **Ink:** `--fg: #101828`, `--muted: #667085` (clears WCAG AA 4.5:1 on both page and card).
+- **Lines:** `--border: #D9E2F2`, soft. Used sparingly; depth comes from elevation, not boxes.
+- **Diverging data** (correlations, signed drivers): blue for positive, neutral gray for negative.
+  Never red/green traffic light.
 
 ## Type
 
-Three roles, each a real typeface (no Inter / Roboto / Arial / system default).
+Two real typefaces, matching kalos-web (no Inter / Roboto / Arial / system default).
 
-- **Display / headings — Sora** (`--font-head`), weight 600-700, tracked tight.
-  Geometric and modern, distinctive without shouting.
-- **Body / UI — Plus Jakarta Sans** (`--font-sans`), weight 400-600, ~65ch max.
-  Humanist and friendly; this is what makes it approachable.
-- **Numbers, IDs, code — JetBrains Mono** (`--font-mono`), weight 500-600,
-  always `tabular-nums`. Mono is reserved for figures, the one cue carried over
-  from instrument UIs because scientists trust aligned, precise numerals.
+- **Display and body — Satoshi** (`--head`, `--sans`), weight 400-700, headings tracked tight, body ~65ch max.
+  One face across both roles, which is what ties the portal to the dashboard visually.
+  Satoshi is not on Google Fonts, so the portal serves it vendored from `kalos/portal/fonts/` under the Fontshare license (see the `/fonts` route in `kalos/portal/app.py`).
+- **Numbers, IDs, code — JetBrains Mono** (`--mono`), weight 500-600, always `tabular-nums`.
+  Mono is reserved for figures, the one cue carried over from instrument UIs because scientists trust aligned, precise numerals.
 
 ## Shape, depth, spacing
 
 - **Rounded:** 14px cards, 10px controls, pill badges (`border-radius: 999px`).
-- **Elevation, not hairlines:** cards are white on warm paper with a soft, low
-  shadow `0 1px 2px rgba(20,40,30,.04), 0 8px 24px rgba(20,40,30,.05)`. Lead
+- **Elevation, not hairlines:** cards are white on the page tint with a soft, low
+  shadow `0 1px 2px rgba(16,24,40,.04), 0 10px 26px rgba(16,24,40,.05)`. Lead
   with depth and whitespace, not borders around everything.
 - **Generous spacing:** 20-24px card padding, 12-16px gaps, a max-width canvas.
 - **The hero accent card** (the single most important number, e.g. best titer)
-  is a filled emerald card with white text and a soft emerald glow. Exactly one
+  is a filled blue card with white text and a soft blue glow. Exactly one
   per screen.
 
 ## Components
 
-- **KPI cards** — soft white card, muted 11px label, 23px mono value, a one-line
-  context in muted or emerald. The single most important one is the emerald
-  hero variant.
-- **Primary button** — emerald fill, white text, 10px radius, soft emerald
+- **KPI cards** — soft white card, muted 11px label, 22px mono value, a one-line
+  context in muted or blue. The single most important one is the blue hero variant.
+  A number that cannot be computed on real client data (a benchmark against a known
+  optimum, a demo figure) is labelled as such in amber, right in the KPI label.
+- **Primary button** — blue fill, white text, 10px radius, soft blue
   shadow, a leading icon. Secondary is outline on `--border`; ghost is bare.
-- **Charts** — themed to the palette: emerald line (2.5px, round caps) with a
-  10%-opacity emerald area fill, clay for the second series, `--border` grid,
-  muted mono axis labels, no animation on chrome. A filled end-dot with a soft
-  halo marks "current best."
+- **Charts** — themed to the palette: blue line (2.5px) with an
+  8%-opacity blue area fill, neutral gray for the secondary series and for
+  reference lines, `--grid` gridlines, muted mono axis labels, no animation on chrome.
 - **Badges / chips** — pill, soft-fill background with the same-hue *deep* text
-  for AA contrast (emerald chip = `#0E7C57` text on `#E4F4ED`; clay chip =
-  `#8F5418` text on `#FBEFDD`, which clears 4.5:1). Never the mid-tone accent on
-  its own soft fill.
-- **Hero on color** — the emerald hero card uses the deeper `#0E7C57` so white
-  label and value both clear AA, not the mid `#15A375`.
-- **Sidebar** — deep-green `--ink-surface`, the leaf wordmark, active item in
-  emerald fill, inactive in muted sage. The one dark surface.
+  for AA contrast (blue chip = `#1442BE` text on `#EEF4FE`; explore chip =
+  `#52525B` text on `#EDEDED`; demo/benchmark chip = `#9A5B00` on `#FFF3E0`).
+  Never the mid-tone accent on its own soft fill.
+- **Hero on color** — the hero card uses the deeper `#123EB2` so white
+  label and value both clear AA, not the mid `#204AF4`.
 
 ## Motion
 
@@ -78,12 +87,15 @@ drawing). Chrome stays still. 150-250ms ease. Respect `prefers-reduced-motion`.
 
 ## Rules / anti-slop
 
-- No dark terminal aesthetic, no cobalt, no hairline-grid console look (that was
-  the prior, separate project — Kalos is its own thing).
+- No dark terminal aesthetic, no hairline-grid console look, and it must not read
+  as a stock shadcn neutral admin template — kalos owns a blue hue on Satoshi.
 - No purple gradients, no glow on text, no 3-equal-icon-card rows, no centered
   everything, no decorative blobs.
 - Sentence case everywhere. No ALL CAPS headers.
 - Mono is for numbers and IDs only, never body copy.
-- Two hues max on a screen. If you reach for a third color, it is data, not decor.
-- Every screen leads with the one number that matters (the emerald hero), then
+- One brand hue plus achromatic explore on a screen. If you reach for another
+  color, it is data or status, not decor.
+- Every screen leads with the one number that matters (the blue hero), then
   the trend, then the recommendation. Newcomer-first reading order.
+- Never show a number that cannot exist on a client's own data without saying so
+  next to it. The demo panels are badged "Example data" for the same reason.
