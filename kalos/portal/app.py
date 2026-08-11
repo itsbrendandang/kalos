@@ -194,9 +194,28 @@ def _load_latest(tenant: str = "default") -> dict | None:
         return _LATEST.get(tenant)
 
 
-def _save_latest(result: dict, dataset: str, *, tenant: str = "default") -> None:
+def _save_latest(
+    result: dict, dataset: str, *, tenant: str = "default", campaign_generation: str | None = None
+) -> None:
+    """Publish `result` as this tenant's `/api/latest`.
+
+    `campaign_generation` is the campaign this analysis describes. The campaign
+    and `_LATEST` are separate resources with independent locks and independent
+    persistence, so nothing else ties them together: without the stamp the two
+    can describe different run sheets while both look valid, which is how
+    `/results` and `/decide` came to report different bests off the same portal.
+    `CampaignStore.summary()` compares this stamp against the live campaign to
+    report `analysis_in_sync` (docs/CAMPAIGN_LOOP.md, "Analysis/campaign
+    coherence"). `None` means the analysis is not tied to any campaign, which
+    reads as out-of-sync rather than as fine.
+    """
     with _LATEST_LOCK:
-        state = {**result, "dataset": dataset, "updated": time.time()}
+        state = {
+            **result,
+            "dataset": dataset,
+            "updated": time.time(),
+            "campaign_generation": campaign_generation,
+        }
         _LATEST[tenant] = state
         try:
             path = _latest_path(tenant)
@@ -337,18 +356,24 @@ def _run_uploaded_sync(
         result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
     else:
         result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
-    _save_latest(result, filename, tenant=tenant)
+    generation: str | None = None
     try:
         # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
         # "Seeding") for THIS tenant. Best-effort: a seeding failure must never
         # break the upload response the client is waiting on.
         from kalos.portal.campaign import get_campaign_store
 
-        get_campaign_store().seed(
+        generation = get_campaign_store().seed(
             df, result["target"], result["proposal_features"], tenant=tenant
         )
     except Exception:  # noqa: BLE001 - seeding must never fail the upload
         log.exception("failed to seed the campaign from an uploaded run sheet")
+    # Seed BEFORE publishing so the analysis can carry the generation it was
+    # seeded alongside. The two resources take their locks sequentially (never
+    # nested), so the order is free of deadlock either way. If seeding failed,
+    # the stamp is None and the campaign reports itself out of sync with
+    # /api/latest instead of the two silently describing different run sheets.
+    _save_latest(result, filename, tenant=tenant, campaign_generation=generation)
     return result
 
 

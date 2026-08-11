@@ -48,8 +48,22 @@ def get_campaign(
     principal: Principal = Depends(require_scope(READ)),
 ) -> dict[str, Any]:
     """The caller's tenant's campaign summary for the `/decide` view, or
-    `{"has_campaign": false}` before any upload has ever seeded one."""
-    return store.summary(tenant=principal.tenant)
+    `{"has_campaign": false}` before any upload has ever seeded one.
+
+    Joins in the campaign stamp `/api/latest` was published with so the summary
+    can report `analysis_in_sync` — whether the analysis `/results` renders and
+    this campaign provably describe the same run sheet. The join lives here
+    rather than in `CampaignStore` so the store stays free of any `_LATEST`
+    knowledge; `_load_latest` is imported inside the function for the same
+    circular-import reason as `reanalyze_campaign` below.
+    """
+    from kalos.portal.app import _load_latest
+
+    latest = _load_latest(principal.tenant) or {}
+    return store.summary(
+        tenant=principal.tenant,
+        analysis_generation=latest.get("campaign_generation"),
+    )
 
 
 @router.post("/api/campaign/start")
@@ -169,7 +183,15 @@ async def reanalyze_campaign(
             status_code=409,
         )
 
-    _save_latest(result, f"campaign round {state['round']}", tenant=tenant)
+    _save_latest(
+        result,
+        f"campaign round {state['round']}",
+        tenant=tenant,
+        # Tie the published analysis to the campaign it describes: the fold we
+        # just committed. `summary()` compares this against the live generation
+        # to report `analysis_in_sync`.
+        campaign_generation=state["generation"],
+    )
     # Return the SAME shape GET /api/latest returns: _save_latest stamps the
     # persisted state with `dataset` and `updated`, so read it back rather than
     # returning the bare `result` (which lacks those two fields the frontend's

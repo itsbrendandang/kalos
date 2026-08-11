@@ -117,13 +117,34 @@ A fresh upload starts a fresh campaign (new base, empty pending, round 0).
   "pending": [{ "id": "...", "recipe": {...}, "pred": 1.58, "std": 0.33,
                "mode": "explore", "reason": "...", "result": null, "awaiting": true }],
   "n_awaiting": 3,
-  "n_measured": 0
+  "n_measured": 0,
+  "analysis_in_sync": true
 }
 ```
 
 `best` is `max(target over base_rows)` - the best *measured* value so far, not a prediction.
 `history` is the progress trajectory: one `{round, best, n_base}` point per round (round 0 = the seeded base, then one per re-analyze), so the frontend can plot best-so-far converging.
 Because base rows only grow, `best` is non-decreasing across the trajectory.
+`analysis_in_sync` reports whether the analysis currently on `/api/latest` provably describes this campaign's dataset - see "Analysis/campaign coherence" below.
+
+## Analysis/campaign coherence
+
+The campaign and `/api/latest` are **separate** resources: separate locks, separate persistence (`portal.db` vs `latest/<tenant>.json`).
+Nothing used to tie them together, so they could describe two different run sheets while both looked perfectly valid - `/results` reporting one `best` and `/decide` another, with no signal that the two disagreed.
+The upload path made this easy to hit: seeding is deliberately best-effort (a seeding failure must never fail the upload), so a swallowed seed left a fresh analysis published against a stale campaign.
+
+The fix is the ordered stamp the residual-window note below always wanted.
+`_save_latest` records the campaign `generation` the analysis was published alongside, and `GET /api/campaign` compares that stamp against the campaign's live generation:
+
+- `seed()` returns the generation it minted; the upload path seeds *first*, then publishes the analysis carrying that token.
+- `reanalyze` stamps the generation `commit_fold` minted, so closing the loop keeps the two tied.
+- `summary()` reports `analysis_in_sync: true` only when the stamp matches.
+
+A missing or stale stamp reads as `false`, never as fine.
+An analysis that cannot be *shown* to match is reported as out of sync, because the failure being guarded against is silent by nature - two valid-looking resources and two different `best` values.
+This means an analysis persisted before the stamp existed reads as out of sync until the next upload re-stamps it, which is the honest answer rather than a convenient one.
+
+The join lives in the `/api/campaign` route, not in `CampaignStore`, so the store keeps no knowledge of `_LATEST`.
 
 ## Re-analyze = the loop closing
 
@@ -172,13 +193,17 @@ This adds no engine capability - it is the same `_analyze` the upload path runs,
 `campaign.json` is fully guarded by the `generation` token. `/api/latest` (`_LATEST`) is a *separate* resource with its own lock, and the upload path takes the two locks in the opposite order from the re-analyze path, so they cannot be spanned by a single lock without risking a deadlock.
 The route therefore re-checks the generation once more immediately before `_save_latest` and skips the write if a fresh upload reseeded in between (that upload already published its own newer analysis).
 This eliminates the entire multi-second race across `_analyze` and closes the upload-lands-after-commit case; a sub-millisecond window between the final re-check and `_save_latest` remains.
-Fully sealing it would require an ordered generation stamp on `_LATEST` itself so an older analysis can never overwrite a newer one - a deliberate follow-up, not shipped here, and negligible for a single-local-user localhost portal.
+
+`_LATEST` now carries a `campaign_generation` stamp (see "Analysis/campaign coherence" above), so a write landing in that residual window no longer goes undetected: the published analysis and the live campaign disagree, and `GET /api/campaign` reports `analysis_in_sync: false`.
+The stamp makes the divergence *visible*, which is what matters for a single-local-user localhost portal.
+It does not yet *prevent* the write - refusing an out-of-order `_save_latest` outright would need the stamp to be ordered rather than a random token, which remains a deliberate follow-up.
 
 ## Honesty constraints (do not regress)
 
 - `best` is measured, never predicted.
 - A run is only foldable once it has a real measured `result`; an awaiting run never silently becomes a data point.
 - Re-analyze routes through the same leakage-controlled `_analyze`, so grouped-CV reliability, conformal bands, and the "not modeled" callouts stay first-class each round.
+- A campaign never claims the analysis on `/api/latest` describes its dataset unless it provably does (`analysis_in_sync`); unverifiable reads as out of sync.
 
 ## Frontend contract (kalos-web)
 
