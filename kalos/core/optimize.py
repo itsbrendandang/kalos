@@ -13,6 +13,13 @@ When the design space has categorical dimensions (`cat_dims`), the continuous
 continuous coordinates for every categorical assignment and keeps the best. For
 a large categorical space that enumeration is skipped in favor of
 `optimize_acqf_mixed_alternating`.
+
+Recipes that are already running but not yet measured are passed as `pending`
+and become the acquisition's `X_pending`. Without them a re-proposal after a
+partial round is computed as if the in-flight runs did not exist, so the
+optimizer happily proposes a recipe already incubating in the shaker: the
+scientist spends budget twice on one point and the round returns less
+information than it cost.
 """
 from __future__ import annotations
 
@@ -45,6 +52,7 @@ def propose(
     *,
     cat_dims: list[int] | None = None,
     cat_cardinalities: list[int] | None = None,
+    pending: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return `q` proposed points (shape q x d) maximizing constrained-free qLogNEI.
 
@@ -54,6 +62,15 @@ def propose(
     `cat_cardinalities` gives the number of levels for each, aligned to
     `cat_dims`. With no categoricals the continuous `optimize_acqf` path is
     unchanged.
+
+    `pending` is an optional `(m, d)` block of recipes that have been STARTED but
+    not yet measured. They are handed to the acquisition as `X_pending`, which
+    integrates over their unknown outcomes, so the batch returned here explores
+    away from work already in flight instead of re-proposing it. Rows that are
+    not encodable in this design (wrong width, non-finite) are dropped rather
+    than raising: a malformed in-flight record must not be able to block the
+    optimizer from proposing anything at all. Pass `None` (the default) when
+    nothing is running, which leaves the acquisition unchanged.
 
     Every returned coordinate is clamped into `[lower, upper]` per feature so a
     proposal can never fall outside the observed design box. This guards against
@@ -72,8 +89,12 @@ def propose(
     # Noisy EI over the observed baseline (titer/yield are noisy), pruning baseline
     # points that cannot be optimal so the acquisition stays cheap. X_baseline is
     # the raw training design; the model applies its input transform internally.
+    X_pending = _sanitize_pending(pending, lower, upper, cat_dims)
     acq = qLogNoisyExpectedImprovement(
-        surrogate.model, X_baseline=surrogate._X, prune_baseline=True
+        surrogate.model,
+        X_baseline=surrogate._X,
+        prune_baseline=True,
+        X_pending=X_pending,
     )
     if cat_dims:
         candidates = _optimize_mixed(
@@ -98,6 +119,45 @@ def propose(
     for j in cat_dims or []:
         out[:, j] = np.rint(out[:, j])
     return out
+
+
+def _sanitize_pending(
+    pending,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    cat_dims: list[int] | None,
+) -> torch.Tensor | None:
+    """Coerce `pending` into an `(m, d)` tensor of in-flight design points, or None.
+
+    Applies the same discipline the returned proposals get: coordinates are
+    clamped into the design box and categorical coordinates are snapped to their
+    integer level codes, so an in-flight recipe recorded slightly outside the box
+    (a hand-typed value, a unit round-trip) still marks the right neighborhood as
+    taken instead of being silently ignored or corrupting the acquisition.
+
+    Returns None - meaning "no pending points", the unchanged acquisition - when
+    `pending` is None, empty, or has no usable row. A row is unusable if it is
+    not finite; rows are dropped individually. A block whose width does not match
+    the design is rejected wholesale (it is a caller bug, not a bad row), again by
+    returning None rather than raising, because failing to propose is a worse
+    outcome than proposing without the pending penalty.
+    """
+    if pending is None:
+        return None
+    arr = np.asarray(pending, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return None
+    if arr.shape[1] != lower.shape[0]:
+        return None
+    arr = arr[np.isfinite(arr).all(axis=1)]
+    if arr.shape[0] == 0:
+        return None
+    arr = np.clip(arr, lower, upper)
+    for j in cat_dims or []:
+        arr[:, j] = np.rint(arr[:, j])
+    return torch.as_tensor(arr, dtype=DTYPE, device=DEVICE)
 
 
 def _optimize_mixed(
