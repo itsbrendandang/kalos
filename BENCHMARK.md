@@ -168,3 +168,31 @@ It races BO / feasibility-gated BO / random on both the reproducible objective (
 - The real-data pool benchmark uses client data that is NOT committed; `kalos/bench/pool.py` takes a DataFrame, so the code stays reproducible and data-free. Point it at a run sheet to reproduce the numbers above.
 - The real-data numbers in the update section are reproducible from the private `bioqore-data` store (referenced via the `BIOQORE_DATA` env var); no client data is committed to this repo.
 - Noise (synthetic) is expressed as a fraction of each surface's output scale, so it is comparable across surfaces with different units.
+
+## The other kind of waste: a round that repeats itself
+
+Everything above measures whether the optimizer picks *good* recipes.
+A separate question is whether it picks *new* ones.
+
+A campaign round is not atomic.
+Five recipes are proposed, the scientist starts them, some assays come back before the others, and the loop is re-analyzed on what has landed so far.
+The runs still incubating have no outcome, so they cannot join the fit - and until the acquisition was told about them separately, it treated their region of the design space as unexplored and proposed them again.
+That is budget spent twice for one point of information, and it is invisible in a regret curve, because regret only counts what was measured.
+
+`kalos/bench/pending.py` measures it directly.
+Fit a GP on a 4-factor design, propose a batch (the recipes that go into the incubator), then re-propose under a fresh optimizer seed - once blind, once with the first batch passed as `pending` - and count how many new recipes land within 0.05 (in the unit design box) of one already running.
+
+```bash
+python -m kalos.bench --pending
+```
+
+| re-proposal | duplicated recipes per round (mean of 5) | worst seed | per-seed |
+| --- | --- | --- | --- |
+| blind | **2.10** | 4 of 5 | 2, 1, 2, 4, 3, 1, 1, 1, 3, 3 |
+| pending-aware | **0.00** | 0 of 5 | all zero |
+
+The surface is a smooth single optimum on purpose: that is the case where a blind re-proposal is *least* likely to collide, because the acquisition's own q-batch diversity already spreads one batch out.
+Roughly 40% of a mid-round batch was repeat work even there.
+
+Unlike the feasibility classifier above, this one is not a claim about finding better recipes.
+It is a claim about not paying twice for the same experiment, and it is the kind of waste that only appears once the loop is actually being run in rounds rather than benchmarked in one shot.

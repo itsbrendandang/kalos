@@ -2,6 +2,34 @@
 
 Newest first.
 
+## 2026-08-19 (in-flight runs are not proposed again)
+
+### Fixed - the acquisition now knows what is already running
+
+A campaign round is not atomic. Five recipes are proposed, the scientist starts them, some assays come back before the others, and the loop is re-analyzed on what has landed so far. The runs still incubating have no outcome, so they cannot join the fit - and the acquisition was never told about them separately, so it treated their region of the design space as unexplored and proposed them again.
+
+That is budget spent twice for one point of information, and it is invisible in a regret curve, because regret only counts what was measured.
+
+`kalos/bench/pending.py` measures it (`python -m kalos.bench --pending`). On a 4-factor design at `q=5` over 10 seeds:
+
+| re-proposal | duplicated recipes per round (of 5) | worst seed |
+| --- | --- | --- |
+| blind | **2.10** | 4 of 5 |
+| pending-aware | **0.00** | 0 of 5 |
+
+Roughly 40% of a mid-round batch was repeat work. The surface is a smooth single optimum on purpose: that is the case where a blind re-proposal is *least* likely to collide, because the acquisition's own q-batch diversity already spreads one batch out.
+
+**The plumbing.**
+
+- `kalos/core/optimize.py`: `propose(..., pending=)` feeds BoTorch's `X_pending`, which integrates over the unknown outcomes of started runs. Pending points get the same discipline the returned proposals already get - clamped into the design box, categorical coordinates snapped to integer level codes - so an in-flight recipe recorded slightly outside the box still marks the right neighborhood as taken. A malformed row is dropped individually rather than raising: failing to propose anything at all is a worse outcome than proposing without the pending penalty.
+- `kalos/portal/analysis.py`: `_analyze(..., pending=)` encodes in-flight recipes into the same design as the fitted rows (continuous components zero-filled like `Xc_zf`, categoricals through the fitted level codes). A recipe naming a level that does not exist in this design is dropped rather than placed at a guessed coordinate, and `n_pending_considered` reports how many actually reached the optimizer - what was used, not what was offered.
+- `kalos/portal/campaign.py`: `awaiting_recipes(tenant)` returns the started-but-unmeasured runs. Read outside the plan/commit transaction on purpose: a run started in that gap is simply absent from the list, which costs the acquisition one in-flight point of information and nothing else.
+- `kalos/portal/campaign_routes.py`: `reanalyze` passes them to `_analyze`.
+
+**The honesty constraint holds.** An awaiting run informs the *acquisition*, as a point already taken. It never informs the *fit* - it has no measured outcome, and a run without an outcome must never become a data point.
+
+**Not to be confused with the feasibility result.** `BENCHMARK.md` already tested gating acquisition by a feasibility classifier on the real media DoE and found it changed nothing (`bo_feas` was identical to `bo`). This is not a claim about finding better recipes. It is a claim about not paying twice for the same experiment, and it is the kind of waste that only appears once the loop is run in rounds rather than benchmarked in one shot.
+
 ## 2026-08-09 (GP-native response shapes)
 
 ### Added - `kalos/core/gp_shape.py`: interior optima and feature relevance from the GP that proposes

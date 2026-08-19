@@ -99,7 +99,7 @@ A fresh upload starts a fresh campaign (new base, empty pending, round 0).
 | GET | `/api/campaign` | - | Campaign summary for the `/decide` view (below), or `{"has_campaign": false}` before any upload. |
 | POST | `/api/campaign/start` | `{"recipes": [{recipe, pred, std, mode, reason}]}` | Append each recipe as a pending awaiting run. Returns the appended runs with ids. |
 | POST | `/api/campaign/result` | `{"id": "...", "value": 3.2}` | Set the measured outcome on a pending run. 400 on unknown id or non-finite value. |
-| POST | `/api/campaign/reanalyze` | - | Fold every measured pending run into base rows, run `_analyze` on the grown dataset, and commit + `_save_latest`. Returns `{analysis, campaign}`. Awaiting runs stay pending. `400` if there is nothing new to fold; `409` if the campaign was reseeded mid-analysis (retry). See below. |
+| POST | `/api/campaign/reanalyze` | - | Fold every measured pending run into base rows, run `_analyze` on the grown dataset, and commit + `_save_latest`. Returns `{analysis, campaign}`. Awaiting runs stay pending, and are passed to the acquisition as in-flight points so the new batch does not re-propose them. `400` if there is nothing new to fold; `409` if the campaign was reseeded mid-analysis (retry). See below. |
 
 `GET /api/campaign` response:
 
@@ -186,7 +186,24 @@ What each step guarantees:
 4. **`_save_latest`** publishes the fresh analysis to `/api/latest`, then the route returns it (same shape `GET /api/latest` returns) plus the updated campaign.
 
 The next `/api/latest` and the next `GET /api/campaign` both reflect the folded-in data, so `/decide` shows a batch that accounts for the results just logged.
-This adds no engine capability - it is the same `_analyze` the upload path runs, on a dataset that grew by one round.
+It is the same `_analyze` the upload path runs, on a dataset that grew by one round, plus the in-flight block described next.
+
+### Runs still in the incubator
+
+A round is not atomic.
+Five recipes are proposed, the scientist starts them, two come back first, and the loop is re-analyzed on what has landed.
+The three still incubating have no outcome, so they never enter the fold and never enter the fit - which for a while meant the acquisition could not see them at all, and treated their region of the design space as unexplored.
+It then proposed them again, and the round spent part of its budget re-running an experiment already underway.
+
+So `reanalyze` reads `store.awaiting_recipes(tenant)` alongside `plan_fold`, and hands it to `_analyze` as `pending`.
+`_analyze` encodes those recipes into the same design as the fitted rows (continuous components zero-filled, categoricals mapped through the fitted level codes) and passes them to the acquisition as BoTorch's `X_pending`, which integrates over their unknown outcomes.
+A recipe naming a categorical level that does not exist in this design is dropped rather than placed at a guessed coordinate; `n_pending_considered` in the analysis result reports how many actually reached the optimizer, so the number is what was used and not what was offered.
+
+Measured on a 4-factor design at `q=5` over 10 seeds (`python -m kalos.bench --pending`), a blind re-proposal repeated a mean of **2.1 of its 5** recipes (4 of 5 on the worst seed) against recipes already in flight.
+With the pending block it repeats none.
+
+`awaiting_recipes` is read outside the plan/commit transaction on purpose.
+A run started in that gap is simply absent from the list, which costs the acquisition one in-flight point of information and nothing else - there is no state to corrupt, and no reason to widen the transaction for it.
 
 ### A note on `/api/latest` and the residual window
 
@@ -201,7 +218,7 @@ It does not yet *prevent* the write - refusing an out-of-order `_save_latest` ou
 ## Honesty constraints (do not regress)
 
 - `best` is measured, never predicted.
-- A run is only foldable once it has a real measured `result`; an awaiting run never silently becomes a data point.
+- A run is only foldable once it has a real measured `result`; an awaiting run never silently becomes a data point. It informs the *acquisition* (as a point already taken), never the *fit*.
 - Re-analyze routes through the same leakage-controlled `_analyze`, so grouped-CV reliability, conformal bands, and the "not modeled" callouts stay first-class each round.
 - A campaign never claims the analysis on `/api/latest` describes its dataset unless it provably does (`analysis_in_sync`); unverifiable reads as out of sync.
 
