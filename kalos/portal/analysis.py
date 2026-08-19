@@ -10,6 +10,7 @@ import gc
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
 import numpy as np
@@ -394,6 +395,7 @@ def _analyze(
     anonymize: bool = False,
     roles: ColumnRoles | None = None,
     profile: DomainProfile = BIOPROCESS_PROFILE,
+    pending: pd.DataFrame | Sequence[Mapping[str, Any]] | None = None,
 ) -> dict:
     """Run the engine on an arbitrary run sheet: pick the target (the value to
     maximize), use the process INPUTS as features (other measured outputs are
@@ -405,6 +407,13 @@ def _analyze(
     reproduces the original behavior). `roles.categoricals` marks feature columns
     whose values are unordered labels; the engine fits a mixed GP over them and
     proposals decode back to labels.
+
+    `pending` carries the recipes that are already RUNNING but not yet measured
+    (the campaign's awaiting runs). They have no target value, so they cannot
+    join the fit; they are encoded into the same design and handed to the
+    acquisition as in-flight points, so the proposed batch does not spend budget
+    re-running an experiment currently in the incubator. Omit it (the default)
+    and the proposal path is unchanged.
 
     Deterministic: seeds torch + numpy up front so the same sheet gives the same
     proposals. Returns a per-column `provenance` report (what was kept/dropped and
@@ -550,8 +559,8 @@ def _analyze(
         dims.append(Dimension(str(c), "categorical", levels=cat_dims_map[c]))
     design = DesignSpace(tuple(dims))
 
+    code_maps = {c: {lvl: i for i, lvl in enumerate(cat_dims_map[c])} for c in kept_cats}
     if kept_cats:
-        code_maps = {c: {lvl: i for i, lvl in enumerate(cat_dims_map[c])} for c in kept_cats}
         cat_cols = [
             df.loc[keep_index, c].fillna("").astype(str).str.strip().map(code_maps[c]).to_numpy(float)
             for c in kept_cats
@@ -741,7 +750,20 @@ def _analyze(
     # proposed next batch, with predicted target + uncertainty + a why per row
     if not replicate_aware:
         s = Surrogate().fit(X, y, bounds=bounds, cat_dims=cat_dims)
-    batch = propose(s, bounds, q=5, cat_dims=cat_dims, cat_cardinalities=cat_cardinalities)
+    # In-flight recipes, encoded into this design so the acquisition treats them
+    # as taken. Encoding can drop rows (a recipe naming an unknown categorical
+    # level cannot be placed in the design at all), so the count actually used is
+    # reported rather than assumed equal to what the caller passed.
+    X_pending = _encode_pending(pending, cont_feats, kept_cats, code_maps, X.shape[1])
+    n_pending = 0 if X_pending is None else int(X_pending.shape[0])
+    batch = propose(
+        s,
+        bounds,
+        q=5,
+        cat_dims=cat_dims,
+        cat_cardinalities=cat_cardinalities,
+        pending=X_pending,
+    )
     show = [d["name"] for d in drv[:4]]
     show_idx = [d["_idx"] for d in drv[:4]]  # carry the feature index, not a name lookup
     for d in drv:
@@ -818,6 +840,10 @@ def _analyze(
         "categorical_features": [str(c) for c in kept_cats],
         "n_dropped_incomplete": n_dropped_incomplete,
         "proposal_optimizer": proposal_optimizer,
+        # In-flight recipes the acquisition was told about. 0 means the batch was
+        # computed as if nothing were running - true for a one-shot upload, and
+        # the thing to check first if a round re-proposes work already started.
+        "n_pending_considered": n_pending,
         "cv_spearman": None if rho != rho else round(rho, 3),
         "cv_ci95": ci95,
         "cv_n_groups": rep["n_groups"],
@@ -858,6 +884,58 @@ def _analyze(
     if anonymize:
         result = _anonymize_result(result)
     return result
+
+
+
+def _encode_pending(
+    pending: "pd.DataFrame | Sequence[Mapping[str, Any]] | None",
+    cont_feats: list,
+    kept_cats: list,
+    code_maps: dict,
+    width: int,
+) -> np.ndarray | None:
+    """Encode in-flight recipes into the fitted design's X layout, or None.
+
+    Mirrors how the FITTED rows are built, so a pending recipe lands at the same
+    coordinates its measured counterpart would: continuous components are coerced
+    to numeric and zero-filled (the same `Xc_zf` convention), categoricals are
+    mapped through the level codes derived from the fitted rows, and the columns
+    are assembled continuous-first, categorical-last.
+
+    A row is DROPPED when a kept categorical is missing, blank, or names a level
+    that does not exist in this design: such a recipe has no coordinate here, and
+    inventing one (say, code 0) would mark the wrong region of the space as taken.
+    Returns None when nothing is left to report, which leaves the acquisition
+    exactly as it is today. Never raises - a malformed in-flight record must
+    degrade the proposal's information, not fail the analysis.
+    """
+    if pending is None:
+        return None
+    frame = pending if isinstance(pending, pd.DataFrame) else pd.DataFrame(list(pending))
+    if frame.empty:
+        return None
+    cols: list[np.ndarray] = []
+    for c in cont_feats:
+        if c in frame.columns:
+            cols.append(pd.to_numeric(frame[c], errors="coerce").fillna(0.0).to_numpy(float))
+        else:
+            cols.append(np.zeros(len(frame), dtype=float))
+    usable = np.ones(len(frame), dtype=bool)
+    for c in kept_cats:
+        codes = np.full(len(frame), np.nan)
+        if c in frame.columns:
+            labels = frame[c].fillna("").astype(str).str.strip()
+            codes = labels.map(code_maps[c]).to_numpy(dtype=float)
+        usable &= np.isfinite(codes)
+        cols.append(codes)
+    if not cols:
+        return None
+    arr = np.column_stack(cols)
+    usable &= np.isfinite(arr).all(axis=1)
+    arr = arr[usable]
+    if arr.shape[0] == 0 or arr.shape[1] != width:
+        return None
+    return arr
 
 
 @functools.lru_cache(maxsize=8)
