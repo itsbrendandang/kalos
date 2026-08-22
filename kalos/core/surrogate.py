@@ -224,13 +224,28 @@ class Surrogate:
         self._cat_dims = cats or None
         return self
 
-    def posterior(self, X):
-        """Return (mean, std) in the target's original units."""
+    def posterior(self, X, *, observation_noise: bool = False):
+        """Return (mean, std) in the target's original units.
+
+        `observation_noise` selects WHICH question the `std` answers, and the two
+        are not interchangeable:
+
+          - `False` (the default, unchanged): the posterior over the LATENT
+            response surface. This is uncertainty about the process itself, which
+            is what an acquisition function reasons about and what a proposal's
+            `+/-` describes.
+          - `True`: the predictive distribution for a NEW MEASUREMENT at `X`,
+            latent uncertainty plus the fitted assay noise. This is the only one
+            that can be checked against a held-out reading, because a held-out
+            reading carries assay noise and the latent band does not. Scoring
+            observations against the latent band under-covers by construction and
+            would read as a badly overconfident model on any noisy assay.
+        """
         assert self.model is not None, "fit() first"
         Xt = torch.as_tensor(np.asarray(X, float), dtype=DTYPE, device=DEVICE)
         self.model.eval()
         with torch.no_grad():
-            post = self.model.posterior(Xt)
+            post = self.model.posterior(Xt, observation_noise=observation_noise)
             mean = post.mean.squeeze(-1).cpu().numpy()
             std = post.variance.clamp_min(1e-12).sqrt().squeeze(-1).cpu().numpy()
         return mean, std

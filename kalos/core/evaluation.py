@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Iterator, Sequence, Tuple
 
 import numpy as np
-from scipy.stats import spearmanr
+from scipy.stats import norm, spearmanr
 
 from .splits import make_splits, row_hash_groups
 from .surrogate import Surrogate
@@ -30,7 +30,20 @@ def grouped_folds(groups: Sequence, n_splits: int = 5) -> Iterator[Tuple[np.ndar
 
 def _oof(X, y, groups, n_splits, bounds, cat_dims=None):
     """Pooled out-of-fold predictions under one fixed normalization box.
-    Returns (pred, actual, group, n_folds).
+    Returns (pred, std, actual, group, n_folds).
+
+    The posterior STANDARD DEVIATION is kept alongside the mean, because it is
+    the only thing that makes the surrogate's uncertainty falsifiable: with
+    held-out mean, sd, and truth in hand, `interval_calibration` can ask whether
+    a stated 90% band actually covers 90%. Discarding it was why calibration had
+    to be reported as unmeasured.
+
+    It is the PREDICTIVE sd (`observation_noise=True`) - latent uncertainty plus
+    fitted assay noise - not the latent band the acquisition uses. The held-out
+    value it will be compared against is a measurement, and a measurement carries
+    assay noise; scoring one against the latent band under-covers by
+    construction, which would report every noisy assay as a wildly overconfident
+    model.
 
     `cat_dims` (optional) marks categorical columns so each fold is fit with the
     same mixed GP the deployed model uses; omitted, every fold is the continuous
@@ -46,17 +59,24 @@ def _oof(X, y, groups, n_splits, bounds, cat_dims=None):
     # what actually ships.
     if bounds is None and len(X):
         bounds = np.vstack([X.min(axis=0), X.max(axis=0)])
-    pred, actual, grp, n_folds = [], [], [], 0
+    pred, sd, actual, grp, n_folds = [], [], [], [], 0
     for tr, te in make_splits(X, y, groups, n_splits=n_splits):
         if len(tr) < 4 or len(te) < 1:
             continue
         n_folds += 1
         s = Surrogate().fit(X[tr], y[tr], bounds=bounds, cat_dims=cat_dims)
-        mean, _ = s.posterior(X[te])
+        mean, std = s.posterior(X[te], observation_noise=True)
         pred.extend(np.asarray(mean).ravel().tolist())
+        sd.extend(np.asarray(std).ravel().tolist())
         actual.extend(y[te].tolist())
         grp.extend(groups[te].tolist())
-    return np.asarray(pred), np.asarray(actual), np.asarray(grp, dtype=object), n_folds
+    return (
+        np.asarray(pred),
+        np.asarray(sd),
+        np.asarray(actual),
+        np.asarray(grp, dtype=object),
+        n_folds,
+    )
 
 
 def _spearman(pred, actual) -> float:
@@ -70,7 +90,7 @@ def grouped_cv_spearman(X, y, groups=None, n_splits: int = 5, bounds=None) -> fl
     """Pooled out-of-fold Spearman of the surrogate, leakage-controlled by group.
     Pools OOF predictions instead of averaging tiny per-fold rhos (which can only
     be +/-1 at this n), so the number reflects held-out ranking on real scale."""
-    pred, actual, _, _ = _oof(X, y, groups, n_splits, bounds)
+    pred, _sd, actual, _, _ = _oof(X, y, groups, n_splits, bounds)
     return _spearman(pred, actual)
 
 
@@ -85,7 +105,7 @@ def grouped_cv_report(
 
     `cat_dims` (optional) marks categorical columns so the CV evaluates the same
     mixed GP the deployed model uses; omitted, behavior is unchanged."""
-    pred, actual, grp, n_folds = _oof(X, y, groups, n_splits, bounds, cat_dims=cat_dims)
+    pred, sd, actual, grp, n_folds = _oof(X, y, groups, n_splits, bounds, cat_dims=cat_dims)
     point = _spearman(pred, actual)
     uniq = np.unique(grp)
     lo = hi = float("nan")
@@ -109,6 +129,9 @@ def grouped_cv_report(
         "n_folds": int(n_folds),
         "oof_actual": actual.tolist(),
         "oof_pred": pred.tolist(),
+        # Held-out posterior sd, so a caller can check whether the model's stated
+        # uncertainty is honest (`interval_calibration`) instead of assuming it.
+        "oof_std": sd.tolist(),
     }
 
 
@@ -159,4 +182,111 @@ def producer_only_spearman(
     }
 
 
-__all__ = ["grouped_cv_spearman", "grouped_cv_report", "grouped_folds", "producer_only_spearman"]
+CALIBRATION_LEVELS: tuple[float, ...] = (0.5, 0.8, 0.9, 0.95)
+# The nominal central intervals coverage is checked at. Four levels, spanning
+# from the middle of the distribution to its tail, so a model that is honest at
+# 50% but overconfident at 95% cannot hide behind a single number.
+
+MIN_CALIBRATION_N = 10
+# Below this many held-out points, an empirical coverage rate is not a
+# measurement: at n=6 the achievable rates are 0, 1/6, 2/6, ..., so the nearest
+# attainable value to a nominal 0.90 is 0.833 and the "error" is an artifact of
+# the grid. Declining is more honest than reporting that.
+
+
+def interval_calibration(
+    oof_actual, oof_pred, oof_std, *, levels: Sequence[float] = CALIBRATION_LEVELS
+) -> dict:
+    """Is the surrogate's stated uncertainty honest on held-out runs?
+
+    A posterior mean that ranks well can still be badly calibrated: the ranking
+    is right and every interval is half the width it should be. A scientist
+    reading "predicted 4.2 +/- 0.3" acts on the 0.3, so an overconfident band is
+    its own failure mode, independent of `spearman`.
+
+    For each nominal central level (0.9 means the +/-1.645 sigma interval), this
+    counts how often the held-out truth actually fell inside. Perfect
+    calibration puts empirical coverage on the nominal for every level.
+
+    Returns `ece` as the mean absolute gap between nominal and empirical
+    coverage across `levels`. That is the interval analogue of a classifier's
+    expected calibration error, on the same 0-to-1 scale `GatesConfig.max_ece`
+    is written against, so the promotion gate can finally read a number here
+    instead of blocking on an unmeasured metric.
+
+    `z_std` is the standard deviation of the held-out z-scores
+    `(actual - pred) / sd`, which says WHICH WAY a miscalibrated model is wrong
+    in one number: 1.0 is calibrated, above 1.0 means the bands are too narrow
+    (overconfident), below 1.0 too wide.
+
+    ASSUMPTION, stated because it is doing real work: coverage is computed from
+    Gaussian quantiles of the posterior sd, so this measures whether the GP's
+    own Gaussian band is honest. It is not distribution-free - that is what
+    `kalos.core.conformal` is for, and the two answer different questions. Under
+    grouped CV the held-out points are not iid either, so treat this as a
+    diagnostic, not a guarantee.
+
+    Never raises on data. Returns `available=False` with a reason - and `ece` /
+    `z_std` as `None`, not NaN, because this dict is serialized into an API
+    response and NaN is not valid JSON - when there is not enough held-out data,
+    or no usable positive sd, to measure anything.
+    """
+    actual = np.asarray(oof_actual, dtype=float).reshape(-1)
+    pred = np.asarray(oof_pred, dtype=float).reshape(-1)
+    sd = np.asarray(oof_std, dtype=float).reshape(-1)
+    if not (actual.shape == pred.shape == sd.shape):
+        raise ValueError("oof_actual, oof_pred and oof_std must be the same length")
+
+    usable = np.isfinite(actual) & np.isfinite(pred) & np.isfinite(sd) & (sd > 0)
+    n = int(usable.sum())
+    # `None`, never NaN: this dict is serialized straight into an API response,
+    # and NaN is not valid JSON - `json.dumps` rejects it and the request 500s.
+    # It also reads correctly, since there is no number to report.
+    unavailable: dict = {
+        "available": False,
+        "n": n,
+        "ece": None,
+        "z_std": None,
+        "levels": [],
+    }
+    if n < MIN_CALIBRATION_N:
+        return {
+            **unavailable,
+            "reason": (
+                f"only {n} held-out points with a positive posterior sd; "
+                f"{MIN_CALIBRATION_N} are needed before an empirical coverage "
+                "rate is a measurement rather than a rounding grid"
+            ),
+        }
+
+    z = (actual[usable] - pred[usable]) / sd[usable]
+    rows: list[dict] = []
+    gaps: list[float] = []
+    for level in levels:
+        lv = float(level)
+        if not 0.0 < lv < 1.0:
+            raise ValueError("calibration levels must lie strictly between 0 and 1")
+        half = float(norm.ppf(0.5 + lv / 2.0))
+        empirical = float(np.mean(np.abs(z) <= half))
+        gaps.append(abs(empirical - lv))
+        rows.append({"nominal": round(lv, 4), "empirical": round(empirical, 4)})
+
+    return {
+        "available": True,
+        "reason": None,
+        "n": n,
+        "ece": round(float(np.mean(gaps)), 4),
+        "z_std": round(float(np.std(z, ddof=1)) if n > 1 else float("nan"), 4),
+        "levels": rows,
+    }
+
+
+__all__ = [
+    "grouped_cv_spearman",
+    "grouped_cv_report",
+    "grouped_folds",
+    "producer_only_spearman",
+    "interval_calibration",
+    "CALIBRATION_LEVELS",
+    "MIN_CALIBRATION_N",
+]

@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 
 from kalos.core.drivers import benjamini_hochberg, bootstrap_spearman, spearman_driver_matrix
-from kalos.core.evaluation import producer_only_spearman
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.gp_shape import gp_shape_report
@@ -49,6 +48,15 @@ from kalos.validation.checks import _RUN_ID_RE
 # torch/botorch/gpytorch stack (~220 MB) before any analysis ever runs. They
 # are imported lazily inside `_analyze`/`_seed_everything`, the only places
 # that actually need them. `kalos.domains` above is torch-free by contract.
+#
+# This is load-bearing and easy to break by accident: it was broken, by a single
+# top-level `from kalos.core.evaluation import producer_only_spearman` added for
+# one call inside `_analyze`. `evaluation` imports `surrogate`, so importing this
+# module pulled the whole stack (measured: 1.2s and `torch in sys.modules` right
+# after `import kalos.portal.analysis`) and the poller paid the tax it was
+# written to avoid. `tests/test_portal.py` now asserts the property instead of
+# trusting this comment. Every name from `kalos.core.evaluation` belongs in the
+# deferred block inside `_analyze`.
 
 # The default (bioprocess) column-role hints, kept as module-level names because
 # `_anonymize_result` and the provenance defaults reference them. Sourced from
@@ -423,7 +431,11 @@ def _analyze(
     # Deferred: these transitively import torch/botorch/gpytorch (see the
     # module-level note above). This is the one place in this module that
     # actually needs them, so this is where the torch tax is paid.
-    from kalos.core.evaluation import grouped_cv_report
+    from kalos.core.evaluation import (
+        grouped_cv_report,
+        interval_calibration,
+        producer_only_spearman,
+    )
     from kalos.core.optimize import MAX_MIXED_COMBOS, propose
     from kalos.core.surrogate import Surrogate
 
@@ -600,7 +612,7 @@ def _analyze(
     # group-level bootstrap CI, all through the single leakage-checked splitter.
     rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds, cat_dims=cat_dims)
     rho = rep["spearman"]
-    oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
+    oof_a, oof_p, oof_s = rep["oof_actual"], rep["oof_pred"], rep["oof_std"]
 
     # distribution-free +/- band from the pooled out-of-fold residuals (approximate
     # coverage under grouped CV). Honest alternative to the surrogate's own std,
@@ -610,8 +622,23 @@ def _analyze(
 
     # Honest reliability verdict: only what this path can actually assess. The
     # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
-    # NOT assert feasibility or calibration gates, which are not measured here.
+    # NOT assert the feasibility gate, which is not measured here.
     ci95 = None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)]
+
+    # CALIBRATION. A model can rank held-out runs correctly and still state every
+    # uncertainty at half its true width, and the scientist reading "4.2 +/- 0.3"
+    # is acting on the 0.3. The held-out posterior sd needed to check that was
+    # already computed inside the CV and then thrown away, so calibration was
+    # reported as unmeasured for want of a value the engine had already paid for.
+    # It is now kept and scored: `ece` is the mean gap between nominal and
+    # empirical coverage across four central intervals, on the same 0-to-1 scale
+    # `GatesConfig.max_ece` is written against, and `z_std` says which way a
+    # miscalibrated model errs (above 1.0 = bands too narrow).
+    #
+    # Reported, NOT folded into `clears_floor`. Tightening the verdict changes
+    # which uploads the API accepts, which is a product decision - the same line
+    # `producer_clears_floor` sits on.
+    calibration = interval_calibration(oof_a, oof_p, oof_s)
 
     # PRODUCER-ONLY ranking. The pooled `rho` above is taken over every held-out
     # row, producers and non-producers together, so a model can score well on it
@@ -641,9 +668,17 @@ def _analyze(
         "n_producers": int(prod["n_producers"]),
         "producer_threshold": float(prod["threshold"]),
         "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
+        # Held-out coverage of the GP's own Gaussian bands. `available` is false
+        # on a sheet with too few out-of-fold points for a coverage rate to mean
+        # anything, and the matching "calibration" line stays in `unmodeled`.
+        "calibration": calibration,
         "unmodeled": [
             "feasibility probability",
-            "calibration (ECE)",
+            *(
+                []
+                if calibration["available"]
+                else ["calibration (ECE): " + str(calibration["reason"])]
+            ),
             "scale-up transfer",
             *(
                 []
@@ -677,16 +712,39 @@ def _analyze(
     # BH runs over every tested feature BEFORE the top-k cut, never after -
     # correcting for 8 tests when 30 were performed would understate the very
     # multiplicity it exists to control.
+    #
+    # THE UNIT OF ANALYSIS IS THE RECIPE, NOT THE ROW. Both tests above ask "how
+    # surprising is this association, given how much independent evidence there
+    # is?", and on a replicated sheet a row is not independent evidence: three
+    # wells of one recipe carry one recipe's worth of information about the
+    # process, plus three draws of assay noise. Testing rows counts them as three,
+    # so the p-value that feeds BH is computed against an `n` the sheet does not
+    # have, and BH stops correcting anything.
+    #
+    # That is not a rounding error. Re-running the 30-noise-feature simulation on
+    # 20 recipes x 3 replicates (300 reports, the replication depth a media DoE
+    # actually ships with) put a "significant" driver in 87.0% of reports, against
+    # 7.3% for the same 60 rows drawn independently. Collapsing replicates to
+    # recipe means first brings it back to 8.0%; a cluster bootstrap alone does
+    # not (82.5%), because the row-level p-values are what BH is reading.
+    #
+    # So the panel is computed on replicate-averaged rows, keyed by the same
+    # `recipe_key` the CV grouping and the noise floor already use. On a sheet
+    # with no replicates every group is a singleton and `aggregate_replicates` is
+    # an exact no-op, so unreplicated uploads are unchanged.
     drv: list[dict[str, Any]] = []
     n_tested = len(cont_feats)
+    n_driver_units = int(len(y))
     if cont_feats:
         names = [str(c) for c in cont_feats]
-        Xcont = X[:, : len(cont_feats)]
-        matrix = spearman_driver_matrix(Xcont, y, feature_names=names)
+        Xr, yr, _rv, _rn = aggregate_replicates(X, y, groups=recipe_key)
+        n_driver_units = int(Xr.shape[0])
+        Xcont = Xr[:, : len(cont_feats)]
+        matrix = spearman_driver_matrix(Xcont, yr, feature_names=names)
         point = np.asarray(matrix["rho"]).astype(float)
         pvals = np.asarray(matrix["pvals"]).astype(float)
         bh_survives = benjamini_hochberg(pvals, q=DRIVER_FDR_Q)
-        boot = bootstrap_spearman(Xcont, y, feature_names=names)
+        boot = bootstrap_spearman(Xcont, yr, feature_names=names)
         boot_lo = np.asarray(boot["lo"], dtype=float)
         boot_hi = np.asarray(boot["hi"], dtype=float)
         for j, c in enumerate(cont_feats):
@@ -734,6 +792,10 @@ def _analyze(
     best_reproducible: float | None = None
     replicate_aware = False
     incumbent = best_single
+    # The rows the PROPOSAL surrogate is fit on. They stay the raw rows unless the
+    # replicate-aware swap below happens, and they are what the shape report has
+    # to be handed - see the `gp_shape_report` call for why that matters.
+    X_fit, y_fit = X, y
     if nr["n_replicated"] >= 1:
         Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y, groups=recipe_key)
         best_reproducible = float(yf.max())
@@ -746,6 +808,7 @@ def _analyze(
             per_point_var = float(sigma2) / np.maximum(n_reps_g, 1).astype(float)
             s = Surrogate().fit(Xf, yf, bounds=bounds, noise=per_point_var, cat_dims=cat_dims)
             incumbent = best_reproducible
+            X_fit, y_fit = Xf, yf
 
     # proposed next batch, with predicted target + uncertainty + a why per row
     if not replicate_aware:
@@ -785,10 +848,20 @@ def _analyze(
     #
     # Continuous features only, matching the driver panel: a swept axis has to be
     # a measurement, not an integer category code.
+    #
+    # `X_fit`/`y_fit` are the rows this surrogate was actually fit on, which is
+    # the contract `gp_shape_report` states and, on the replicate-aware path, is
+    # NOT the raw sheet. It sweeps each feature through the incumbent - the row
+    # with the best measured target - and on raw rows that is `best_single`, the
+    # luckiest single well. Anchoring the shapes there re-introduces exactly the
+    # noise spike the replicate-averaged fit exists to ignore, and it does it
+    # inside a GP that never saw that row. The observed spread it compares peak
+    # height against would be the raw spread too, assay noise included, which
+    # makes a real bump read as flat.
     gp_shapes = gp_shape_report(
         s,
-        Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0)),
-        y,
+        X_fit[:, : len(cont_feats)] if cont_feats else np.empty((len(y_fit), 0)),
+        y_fit,
         feature_names=[str(c) for c in cont_feats],
         cv_spearman=None if rho != rho else float(rho),
         rho_floor=RELIABILITY_SPEARMAN_FLOOR,
@@ -860,6 +933,13 @@ def _analyze(
             "fdr_q": DRIVER_FDR_Q,
             "n_bootstrap": 200,
             "ranked_by": "abs_rho",
+            # The unit of analysis, stated rather than assumed. Replicates of one
+            # recipe are averaged before the panel runs, so `n_units` (not the row
+            # count) is the independent evidence every p-value and CI is computed
+            # against. On an unreplicated sheet the two are equal.
+            "unit": "recipe",
+            "n_units": n_driver_units,
+            "n_rows": int(len(y)),
         },
         "reliability": reliability,
         "best": round(best_single, 4),
