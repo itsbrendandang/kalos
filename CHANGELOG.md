@@ -2,6 +2,111 @@
 
 Newest first.
 
+## 2026-08-22 (the unit of analysis is the recipe)
+
+### Fixed - the driver panel counted replicates as independent evidence
+
+Every other statistic in the engine knows that three wells of one recipe are not
+three independent runs. The CV groups by recipe, the noise floor is estimated
+within recipe, the proposal is fit on the replicate-averaged objective. The
+driver panel was the one place that still counted rows.
+
+That is not a cosmetic inconsistency. Both tests behind `significant` - the
+bootstrap CI and the Benjamini-Hochberg correction - ask how surprising an
+association is given how much independent evidence stands behind it. Testing
+rows on a replicated sheet computes every p-value against an `n` the sheet does
+not have, so BH stops correcting anything, and BH is what the 2026-08 multiplicity
+fix rests on.
+
+Re-running that same simulation (30 pure-noise features, target independent of
+all of them, 300 reports) at the replication depth a media DoE actually ships
+with:
+
+| sheet | reports containing a "significant" driver |
+| --- | --- |
+| 60 independent rows | **7.3%** |
+| 20 recipes x 3 replicates | **87.0%** |
+| 20 recipes x 3 replicates, averaged first | **8.0%** |
+
+A cluster bootstrap alone does not fix it (82.5%): the row-level p-values are
+what BH reads, so the aggregation has to happen before the test rather than
+around it. The panel now runs on replicate-averaged rows keyed by the same
+`recipe_key` the CV grouping and the noise floor already use, and
+`driver_selection` states its unit (`unit`, `n_units`, `n_rows`) instead of
+leaving a client to infer it from `n_tested`.
+
+End to end, on a 60-row sheet whose target is independent of every column, the
+engine reported three significant drivers at p=0.0006, p=0.0034 and p=0.0036. It
+now reports none. On a sheet with no replicates every group is a singleton and
+the aggregation is an exact no-op, so unreplicated uploads are unchanged.
+
+### Fixed - `feasibility_cv_auc` raised on the data it exists to score
+
+The guard capped `n_splits` by the minority-class count but not by the number of
+groups, and those are different numbers: a replicated sheet can hold six
+non-producing rows across only four recipes. sklearn refuses to make more folds
+than there are groups, so the function raised `ValueError` against a docstring
+that promised it never raises.
+
+The value feeds the fail-closed promotion gate, and an exception is not a closed
+gate - it is a crash that skips the verdict. Unmeasurable now returns `nan`,
+which the gate blocks on.
+
+### Fixed - the shape report was anchored to the luckiest single well
+
+`gp_shape_report` sweeps each feature through the incumbent, the row with the
+best measured target, and states that its `X`/`y` are the rows the surrogate was
+fit on. On the replicate-aware path they were not: the surrogate is fit on
+replicate-averaged rows and the raw sheet was passed, so every sweep was anchored
+at `best_single` - a row that GP never saw, selected by taking a max over assay
+noise - while the proposals in the same response were scored against
+`best_reproducible`. Two incumbents, one response.
+
+Stated plainly, because it was measured rather than assumed: this is a
+consistency fix and not an accuracy win. Against a known interior optimum over 40
+seeds, mean absolute error in the reported optimum moved 0.177 -> 0.188 at an
+assay sd of 1.5 and 0.283 -> 0.270 at 3.5. The case for it is that the report now
+describes the model that produced the proposals, and no longer selects its anchor
+by maximizing noise.
+
+### Added - calibration is measured instead of disclaimed
+
+A model can rank held-out runs correctly and still quote every interval at half
+its true width, and the scientist reading "predicted 4.2 +/- 0.3" is acting on the
+0.3. `reliability.unmodeled` listed "calibration (ECE)" for a mechanical reason:
+the grouped CV computed a held-out posterior sd on every fold and then discarded
+it, keeping only the mean.
+
+It is kept now, and `interval_calibration` scores it: `ece` is the mean gap
+between nominal and empirical coverage across four central intervals, on the same
+0-to-1 scale `GatesConfig.max_ece` is written against, and `z_std` says which way
+a miscalibrated model errs. It is reported as `reliability.calibration` beside the
+verdict, never folded into `clears_floor` - tightening the verdict changes which
+uploads the API accepts, which is a product decision.
+
+WHICH band is scored turned out to matter more than the metric. `Surrogate.
+posterior` returns the LATENT band by default: uncertainty about the response
+surface, which is what the acquisition reasons over. A held-out value is a
+measurement and carries assay noise on top of that, so scoring observations
+against the latent band under-covers by construction. On a replicated sheet with
+an assay sd of 1.0 that read as z_std=3.20, ece=0.48 - a catastrophically
+overconfident model that was nothing of the kind. Against the predictive band
+(`Surrogate.posterior(..., observation_noise=True)`, new keyword, default
+unchanged) the same fit measures z_std=1.32, ece=0.09: mildly overconfident,
+which is true and useful. Assay noise is zero-mean, so no existing number moved -
+`cv_spearman` and `conformal_q` are asserted unchanged.
+
+### Fixed - the deferred-torch design had been quietly defeated
+
+`kalos/portal/analysis.py` documents that `kalos.core.evaluation`, `kalos.core.
+optimize` and torch are imported lazily, so the idle `--watch` poller and the
+portal do not pay a ~220 MB import for an analysis they may never run. A single
+top-level `from kalos.core.evaluation import producer_only_spearman`, added for
+one call site inside `_analyze`, had broken it: `evaluation` imports `surrogate`,
+so `import kalos.portal.analysis` cost 1.2s and pulled the whole stack. The
+intent lived only in a comment; `tests/test_portal.py` now asserts it in a
+subprocess.
+
 ## 2026-08-19 (in-flight runs are not proposed again)
 
 ### Fixed - the acquisition now knows what is already running

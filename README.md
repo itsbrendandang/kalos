@@ -17,9 +17,9 @@ kalos/
     surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
     optimize.py        qLogNEI acquisition + optimize_acqf -> next batch (in-flight runs as X_pending)
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
-    evaluation.py      grouped cross-validated Spearman (leakage-controlled)
+    evaluation.py      grouped cross-validated Spearman (leakage-controlled) + held-out interval calibration
     splits.py          group-aware CV + a leakage tripwire (assert_no_group_leakage)
-    drivers.py         signed Spearman drivers with bootstrap confidence intervals
+    drivers.py         signed Spearman drivers with bootstrap confidence intervals (tested per recipe, not per row)
     conformal.py       split-conformal prediction intervals (distribution-free)
     gates.py           fail-closed promotion gates
   kit/
@@ -219,8 +219,13 @@ into a new profile) and, if it has discrete choices, list them under
 - The push-feed ingestion loop (platform streams runs in; brain proposes the next
   batch; anonymized on read).
 - ~~Feasibility classifier + gated acquisition.~~ **Done** (`core/feasibility.py`,
-  `bo_feas` / `bo_feas_clean` strategies in `bench/pool.py`). Calibration (ECE/Brier)
-  for the promotion gates is still pending.
+  `bo_feas` / `bo_feas_clean` strategies in `bench/pool.py`).
+- ~~Calibration (ECE) for the promotion gates.~~ **Done**
+  (`core/evaluation.py::interval_calibration`, reported as `reliability.calibration`).
+  Held-out coverage of the GP's own predictive bands, on the same 0-to-1 scale
+  `GatesConfig.max_ece` is written against. Brier, and wiring `check_gates` into the
+  analysis path, are still pending — `feasibility_auc` has no caller there yet, so a
+  gate wired in today would fail closed on every upload.
 - ~~Replicate-aware aggregation + assay noise-floor estimation + optional
   fixed-noise GP.~~ **Done** (`core/replicates.py`, `Surrogate.fit(..., noise=...)`,
   `pool_from_frame(..., aggregate=True)`) — the SNR lever from `BENCHMARK.md`.
