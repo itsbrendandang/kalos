@@ -117,6 +117,14 @@ def feasibility_cv_auc(
     - `n_splits` is reduced to at most the minority class count, since a
       stratified split needs at least `n_splits` examples of the minority
       class. If that leaves `n_splits < 2`, returns `nan`.
+    - When `groups` is given, `n_splits` is ALSO reduced to at most the number
+      of distinct groups: sklearn's grouped splitters refuse to make more folds
+      than there are groups. The minority-class cap does not imply this one - a
+      replicated sheet can hold six non-producing rows across only four recipes -
+      and without it this function raised `ValueError` on exactly the replicated
+      data it exists to score. That mattered because the value feeds the
+      fail-closed promotion gate, and an exception is not a closed gate; it is a
+      500 that skips the verdict entirely.
     - Any fold whose test split ends up single-class (AUC undefined for that
       fold) is skipped; if every fold is skipped, or fewer than 2 classes
       remain in the pooled out-of-fold predictions, returns `nan`.
@@ -130,11 +138,13 @@ def feasibility_cv_auc(
 
     minority_count = int(counts[counts > 0].min())
     splits = min(n_splits, minority_count)
+    g = None if groups is None else np.asarray(groups)
+    if g is not None:
+        splits = min(splits, int(len(np.unique(g))))
     if splits < 2:
         return float("nan")
 
-    if groups is not None:
-        g = np.asarray(groups)
+    if g is not None:
         cv = StratifiedGroupKFold(n_splits=splits, shuffle=True, random_state=seed)
         split_iter = cv.split(Xa, labels, groups=g)
     else:

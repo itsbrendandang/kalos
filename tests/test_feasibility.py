@@ -87,3 +87,34 @@ def test_zero_inflated_pool_feasibility_gating_does_not_hurt():
     bo_final = res["bo"]["mean"][-1]
     assert res["bo_feas"]["mean"][-1] >= bo_final - tol
     assert res["bo_feas_clean"]["mean"][-1] >= bo_final - tol
+
+
+def test_cv_auc_declines_instead_of_raising_when_groups_are_fewer_than_folds():
+    """The minority-class cap does not imply the group cap.
+
+    A replicated sheet can hold plenty of non-producing ROWS across very few
+    RECIPES: here 6 non-producers spread over 4 recipes, so the old guard picked
+    `n_splits = min(5, 6) = 5` and handed sklearn more folds than there are
+    groups, which raises `ValueError`. That value feeds the fail-closed promotion
+    gate, and an exception is not a closed gate - it is a crash that skips the
+    verdict. Unmeasurable must come back as `nan`, which the gate then blocks on.
+    """
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(12, 3))
+    y = np.array([0.0] * 6 + [1.0] * 3 + [2.0] * 3)
+    groups = np.repeat(np.arange(4), 3)  # 4 recipes, 3 replicates each
+    auc = feasibility_cv_auc(X, y, groups=groups, n_splits=5, seed=0)
+    assert np.isnan(auc)
+
+
+def test_cv_auc_still_scores_when_there_are_enough_groups():
+    """The group cap must not silently disable a measurable AUC: with enough
+    recipes the same replicated shape still returns a real number."""
+    rng = np.random.default_rng(4)
+    n_recipes = 12
+    centers = np.array([-3.0] * (n_recipes // 2) + [3.0] * (n_recipes // 2))
+    X = np.repeat(centers, 3).reshape(-1, 1) + rng.normal(0.0, 0.3, size=(n_recipes * 3, 1))
+    y = np.repeat((centers > 0).astype(float), 3)
+    groups = np.repeat(np.arange(n_recipes), 3)
+    auc = feasibility_cv_auc(X, y, groups=groups, n_splits=5, seed=0)
+    assert np.isfinite(auc) and auc > 0.8
