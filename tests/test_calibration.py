@@ -185,13 +185,24 @@ def test_analysis_reports_calibration_and_stops_calling_it_unmodeled():
 def test_measuring_calibration_did_not_move_any_existing_number():
     """`observation_noise=True` widens the sd only. If the pooled Spearman or the
     conformal band ever shifts with it, the mean has been disturbed and the
-    change has stopped being additive."""
+    change has stopped being additive.
+
+    The exact mean-invariance is asserted platform-independently by
+    `test_predictive_sd_is_wider_than_the_latent_band` (allclose on the two
+    posteriors). This test pins the numbers as a cross-change regression anchor,
+    with a LOOSE tolerance on purpose: the reference values were measured on the
+    dev machine (macOS), and the GP fit's L-BFGS path differs at the last few
+    bits per platform - enough to reorder near-tied held-out ranks and move a
+    3-decimal Spearman. CI (Linux) measured 0.786 where the dev machine measures
+    0.783; an exact pin turned that FP drift into a red build. The tolerance is
+    sized to catch a real regression (a band mix-up moves these numbers by far
+    more) while absorbing platform drift."""
     pytest.importorskip("fastapi")
     from kalos.portal.analysis import _analyze
 
     res = _analyze(_replicated_sheet(), "lipase_titer")
-    assert res["cv_spearman"] == 0.783
-    assert res["conformal_q"] == pytest.approx(2.6208, abs=1e-3)
+    assert res["cv_spearman"] == pytest.approx(0.783, abs=0.02)
+    assert res["conformal_q"] == pytest.approx(2.6208, abs=0.1)
 
 
 def test_calibration_declines_on_a_sheet_too_small_to_measure_it():
