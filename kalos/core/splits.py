@@ -56,17 +56,28 @@ def make_splits(
     n_splits: int = 5,
     stratify: Optional[bool] = None,
     random_state: int = 42,
+    shuffle: bool = False,
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """Group-aware CV splits with small-data guards, verified leakage-free.
 
-    `random_state` only bites on the stratified path, which needs a discrete `y`
-    (`dtype.kind in "iubO"`). A continuous target always takes the unshuffled
-    `GroupKFold` branch below, where the split is fully determined by the group
-    labels: seeds 1 and 999 return identical folds. That is deterministic, not
-    broken, but it means a bootstrap CI computed on these folds is conditional on
-    one fixed partition and will understate how much the estimate moves with
-    `n_splits` (on the real media DoE, 0.44 to 0.71 across n_splits 3 to 8).
-    Quote the CI alongside a sensitivity sweep, not on its own.
+    `random_state` always bites on the stratified path (it needs a discrete `y`,
+    `dtype.kind in "iubO"`, and always shuffles groups internally). On the
+    continuous-target `GroupKFold` branch it bites only when `shuffle=True`.
+    The DEFAULT is `shuffle=False`: a continuous target takes the unshuffled
+    `GroupKFold` branch, where the split is fully determined by the group
+    labels, so seeds 1 and 999 return identical folds and every existing
+    caller sees byte-identical folds to before this parameter existed.
+
+    That default partition is deterministic, not wrong, but a bootstrap CI
+    computed on ONE fixed partition only covers group-resampling variance -
+    it says nothing about how much the estimate would move under a different
+    equally-valid partition (on the real media DoE, Spearman moved 0.44 to
+    0.71 across n_splits 3 to 8). Pass `shuffle=True` with a distinct
+    `random_state` per call to draw a different partition, and see
+    `evaluation.grouped_cv_report(n_repeats=...)`, which does exactly that and
+    pools the group-level bootstrap over every partition it draws, so the
+    reported CI covers partition variance instead of just documenting that it
+    does not.
     """
     y_arr = np.asarray(pd.Series(y).values)
     g_arr = np.asarray(pd.Series(groups).astype(str).values)
@@ -96,7 +107,10 @@ def make_splits(
         for tr, va in cv.split(np.zeros(n), y_arr, groups=g_arr):
             splits.append((tr, va))
     else:
-        cv = GroupKFold(n_splits=n_splits)
+        # GroupKFold raises if random_state is set while shuffle=False (it would
+        # have no effect), so pass None on the default unshuffled path rather
+        # than silently swallow a caller's random_state.
+        cv = GroupKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state if shuffle else None)
         for tr, va in cv.split(np.zeros(n), groups=g_arr):
             splits.append((tr, va))
 

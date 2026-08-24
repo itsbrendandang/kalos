@@ -92,7 +92,49 @@ class FeasibilityClassifier:
         return np.asarray(proba[:, pos_idx], dtype=float).reshape(-1)
 
 
-def feasibility_cv_auc(
+def _classifier_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
+    """Standard 10-bin expected calibration error for a binary classifier.
+
+    This is the CLASSIFIER's ECE - is the stated P(feasible) itself honest -
+    not to be confused with `kalos.core.evaluation.interval_calibration`'s
+    ECE, which asks whether the surrogate's regression uncertainty bands are
+    honest. The two questions are unrelated, but both metrics live on the
+    same 0-to-1 "mean absolute gap between nominal and empirical" scale and
+    both happen to be named `ece`, which is exactly how they get conflated.
+
+    Predictions are binned into `n_bins` equal-width bins over `[0, 1]` by
+    predicted P(feasible) (`y_prob`). Within each non-empty bin, `confidence`
+    is the mean predicted probability in that bin and `accuracy` is the
+    fraction of rows in that bin that were actually feasible; the bin's
+    contribution to ECE is `|confidence - accuracy|` weighted by the bin's
+    share of all rows. This is the standard Guo et al. (2017) formulation,
+    applied directly to the positive-class probability since feasibility is a
+    binary problem - there is no separate "top predicted class" to bin by, as
+    there would be for a multi-class classifier.
+
+    Never raises: an empty input returns `nan` (nothing to bin).
+    """
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_prob = np.asarray(y_prob, dtype=float).reshape(-1)
+    n = len(y_true)
+    if n == 0:
+        return float("nan")
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    # Bin by the RIGHT edge, closed on the right, so a predicted probability of
+    # exactly 1.0 lands in the last bin rather than falling out of every bin.
+    bin_idx = np.clip(np.digitize(y_prob, edges[1:-1], right=True), 0, n_bins - 1)
+    ece = 0.0
+    for b in range(n_bins):
+        mask = bin_idx == b
+        if not mask.any():
+            continue
+        confidence = float(np.mean(y_prob[mask]))
+        accuracy = float(np.mean(y_true[mask]))
+        ece += (float(mask.sum()) / n) * abs(confidence - accuracy)
+    return float(ece)
+
+
+def feasibility_cv_report(
     X: np.ndarray,
     y: np.ndarray,
     *,
@@ -100,41 +142,76 @@ def feasibility_cv_auc(
     threshold: float = 0.0,
     n_splits: int = 5,
     seed: int = 0,
-) -> float:
-    """Cross-validated AUC of the feasibility classifier, for the promotion gate.
+) -> dict:
+    """Cross-validated feasibility-classifier metrics, for the promotion gate.
+
+    Runs the SAME pooled-OOF CV `feasibility_cv_auc` runs (identical fold
+    construction, identical guard rails - `feasibility_cv_auc` is now a thin
+    wrapper around this function's `auc` field) and additionally reports
+    `brier` and `ece`. These three - AUC, Brier, ECE - are the classifier
+    metrics `GatesConfig.min_feasibility_auc`/`max_ece`/`max_brier` were
+    originally written against in the lean engine; this is what finally lets
+    `check_gates` read real numbers for them instead of blocking on
+    "unmeasured" every time.
+
+    `brier` is the mean squared error of the pooled out-of-fold P(feasible)
+    against the 0/1 feasibility label - the standard Brier score, lower is
+    better, 0.25 is what a coin-flip (constant p=0.5) classifier scores no
+    matter the true label mix. `ece` is `_classifier_ece` above: the standard
+    10-bin expected calibration error of the SAME pooled OOF predictions.
+    Both are computed on the identical `y_true`/`y_pred` pool the AUC uses, so
+    all three numbers describe one CV run, not three separately-sampled ones.
 
     Labels are computed via `feasible_labels(y, threshold)`. If `groups` is
     given, folds are made with `StratifiedGroupKFold` (replicates/campaigns
     never split across train/val); otherwise plain `StratifiedKFold` is used.
 
-    AUC is computed once on the pooled out-of-fold predictions (rather than
-    averaged per-fold), which is simpler and standard for CV-AUC reporting
-    and avoids weighting small folds equally with large ones.
-
-    Guard rails (never raises):
-    - If the full label set has fewer than 2 classes, returns `nan` (AUC is
-      undefined with a single class).
+    Guard rails (never raises, all carried over from `feasibility_cv_auc`):
+    - If the full label set has fewer than 2 classes, every metric is `nan`
+      and `evaluable` is `False` (AUC/Brier/ECE are all undefined with a
+      single class - a constant P(feasible) cannot be scored against itself).
     - `n_splits` is reduced to at most the minority class count, since a
       stratified split needs at least `n_splits` examples of the minority
-      class. If that leaves `n_splits < 2`, returns `nan`.
+      class. If that leaves `n_splits < 2`, every metric is `nan`.
     - When `groups` is given, `n_splits` is ALSO reduced to at most the number
-      of distinct groups: sklearn's grouped splitters refuse to make more folds
-      than there are groups. The minority-class cap does not imply this one - a
-      replicated sheet can hold six non-producing rows across only four recipes -
-      and without it this function raised `ValueError` on exactly the replicated
-      data it exists to score. That mattered because the value feeds the
-      fail-closed promotion gate, and an exception is not a closed gate; it is a
-      500 that skips the verdict entirely.
+      of distinct groups: sklearn's grouped splitters refuse to make more
+      folds than there are groups. The minority-class cap does not imply this
+      one - a replicated sheet can hold six non-producing rows across only
+      four recipes - and without it this raised `ValueError` on exactly the
+      replicated data it exists to score. That mattered because the value
+      feeds the fail-closed promotion gate, and an exception is not a closed
+      gate; it is a 500 that skips the verdict entirely.
     - Any fold whose test split ends up single-class (AUC undefined for that
       fold) is skipped; if every fold is skipped, or fewer than 2 classes
-      remain in the pooled out-of-fold predictions, returns `nan`.
+      remain in the pooled out-of-fold predictions, every metric is `nan`.
+
+    `n`, `n_feasible`, `n_infeasible` describe the POOLED out-of-fold set the
+    metrics were actually computed on (not the full input) when `evaluable`
+    is `True` - the same rows `auc`/`brier`/`ece` are measured against, since
+    a single-class test fold can be skipped and drop rows out of the pool.
+    When `evaluable` is `False` no CV ran, so these fall back to the full
+    input's label counts, for context on why nothing was measurable.
     """
     Xa = np.asarray(X, dtype=float)
     labels = feasible_labels(y, threshold)
     counts = np.bincount(labels) if labels.size else np.array([])
     n_classes = int((counts > 0).sum())
+
+    def _unavailable() -> dict:
+        n_feasible = int(counts[1]) if len(counts) > 1 else 0
+        n_infeasible = int(counts[0]) if len(counts) > 0 else 0
+        return {
+            "auc": float("nan"),
+            "brier": float("nan"),
+            "ece": float("nan"),
+            "n": int(labels.size),
+            "n_feasible": n_feasible,
+            "n_infeasible": n_infeasible,
+            "evaluable": False,
+        }
+
     if n_classes < 2:
-        return float("nan")
+        return _unavailable()
 
     minority_count = int(counts[counts > 0].min())
     splits = min(n_splits, minority_count)
@@ -142,7 +219,7 @@ def feasibility_cv_auc(
     if g is not None:
         splits = min(splits, int(len(np.unique(g))))
     if splits < 2:
-        return float("nan")
+        return _unavailable()
 
     if g is not None:
         cv = StratifiedGroupKFold(n_splits=splits, shuffle=True, random_state=seed)
@@ -164,12 +241,51 @@ def feasibility_cv_auc(
         oof_pred.append(p)
 
     if not oof_true:
-        return float("nan")
+        return _unavailable()
     y_true = np.concatenate(oof_true)
     y_pred = np.concatenate(oof_pred)
     if len(np.unique(y_true)) < 2:
-        return float("nan")
-    return float(roc_auc_score(y_true, y_pred))
+        return _unavailable()
+
+    auc = float(roc_auc_score(y_true, y_pred))
+    brier = float(np.mean((y_pred - y_true) ** 2))
+    ece = _classifier_ece(y_true, y_pred)
+    return {
+        "auc": auc,
+        "brier": brier,
+        "ece": ece,
+        "n": int(len(y_true)),
+        "n_feasible": int((y_true == 1).sum()),
+        "n_infeasible": int((y_true == 0).sum()),
+        "evaluable": True,
+    }
 
 
-__all__ = ["FeasibilityClassifier", "feasible_labels", "feasibility_cv_auc"]
+def feasibility_cv_auc(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    groups: np.ndarray | None = None,
+    threshold: float = 0.0,
+    n_splits: int = 5,
+    seed: int = 0,
+) -> float:
+    """Cross-validated AUC of the feasibility classifier, for the promotion gate.
+
+    A thin wrapper around `feasibility_cv_report`'s `auc` field, kept as its
+    own function so existing callers (and the tests that pin its exact
+    fold-construction and guard-rail behavior) do not have to change. See
+    `feasibility_cv_report` for the full contract; this delegates to it rather
+    than duplicating the CV loop, so the two can never drift apart.
+    """
+    return feasibility_cv_report(
+        X, y, groups=groups, threshold=threshold, n_splits=n_splits, seed=seed
+    )["auc"]
+
+
+__all__ = [
+    "FeasibilityClassifier",
+    "feasible_labels",
+    "feasibility_cv_auc",
+    "feasibility_cv_report",
+]

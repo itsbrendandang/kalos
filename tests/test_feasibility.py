@@ -1,14 +1,22 @@
 """kalos/core/feasibility: the binary producer/non-producer gate for BO on
 zero-inflated titers. Covers the classifier's shape/range contract, its
 cold-start fallback (must never crash on a single-class fit), the strict
-`feasible_labels` threshold semantics, and a comparative pool check that
-feasibility-gated BO should not lose to plain BO under zero-inflation."""
+`feasible_labels` threshold semantics, a comparative pool check that
+feasibility-gated BO should not lose to plain BO under zero-inflation, and
+`feasibility_cv_report` - the AUC/Brier/ECE report the promotion gate
+(kalos/core/gates.py's `check_gates`) now actually reads, with
+`feasibility_cv_auc` kept as a thin wrapper around its `auc` field."""
 from __future__ import annotations
 
 import numpy as np
 
 from kalos.bench.pool import run_pool
-from kalos.core.feasibility import FeasibilityClassifier, feasibility_cv_auc, feasible_labels
+from kalos.core.feasibility import (
+    FeasibilityClassifier,
+    feasibility_cv_auc,
+    feasibility_cv_report,
+    feasible_labels,
+)
 
 
 def test_predict_proba_shape_and_range():
@@ -118,3 +126,69 @@ def test_cv_auc_still_scores_when_there_are_enough_groups():
     groups = np.repeat(np.arange(n_recipes), 3)
     auc = feasibility_cv_auc(X, y, groups=groups, n_splits=5, seed=0)
     assert np.isfinite(auc) and auc > 0.8
+
+
+# --- feasibility_cv_report: the report the promotion gate reads ------------- #
+
+
+def test_feasibility_cv_report_finite_metrics_on_separable_blobs():
+    """Same separable-blobs shape as the AUC test above: with two well-separated
+    classes, all three gate metrics - AUC, Brier, ECE - must come back finite
+    and `evaluable` must be True, not just the AUC field alone."""
+    rng = np.random.default_rng(1)
+    X0 = rng.normal(-3.0, 0.5, size=(60, 2))
+    X1 = rng.normal(3.0, 0.5, size=(60, 2))
+    X = np.vstack([X0, X1])
+    y = np.array([0.0] * 60 + [1.0] * 60)  # feasible iff y > 0
+    rep = feasibility_cv_report(X, y, threshold=0.0, n_splits=5, seed=0)
+    assert rep["evaluable"] is True
+    assert np.isfinite(rep["auc"]) and rep["auc"] > 0.8
+    assert np.isfinite(rep["brier"]) and 0.0 <= rep["brier"] <= 1.0
+    assert np.isfinite(rep["ece"]) and 0.0 <= rep["ece"] <= 1.0
+    # pooled OOF counts describe what the metrics were actually computed over
+    assert rep["n"] == rep["n_feasible"] + rep["n_infeasible"]
+    assert rep["n"] > 0
+
+
+def test_feasibility_cv_report_all_nan_and_unevaluable_on_single_class():
+    """A single-class label set makes AUC/Brier/ECE all undefined - none of the
+    three should quietly report a number that looks measured."""
+    rng = np.random.default_rng(2)
+    X = rng.normal(0.0, 1.0, size=(20, 3))
+    y = np.ones(20)  # all-feasible, single class after thresholding
+    rep = feasibility_cv_report(X, y, threshold=0.0, n_splits=5, seed=0)
+    assert rep["evaluable"] is False
+    assert np.isnan(rep["auc"])
+    assert np.isnan(rep["brier"])
+    assert np.isnan(rep["ece"])
+    # falls back to the full input's label counts (no CV ran)
+    assert rep["n"] == 20
+    assert rep["n_feasible"] == 20
+    assert rep["n_infeasible"] == 0
+
+
+def test_feasibility_cv_auc_delegates_to_the_report():
+    """`feasibility_cv_auc` must not duplicate the CV loop - it is the report's
+    `auc` field, on the same data and seed, every time."""
+    rng = np.random.default_rng(1)
+    X0 = rng.normal(-3.0, 0.5, size=(60, 2))
+    X1 = rng.normal(3.0, 0.5, size=(60, 2))
+    X = np.vstack([X0, X1])
+    y = np.array([0.0] * 60 + [1.0] * 60)
+    auc = feasibility_cv_auc(X, y, threshold=0.0, n_splits=5, seed=0)
+    rep = feasibility_cv_report(X, y, threshold=0.0, n_splits=5, seed=0)
+    assert auc == rep["auc"]
+
+
+def test_feasibility_cv_report_group_cap_declines_instead_of_raising():
+    """Mirrors `test_cv_auc_declines_instead_of_raising_when_groups_are_fewer_
+    than_folds` above: the group cap that keeps `feasibility_cv_auc` from
+    raising `ValueError` on a replicated sheet must carry over to the report,
+    since `feasibility_cv_auc` now delegates to it."""
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(12, 3))
+    y = np.array([0.0] * 6 + [1.0] * 3 + [2.0] * 3)
+    groups = np.repeat(np.arange(4), 3)  # 4 recipes, 3 replicates each
+    rep = feasibility_cv_report(X, y, groups=groups, n_splits=5, seed=0)
+    assert rep["evaluable"] is False
+    assert np.isnan(rep["auc"]) and np.isnan(rep["brier"]) and np.isnan(rep["ece"])
