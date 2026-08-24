@@ -20,6 +20,8 @@ unmeasured runs on the re-analyze path.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -101,6 +103,34 @@ def test_pending_leaves_the_batch_inside_the_design_box():
 def test_unusable_pending_still_proposes(bad):
     s, bounds = _fitted(0)
     assert propose(s, bounds, q=2, pending=bad).shape == (2, 4)
+
+
+def test_pending_width_mismatch_is_logged_not_silent(caplog):
+    """The wholesale width-mismatch rejection is correct policy (failing to
+    propose is worse than proposing without the pending penalty) but must not
+    be silent: downstream `n_pending_considered` reads 0 either way,
+    indistinguishable from "nothing running" - so a caller bug that disables
+    the in-flight guard (e.g. handing `propose` last round's pending block
+    against a design that has since changed width) would otherwise vanish
+    without a trace."""
+    s, bounds = _fitted(0)
+    with caplog.at_level(logging.WARNING, logger="kalos.core.optimize"):
+        batch = propose(s, bounds, q=2, pending=np.zeros((2, 7)))  # wrong width for this 4-d design
+    assert batch.shape == (2, 4)
+    assert any("width" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "nothing_running", [None, np.empty((0, 4))], ids=["none", "empty"]
+)
+def test_pending_none_or_empty_emits_no_warning(nothing_running, caplog):
+    """`pending=None` and an empty pending block are the documented "nothing is
+    running" fast paths, not an anomaly - they must stay silent so that a real
+    warning (the width mismatch above) is never lost in routine noise."""
+    s, bounds = _fitted(0)
+    with caplog.at_level(logging.WARNING, logger="kalos.core.optimize"):
+        propose(s, bounds, q=2, pending=nothing_running)
+    assert caplog.records == []
 
 
 def test_a_single_pending_row_may_be_passed_unwrapped():

@@ -8,6 +8,7 @@ neither sign nor confidence).
 """
 from __future__ import annotations
 
+import warnings
 from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
@@ -94,25 +95,63 @@ def bootstrap_spearman(
     Z: np.ndarray, signal: ArrayLike, B: int = 200, random_state: int = 42,
     ci: float = 0.95, feature_names: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
-    """Bootstrap Spearman per feature: mean, std, and percentile CI bounds."""
+    """Bootstrap Spearman per feature: mean, std, and percentile CI bounds.
+
+    A resample draw can be degenerate for a feature (e.g. the bootstrap indices
+    happen to make that column constant), which makes Spearman's rho undefined
+    (`nan`). Those draws are recorded as `nan` rather than coerced to 0.0: 0.0 is
+    a strong claim (this draw found no association), and folding "undefined"
+    into "found no association" pulls the whole bootstrap distribution toward
+    zero and understates the true CI width for exactly the noisiest features -
+    substituting a fabricated data point, not a neutral default. `mean`/`std`
+    and the `lo`/`hi` percentile CI are instead computed with nan-aware
+    reductions (`np.nanmean`/`np.nanstd`/`np.nanquantile`) over only the valid
+    draws per feature.
+
+    If a feature has zero valid draws (every resample degenerate for that
+    column - a fully constant or near-constant feature), the nan-reductions
+    have nothing to reduce over; that case falls back to mean/std/lo/hi all
+    0.0, reproducing today's behavior for that feature. This keeps every
+    output finite by construction: `bootstrap_spearman`'s output feeds a
+    strict-JSON API response (`kalos/portal/analysis.py`), and a `nan` in that
+    payload would fail JSON encoding and 500 the request rather than degrade
+    gracefully.
+    """
     Z = _ensure_2d(Z)
     y = np.asarray(signal, dtype=float).reshape(-1)
     N, d = Z.shape
     if y.shape[0] != N:
         raise ValueError("Z rows must match signal length")
     rng = np.random.default_rng(random_state)
-    R = np.zeros((B, d))
+    R = np.full((B, d), np.nan)
     for b in range(B):
         idx = rng.integers(0, N, size=N)
         zb, yb = Z[idx], y[idx]
         for j in range(d):
             rho, _ = spearmanr(zb[:, j], yb, nan_policy="omit")
-            R[b, j] = 0.0 if np.isnan(rho) else float(rho)
+            R[b, j] = float(rho) if not np.isnan(rho) else np.nan
     alpha = (1.0 - ci) / 2.0
     names = list(feature_names) if feature_names is not None else [f"f{j}" for j in range(d)]
-    return {"mean": R.mean(axis=0), "std": R.std(axis=0, ddof=1) if B > 1 else np.zeros(d),
-            "lo": np.quantile(R, alpha, axis=0), "hi": np.quantile(R, 1 - alpha, axis=0),
-            "feature_names": names}
+    # A column with zero valid draws makes every nan-reduction operate on an
+    # all-NaN slice, which numpy warns about (RuntimeWarning) even though the
+    # all-NaN fallback below handles the result correctly - suppress it here
+    # rather than let it leak into callers as spurious noise.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean = np.nanmean(R, axis=0)
+        std = np.nanstd(R, axis=0, ddof=1) if B > 1 else np.zeros(d)
+        lo = np.nanquantile(R, alpha, axis=0)
+        hi = np.nanquantile(R, 1 - alpha, axis=0)
+    # A column with zero valid draws leaves every reduction above as nan (an
+    # all-NaN-slice input has no defined mean/std/quantile); a column with
+    # exactly one valid draw leaves `std` as nan too (ddof=1 needs >= 2 points).
+    # Both fall back to 0.0, reproducing the pre-fix value for a fully
+    # degenerate feature and guaranteeing every output here is finite.
+    mean = np.nan_to_num(mean, nan=0.0)
+    std = np.nan_to_num(std, nan=0.0)
+    lo = np.nan_to_num(lo, nan=0.0)
+    hi = np.nan_to_num(hi, nan=0.0)
+    return {"mean": mean, "std": std, "lo": lo, "hi": hi, "feature_names": names}
 
 
 def rank_drivers(summary: Dict[str, object], top_k: int = 5, direction: str = "abs") -> List[Tuple[str, float]]:

@@ -54,9 +54,20 @@ class MultiObjectiveSurrogate:
         # NaN-poisons the fit. Mirrors the single-objective Surrogate.fit guard.
         lower, upper = sanitize_bounds(bounds)
         box = torch.as_tensor(np.vstack([lower, upper]), dtype=DTYPE, device=DEVICE)
-        norm = Normalize(d=d, bounds=box)
+        # A fresh Normalize per model: Normalize is a stateful torch.nn.Module, and
+        # sharing one instance across every SingleTaskGP in the ModelListGP means a
+        # future learn_bounds=True (or any other transform mutation) on one
+        # objective would silently leak into every other objective's model through
+        # the shared object. Bounds are identical across objectives today, so this
+        # is numerically a no-op, but each model owning its own transform removes
+        # the aliasing hazard rather than relying on the bounds staying fixed.
         models = [
-            SingleTaskGP(Xt, Yt[:, i : i + 1], input_transform=norm, outcome_transform=Standardize(m=1))
+            SingleTaskGP(
+                Xt,
+                Yt[:, i : i + 1],
+                input_transform=Normalize(d=d, bounds=box),
+                outcome_transform=Standardize(m=1),
+            )
             for i in range(Yt.shape[-1])
         ]
         self.model = ModelListGP(*models)
@@ -88,8 +99,21 @@ def propose_multiobjective(
     num_restarts: int = 10,
     raw_samples: int = 128,
     mc_samples: int = 128,
+    *,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Return q proposed points (q x d) that best expand the Pareto front.
+
+    `seed` governs the stochastic work: the qLogNEHVI sampler's Sobol draws
+    (`SobolQMCNormalSampler(seed=seed)`) and the multi-start acquisition
+    optimization's raw-sample initial conditions inside `optimize_acqf`. `None`
+    (the default) seeds nothing here, byte-identical to the historical
+    behavior - reproducibility remains the caller's responsibility via seeding
+    the global torch RNG beforehand, as the portal and bench already do. When
+    given, the seed is applied inside `torch.random.fork_rng()`, which snapshots
+    the caller's RNG state and restores it on exit, so a seeded call is
+    reproducible without clobbering the caller's global RNG state as a side
+    effect.
 
     Every returned coordinate is clamped into `[lower, upper]` per feature so a
     proposal can never fall outside the observed design box. This mirrors the
@@ -107,16 +131,29 @@ def propose_multiobjective(
     )
     rp = surrogate.default_ref_point() if ref_point is None else np.asarray(ref_point, float)
     rp = torch.as_tensor(rp, dtype=DTYPE, device=DEVICE)
-    acq = qLogNoisyExpectedHypervolumeImprovement(
-        model=surrogate.model,
-        ref_point=rp,
-        X_baseline=surrogate._X,
-        prune_baseline=True,
-        sampler=SobolQMCNormalSampler(sample_shape=torch.Size([mc_samples])),
-    )
-    candidates, _ = optimize_acqf(
-        acq_function=acq, bounds=b, q=q, num_restarts=num_restarts, raw_samples=raw_samples
-    )
+
+    def _run_acqf_optimization() -> torch.Tensor:
+        acq = qLogNoisyExpectedHypervolumeImprovement(
+            model=surrogate.model,
+            ref_point=rp,
+            X_baseline=surrogate._X,
+            prune_baseline=True,
+            sampler=SobolQMCNormalSampler(sample_shape=torch.Size([mc_samples]), seed=seed),
+        )
+        candidates, _ = optimize_acqf(
+            acq_function=acq, bounds=b, q=q, num_restarts=num_restarts, raw_samples=raw_samples
+        )
+        return candidates
+
+    if seed is None:
+        candidates = _run_acqf_optimization()
+    else:
+        # devices=[] restricts the fork to CPU RNG state (DEVICE is always CPU
+        # here), avoiding an unnecessary probe of CUDA RNG state on machines
+        # without a GPU.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            candidates = _run_acqf_optimization()
     out = candidates.detach().cpu().numpy()
     # Belt-and-suspenders: clamp each coordinate back into the observed box. The
     # optimizer respects the bounds it is given, but a NaN/degenerate corner or a
