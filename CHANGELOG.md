@@ -2,6 +2,129 @@
 
 Newest first.
 
+## 2026-08-23 (the review's remainder, built by a Sonnet fleet)
+
+Five agents implemented the rest of the 2026-08-22 engine review plus portable
+findings mined from the owner's earlier engine (voyager-brain-rebuild). Each
+change below carries its own tests; the full suite, ruff, and mypy are green on
+the combined result.
+
+### Added - the CV confidence interval now covers partition variance
+
+`make_splits` takes the unshuffled GroupKFold branch for a continuous target, so
+the group-bootstrap CI on the headline `cv_spearman` was conditional on ONE fixed
+partition - and the splits.py docstring admitted the damage (0.44 to 0.71 across
+n_splits 3 to 8) while nothing computed the sweep it recommended.
+
+`grouped_cv_report` now supports repeated grouped CV (`n_repeats`): repeat 0 is
+the exact historical unshuffled partition, later repeats shuffle the group
+assignment deterministically, the bootstrap runs per repeat, and `ci95` pools all
+draws. Every point estimate and OOF-derived quantity (`cv_spearman`,
+`conformal_q`, calibration, the `oof` scatter) stays anchored to repeat 0, so
+nothing moved except the interval - the pinned-number tests pass unmodified. The
+portal runs `CV_N_REPEATS = 2` (3 measured over the runtime budget) and reports
+`cv_n_repeats` + `cv_spearman_per_repeat` so the spread is visible. On an
+engineered partition-sensitive sheet the CI width grows 0.769 -> 0.833; leave-
+one-group-out sheets collapse to 1 effective repeat because only one partition
+exists.
+
+### Added - the promotion gate finally has real numbers to read
+
+`check_gates` had zero callers on the analysis path and `feasibility_cv_auc`
+zero callers outside tests, so the fail-closed gate guarded nothing.
+`feasibility_cv_report` now returns AUC, Brier, and the classifier's 10-bin ECE
+from the same pooled-OOF CV (`feasibility_cv_auc` is a thin wrapper over it), and
+`_analyze` assembles all four gate stats and reports `check_gates` as a new
+top-level `promotion` verdict. Reported, never enforced: the verdict cannot
+reject an upload, because changing what the API accepts is a product decision.
+On an all-producer sheet the feasibility metrics are unmeasurable and the verdict
+fails closed with "unmeasured" failures - correct semantics, and the block
+carries a `meaning` string so that reads as "not yet shown fit to promote", not
+as a rejection.
+
+Named distinction, because two metrics share a name: the gate's `ece` is the
+FEASIBILITY CLASSIFIER's calibration (is P(feasible) honest); the
+`reliability.calibration` ece is the regression interval calibration (are the
+titer error bars honest). Different questions, same scale, both reported.
+
+### Added - three evaluation-hygiene anchors from voyager-brain-rebuild
+
+All three earned their place on the owner's real study data before porting:
+
+- **`cv_logo`** (leave-one-group-out): on the real clone funnel, LOSO Spearman
+  was -0.12 where shuffled 5-fold read 0.91 - the gap IS the cross-campaign
+  generalization claim. Computed when a declared group column exists and the
+  group count is within `LOGO_MAX_GROUPS = 12` (measured cost ~0.5s); skipped
+  with a stated reason otherwise, never silently.
+- **`cv_topk`**: top-5 overlap between true and predicted ranking on the pooled
+  OOF - the direct form of "which N do I advance", which Spearman can obscure on
+  zero-inflated targets. Ties resolve by stable sort, documented.
+- **`cv_group_mean_baseline`**: predict each row by the mean of the OTHER rows in
+  its recipe group and report that Spearman. On the owner's real data a
+  campaign-mean-only anchor captured ~0.75 of a model's ~0.86 headline; a model
+  that does not clearly beat this floor may be recognizing recipes, not modeling
+  the process. The interpretation ships in the payload.
+
+### Added - two validation checks the real data demanded
+
+- **Informative missingness (MNAR).** On the real Cytena funnel, per-row
+  missingness vs titer ran Spearman -0.835: "no measurement" was the culling
+  decision, not benign absence - and kalos zero-fills blanks before the GP fit.
+  `check_informative_missingness` correlates row-level missing fraction (and
+  per-sparse-column missingness indicators) with the target and warns when |rho|
+  clears 0.35. Warning severity only; strict mode cannot start rejecting sheets
+  over it. The engine's own `experiments/missingness_indicator/RESULTS.md` posed
+  exactly this question and could not answer it; the check now answers it per
+  upload. Running it against the real media DoE still needs a `BIOQORE_DATA`
+  checkout, which this machine does not have.
+- **Constant-within-group.** 4 of 6 clone features on the same data had exactly
+  one unique value within every campaign - group identity in disguise, inflating
+  within-population scores to ~0.86 when the campaign-mean anchor alone scored
+  ~0.75. `check_constant_within_group` flags features that vary globally but are
+  frozen within every group, which the global constant-column check cannot see.
+
+### Added - a non-proprietary benchmark fixture
+
+`examples/synthetic_bioprocess/`: 160 seeded rows, 10 continuous bioprocess
+inputs in real units, a known optimum, a feasibility gate zeroing ~44% of runs.
+Ported from voyager-brain-rebuild with its generator (verified to reproduce the
+CSV byte-for-byte). Fills the gap between `bench/`'s abstract math surfaces and
+the uncommittable client data: a domain-realistic regression fixture that is safe
+to commit.
+
+### Fixed - four smaller defects
+
+- `propose()` and `propose_multiobjective()` accept an optional `seed`. Applied
+  inside `torch.random.fork_rng()`, so a seeded call is reproducible WITHOUT
+  clobbering the caller's global RNG state. Caught during testing: qLogNEI with
+  `prune_baseline=True` draws posterior samples at construction time, so the
+  acquisition must be built inside the fork too - the first attempt leaked.
+  Default `None` is byte-identical to the historical caller-seeds-globally
+  contract.
+- `_sanitize_pending`'s wholesale width-mismatch rejection is logged at warning
+  level instead of silent. Without it, a caller bug that disables the in-flight
+  guard is indistinguishable from "nothing running" - both read
+  `n_pending_considered == 0`.
+- `bootstrap_spearman` recorded a degenerate resample draw as rho = 0.0, pulling
+  the bootstrap distribution toward zero for exactly the noisiest features. NaN
+  draws are now excluded via nan-aware reductions; a fully degenerate feature
+  falls back to the old all-zeros output so the JSON response stays finite.
+- Each objective in `MultiObjectiveSurrogate` gets its own `Normalize` instance
+  instead of sharing one stateful module across the `ModelListGP` - numerically
+  identical today, and no longer one `learn_bounds=True` away from cross-coupling
+  the objectives.
+
+### Recorded - validated negatives from voyager-brain-rebuild, so they are not re-attempted
+
+- A scalar per-campaign offset multi-task GP is rank-frozen for held-out
+  campaigns by construction; a real transfer test needs a coregionalization
+  kernel, and probably more than 3 campaigns.
+- `averageTotalTiter` is the row-mean of its per-stage components; any
+  titer-derived feature "predicts" it mechanically. Check derived targets for
+  circularity before trusting a high score.
+- Hardcoded scale-up projectors and a DirichletCalibrator on a ~20-row tail were
+  both rejected there for inflation reasons that still apply here.
+
 ## 2026-08-22 (the unit of analysis is the recipe)
 
 ### Fixed - the driver panel counted replicates as independent evidence

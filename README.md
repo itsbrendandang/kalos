@@ -17,7 +17,7 @@ kalos/
     surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
     optimize.py        qLogNEI acquisition + optimize_acqf -> next batch (in-flight runs as X_pending)
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
-    evaluation.py      grouped cross-validated Spearman (leakage-controlled) + held-out interval calibration
+    evaluation.py      grouped CV Spearman (leakage-controlled, repeated partitions) + interval calibration + LOGO/top-k/group-mean baselines
     splits.py          group-aware CV + a leakage tripwire (assert_no_group_leakage)
     drivers.py         signed Spearman drivers with bootstrap confidence intervals (tested per recipe, not per row)
     conformal.py       split-conformal prediction intervals (distribution-free)
@@ -40,7 +40,7 @@ kalos/
     generic.py         a domain-neutral profile for non-bio tabular optimization
   validation/
     bounds.py          physically-possible ranges per measurement dimension (physics vs convention, each justified)
-    checks.py          the nine data-quality checks (units, bounds, duplicates, missingness, outliers, provenance, replicates, controls, constants)
+    checks.py          the eleven data-quality checks (units, bounds, duplicates, missingness, informative missingness, outliers, provenance, replicates, controls, constants, constant-within-group)
     runner.py          validate_frame: runs every check, never raises, + apply_unit_conversions
     report.py          Finding / UnitConversion / ValidationReport, JSON-safe serialization
   normalize/
@@ -222,10 +222,10 @@ into a new profile) and, if it has discrete choices, list them under
   `bo_feas` / `bo_feas_clean` strategies in `bench/pool.py`).
 - ~~Calibration (ECE) for the promotion gates.~~ **Done**
   (`core/evaluation.py::interval_calibration`, reported as `reliability.calibration`).
-  Held-out coverage of the GP's own predictive bands, on the same 0-to-1 scale
-  `GatesConfig.max_ece` is written against. Brier, and wiring `check_gates` into the
-  analysis path, are still pending — `feasibility_auc` has no caller there yet, so a
-  gate wired in today would fail closed on every upload.
+- ~~Wire `check_gates` into the analysis path.~~ **Done**
+  (`core/feasibility.py::feasibility_cv_report` supplies AUC/Brier/classifier-ECE;
+  `_analyze` reports the fail-closed verdict as the top-level `promotion` block.
+  Reported, never enforced: the verdict cannot reject an upload.)
 - ~~Replicate-aware aggregation + assay noise-floor estimation + optional
   fixed-noise GP.~~ **Done** (`core/replicates.py`, `Surrogate.fit(..., noise=...)`,
   `pool_from_frame(..., aggregate=True)`) — the SNR lever from `BENCHMARK.md`.
