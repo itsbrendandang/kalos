@@ -1,4 +1,4 @@
-"""The nine data-quality checks the validation gate runs over a run sheet.
+"""The eleven data-quality checks the validation gate runs over a run sheet.
 
 Every function here is pure: `df: pd.DataFrame -> list[Finding]`, never
 mutating the input frame, never logging a raw cell value or column name to
@@ -37,6 +37,7 @@ from typing import Pattern
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 from kalos.core.replicates import noise_report
 from kalos.normalize import units
@@ -54,6 +55,8 @@ __all__ = [
     "check_replicate_adequacy",
     "check_controls_present",
     "check_constant_columns",
+    "check_informative_missingness",
+    "check_constant_within_group",
 ]
 
 
@@ -776,4 +779,257 @@ def check_constant_columns(df: pd.DataFrame) -> list[Finding]:
                     detail={"value": float(valid.iloc[0])},
                 )
             )
+    return findings
+
+
+# --- 10. informative missingness (MNAR) ---------------------------------------- #
+
+# A Spearman rho's standard error scales roughly as 1/sqrt(n-3), so below
+# about a dozen paired observations even a genuine correlation reads as
+# confident nonsense - the number would look decisive while being mostly
+# sampling noise. Both the row-level and column-level tests below refuse to
+# report anything under this floor rather than manufacture a rho nobody
+# should trust.
+_MIN_N_FOR_RHO = 12
+
+# How far |rho| has to clear before missingness is called informative rather
+# than noise. At ordinary sheet sizes (n ~ 30-100) a null (label-shuffled)
+# Spearman rho already wanders past +-0.3 with non-trivial probability by
+# chance alone, so 0.35 sits with real margin above that noise floor - while
+# staying far below the -0.835 the owner's real Cytena clone-funnel data
+# actually showed (voyager-brain-rebuild/docs/ml-review.md, finding P0.1).
+# This check exists to catch that class of signal, not to flag every faint
+# wobble in a small sheet.
+_MISSINGNESS_RHO_WARN = 0.35
+
+# A column must be at least this blank before its missingness indicator is
+# tested against the target at all. Below 5% blank, "missing" is a handful of
+# rows out of the whole sheet, and any correlation computed from that few
+# positive cases is dominated by which specific rows happen to be missing,
+# not a real pattern - the same small-n concern as `_MIN_N_FOR_RHO`, applied
+# to the minority class of a binary indicator instead of to the whole sample.
+_COL_MISSINGNESS_MIN_BLANK_FRAC = 0.05
+
+
+def check_informative_missingness(df: pd.DataFrame, target: str | None) -> list[Finding]:
+    """Flag missingness that CORRELATES WITH THE TARGET (MNAR), not just blank cells.
+
+    `check_missingness` reports how much of a column or row is blank; this asks
+    a different question - whether being blank is itself informative, i.e.
+    correlated with the outcome, rather than happening at random. On the
+    owner's real Cytena clone-funnel data, per-row missing-fraction vs titer
+    had Spearman rho = -0.835, and non-producers were 66.7% missing vs 37.0%
+    for producers: "no measurement" was the human culling decision on low
+    performers, not benign absence. `kalos`'s GP path zero-fills blanks before
+    fitting, which is safe under a missing-COMPLETELY-at-random assumption and
+    quietly encodes the outcome into the features the moment that assumption
+    is false.
+
+    Two rank-based tests (Spearman - neither assumes the target or the
+    missing-fraction is normally distributed, and Spearman between a 0/1
+    indicator and a continuous variable reduces exactly to the rank-biserial
+    correlation, so no separate point-biserial formula needs to be
+    maintained):
+
+      - ROW-level: each row's fraction of blank cells across every column
+        EXCEPT `target` itself, vs. that row's numeric target value. A
+        confidently negative rho means rows with more blanks skew toward
+        lower outcomes - "not measured" looking like a proxy for "did not
+        perform."
+      - COLUMN-level: for every column at least `_COL_MISSINGNESS_MIN_BLANK_FRAC`
+        blank, its own 0/1 missingness indicator (1 = blank in that row) vs.
+        the target.
+
+    Both require at least `_MIN_N_FOR_RHO` rows with a valid (numeric,
+    non-blank) target, and both fire only once |rho| clears
+    `_MISSINGNESS_RHO_WARN`. Severity is ALWAYS "warning", never "error": this
+    check changes nothing about whether a sheet is usable, only whether
+    zero-filling it is safe to do silently - flipping a strict-mode upload
+    from accepted to rejected on this finding would be a product decision this
+    check has no business making on its own.
+
+    Never crashes and never raises severity beyond warning: no `target` given,
+    a `target` that is entirely non-numeric, a constant target (rho is
+    undefined - nothing to correlate against), or a frame/target pair with no
+    blanks at all in the feature columns each produce an empty finding list,
+    not an exception.
+    """
+    findings: list[Finding] = []
+    if target is None or target not in df.columns:
+        return findings
+
+    y_all = pd.to_numeric(df[target], errors="coerce")
+    valid_target = y_all.notna()
+    if int(valid_target.sum()) < _MIN_N_FOR_RHO:
+        return findings
+    if y_all.loc[valid_target].nunique() < 2:
+        return findings  # constant target: rho is undefined, nothing to correlate against
+
+    feature_cols = [c for c in df.columns if c != target]
+    if not feature_cols:
+        return findings
+
+    nonblank = df[feature_cols].apply(_nonblank_mask)
+    if bool(nonblank.to_numpy().all()):
+        return findings  # no blanks anywhere in the feature columns: nothing to say
+
+    # --- row-level: fraction of blank feature cells vs. the target -------------- #
+    row_frac_blank = 1.0 - (nonblank.sum(axis=1) / len(feature_cols))
+    frac_valid = row_frac_blank.loc[valid_target]
+    y_valid = y_all.loc[valid_target]
+    if frac_valid.nunique() >= 2:
+        rho, _p = spearmanr(frac_valid, y_valid, nan_policy="omit")
+        if not np.isnan(rho) and abs(rho) >= _MISSINGNESS_RHO_WARN:
+            findings.append(
+                Finding(
+                    check="informative_missingness",
+                    severity="warning",
+                    message=(
+                        f"per-row missing-fraction correlates with target '{target}' "
+                        f"(Spearman rho={rho:.2f}, n={int(frac_valid.shape[0])}) - "
+                        "missingness looks informative, not random; zero-filling "
+                        "before the fit may be encoding the outcome into the features"
+                    ),
+                    detail={
+                        "target": target,
+                        "rho": float(rho),
+                        "n": int(frac_valid.shape[0]),
+                    },
+                )
+            )
+
+    # --- column-level: each sparse column's own missingness vs. the target ------ #
+    for col in feature_cols:
+        name = str(col)
+        col_nonblank = nonblank[col]
+        frac_blank_col = 1.0 - (int(col_nonblank.sum()) / len(df))
+        if frac_blank_col < _COL_MISSINGNESS_MIN_BLANK_FRAC or frac_blank_col >= 1.0:
+            continue
+        indicator = (~col_nonblank.loc[valid_target]).astype(int)
+        if len(indicator) < _MIN_N_FOR_RHO or indicator.nunique() < 2:
+            continue
+        y_here = y_all.loc[valid_target]
+        rho, _p = spearmanr(indicator, y_here, nan_policy="omit")
+        if not np.isnan(rho) and abs(rho) >= _MISSINGNESS_RHO_WARN:
+            findings.append(
+                Finding(
+                    check="informative_missingness",
+                    severity="warning",
+                    message=(
+                        f"column '{name}' missingness correlates with target '{target}' "
+                        f"(Spearman rho={rho:.2f}, {frac_blank_col:.0%} blank, "
+                        f"n={len(indicator)}) - whether this cell was measured looks "
+                        "informative, not random; zero-filling it may be encoding the "
+                        "outcome into the features"
+                    ),
+                    column=name,
+                    detail={
+                        "target": target,
+                        "rho": float(rho),
+                        "frac_blank": frac_blank_col,
+                        "n": int(len(indicator)),
+                    },
+                )
+            )
+
+    return findings
+
+
+# --- 11. constant-within-group columns ------------------------------------------ #
+
+
+def check_constant_within_group(df: pd.DataFrame, *, group_hint: Pattern[str]) -> list[Finding]:
+    """Flag a column that varies globally but is a group-identity proxy in disguise.
+
+    `check_constant_columns` catches a column that is constant EVERYWHERE - no
+    signal at all. This catches the sneakier variant: a column that varies
+    across the whole sheet (so `check_constant_columns` says nothing) but has
+    exactly one value inside every group - so within any single group it
+    carries zero information, and whatever it appears to predict is actually
+    just "which group this row is in." On the owner's real Cytena
+    clone-funnel data, 4 of 6 candidate features had exactly one unique value
+    within every campaign; they were campaign identity in disguise, and they
+    inflated a within-population score to ~0.86 when the campaign-mean anchor
+    alone - which uses no per-clone information whatsoever - already scored
+    ~0.75 (voyager-brain-rebuild/docs/ml-review.md, finding P0.2). A model fit
+    on such a column mostly learns "which group," not the thing the group
+    label is standing in for.
+
+    The group column is detected the same way `kalos.portal.analysis` infers
+    it for the live analyze path: the first column whose name matches
+    `group_hint` (a `DomainProfile`'s `group_hint` regex, e.g.
+    `medium|strain|recipe|batch|campaign|group|lot` for the bioprocess
+    profile). No group column present -> nothing to check, empty list.
+
+    A group must have at least 2 non-blank-labeled rows to say anything about
+    "varies within it" at all (a singleton group trivially has exactly one
+    value in every column, which is not evidence of anything); if every group
+    is a singleton, the check has nothing measurable and returns no findings.
+    Blank cells never count as "a value" - a column that is blank throughout
+    some group is a missingness problem (`check_missingness`'s job), not
+    evidence the column is constant there, so that group correctly fails the
+    "exactly one unique value" test and the column is not flagged on its
+    account.
+
+    WARNING severity: a proxy feature does not make a sheet unusable, but any
+    model fit on it needs the caller to know that measured skill may be group
+    memorization, not real signal.
+    """
+    findings: list[Finding] = []
+    gcol = next((c for c in df.columns if group_hint.search(str(c))), None)
+    if gcol is None:
+        return findings
+
+    nonblank = df.apply(_nonblank_mask)
+    group_present = nonblank[gcol]
+    if not bool(group_present.any()):
+        return findings
+
+    group_labels = df.loc[group_present, gcol]
+    group_sizes = group_labels.value_counts()
+    measurable_groups = set(group_sizes[group_sizes >= 2].index)
+    if not measurable_groups:
+        return findings  # every group is a singleton: within-group variation is unmeasurable
+
+    in_measurable = group_present & df[gcol].isin(measurable_groups)
+    groups_for_rows = df.loc[in_measurable, gcol]
+    blanked = df.where(nonblank)  # blank cells -> NaN, matches `_nonblank_mask` everywhere else
+
+    gcol_name = str(gcol)
+    for col in df.columns:
+        if col == gcol:
+            continue
+        name = str(col)
+        global_values = blanked[col].dropna()
+        if global_values.nunique() < 2:
+            continue  # already globally constant - check_constant_columns' job, not this one
+
+        within_group_nunique = blanked.loc[in_measurable, col].groupby(groups_for_rows).nunique(
+            dropna=True
+        )
+        # Every measurable group must show EXACTLY one non-blank value (not "at
+        # most one": a group where this column is entirely blank has nunique
+        # 0, which correctly fails this test rather than looking constant).
+        if len(within_group_nunique) == len(measurable_groups) and bool(
+            (within_group_nunique == 1).all()
+        ):
+            findings.append(
+                Finding(
+                    check="constant_within_group",
+                    severity="warning",
+                    message=(
+                        f"column '{name}' varies globally but has exactly one value "
+                        f"within every group of '{gcol_name}' ({len(measurable_groups)} "
+                        "group(s) with 2+ rows checked) - looks like a proxy for group "
+                        "identity, not a real feature; any predictive skill attributed "
+                        "to it may be group memorization"
+                    ),
+                    column=name,
+                    detail={
+                        "group_column": gcol_name,
+                        "n_groups_checked": len(measurable_groups),
+                    },
+                )
+            )
+
     return findings

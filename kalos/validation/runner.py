@@ -27,8 +27,10 @@ from kalos.normalize import units
 
 from .checks import (
     check_constant_columns,
+    check_constant_within_group,
     check_controls_present,
     check_duplicate_rows,
+    check_informative_missingness,
     check_missingness,
     check_outliers,
     check_physical_bounds,
@@ -49,14 +51,17 @@ def validate_frame(
     profile: DomainProfile = BIOPROCESS_PROFILE,
     mode: str = "warn",
 ) -> ValidationReport:
-    """Run all nine validation checks over `df` and return an aggregated report.
+    """Run all eleven validation checks over `df` and return an aggregated report.
 
     `target`/`features` feed `check_replicate_adequacy` (both optional -
     without them that check still runs its row-count checks, just skips the
-    noise-floor estimate). `profile` supplies the `id_hint`/`outcome_hint`
-    regexes for `check_provenance_metadata` and `check_duplicate_rows`. `mode`
-    is stored on the returned report for the caller to act on; this function
-    does not enforce it.
+    noise-floor estimate); `target` alone also feeds `check_informative_missingness`
+    (`None` -> that check reports nothing, see its own docstring). `profile`
+    supplies the `id_hint`/`outcome_hint`/`group_hint` regexes for
+    `check_provenance_metadata`, `check_duplicate_rows`, and
+    `check_constant_within_group` respectively. `mode` is stored on the
+    returned report for the caller to act on; this function does not enforce
+    it.
 
     Never raises: each check runs inside its own try/except, and an
     unexpected exception becomes a `warning`-severity finding
@@ -97,6 +102,11 @@ def validate_frame(
     run("replicate_adequacy", lambda: check_replicate_adequacy(df, target, feats))
     run("controls_present", lambda: check_controls_present(df))
     run("constant_columns", lambda: check_constant_columns(df))
+    run("informative_missingness", lambda: check_informative_missingness(df, target))
+    run(
+        "constant_within_group",
+        lambda: check_constant_within_group(df, group_hint=profile.group_hint),
+    )
 
     return build_report(
         mode=mode,
