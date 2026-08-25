@@ -14,6 +14,8 @@ import zipfile
 
 import pandas as pd
 
+from kalos.normalize.orientation import detect_orientation
+
 log = logging.getLogger("kalos.portal")
 
 # --- upload safety limits ---------------------------------------------------- #
@@ -158,6 +160,34 @@ def _reject_oversized_xlsx(raw: bytes) -> None:
         _reject_oversized_xlsx_via_openpyxl(raw)
 
 
+def _apply_orientation_prepass(df: pd.DataFrame) -> pd.DataFrame:
+    """Tier-1 deterministic pre-pass (`kalos.normalize.orientation`): detect
+    whether the just-parsed sheet is standard or transposed orientation, and
+    normalize a confidently-transposed sheet BEFORE anything downstream
+    (unit normalization, the validation gate, analysis) ever sees it - see
+    `kalos/normalize/orientation.py`'s module docstring for why this has to
+    happen first.
+
+    Never silently swaps the frame without a trace: the `OrientationReport`
+    is always recorded on the returned frame's `df.attrs["kalos_orientation"]`
+    - including the "standard"/"ambiguous" no-op cases - so a downstream
+    provenance report can see what this pre-pass decided and why, without
+    changing `_parse_upload`'s return type or every caller's signature.
+    An ambiguous sheet is returned completely untouched (never guessed);
+    a standard sheet is also returned untouched, so this pre-pass leaves
+    kalos's existing behavior byte-identical for every sheet that was
+    already standard orientation.
+    """
+    report = detect_orientation(df)
+    out = report.normalized_frame if report.orientation == "transposed" and report.normalized_frame is not None else df
+    out.attrs["kalos_orientation"] = {
+        "orientation": report.orientation,
+        "confidence": report.confidence,
+        "signals": dict(report.signals),
+    }
+    return out
+
+
 def _parse_upload(raw: bytes) -> pd.DataFrame:
     """Turn raw upload bytes into a bounded dataframe, or raise `UploadRejected`.
 
@@ -192,7 +222,7 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
             raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
         if rows * cols > MAX_XLSX_CELLS:
             raise UploadRejected(_ERR_TOO_LARGE)
-        return df
+        return _apply_orientation_prepass(df)
 
     # Otherwise treat as text/CSV. A binary blob that is neither a zip nor valid
     # tabular text will not yield usable numeric columns and is rejected downstream
@@ -212,4 +242,4 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
     # contract, so an over-cap CSV is rejected like the xlsx cell-cap guard.
     if len(df) > MAX_CSV_ROWS:
         raise UploadRejected(_ERR_TOO_LARGE)
-    return df
+    return _apply_orientation_prepass(df)
