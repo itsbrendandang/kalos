@@ -39,11 +39,37 @@ explicit `bounds` spanning both the training and target scales (matching how
 `kalos.core.evaluation._oof` fixes ONE box across every CV fold, train and
 held-out alike, so the reported CV number describes the same normalization
 the deployed model would use).
+
+V1 CANDIDATES - MEASURED, NOT PROMOTED. `kalos.scale.candidates` has two
+architectural fixes for v0's extrapolate-up ranking failure (a
+physics-informed mean function, `PhysicsMeanSurrogate`; scale-as-fidelity,
+`MultiFidelitySurrogate`), evaluated against v0 under
+`leave_one_scale_out_report` on both the real `mab-scaleup-synthetic`
+dataset and a harder synthetic dataset with a planted, strong recipe-x-scale
+interaction (see this repo's v1 report for the full numbers). Neither
+candidate cleared the promotion bar this module's `fit` uses to select a
+default: on the real data, none of the three models' extrapolate-up
+Spearman (v0 -0.7, `physics_mean` -0.4, `multi_fidelity` 0.0, all at n=5)
+is distinguishable from a no-correlation null (exact permutation p >= 0.23
+for every one of them - n=5 is simply too few points for a rank correlation
+to be a measurement); v0 also posts the best extrapolate-up MAE of the
+three. On the harder synthetic dataset - built specifically to check
+whether the harness or these architectures can recover a genuine, strong
+rank-crossing when one is actually present - all three, INCLUDING
+unmodified v0, correctly recovered it (extrapolate-up Spearman ~0.86-0.89),
+which is why this module's default stays v0: the real dataset's -0.7 reads
+as evaluation noise on a weak-to-absent true recipe signal (see the v1
+report's rank-crossing check: a pooled OLS F-test for a
+feature-by-log-scale interaction across all 55 real rows is NOT significant,
+F=0.92, p=0.44), not a v0 architecture failure the candidates fix - so
+there was nothing here that clears "a measured extrapolate-up win that is
+not within noise". Both candidates remain available, evidence attached,
+behind the explicit `candidate` constructor parameter below.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -51,6 +77,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from kalos.core.surrogate import Surrogate
 
+from .candidates import MultiFidelitySurrogate, PhysicsMeanSurrogate, ScaleCandidateModel
 from .features import (
     DEFAULT_GEOMETRY,
     DEFAULT_POWER_NUMBER,
@@ -126,6 +153,13 @@ def build_feature_matrix(
     return X, names
 
 
+_CANDIDATE_FACTORIES: dict[str, Callable[[list[str]], ScaleCandidateModel] | None] = {
+    "v0": None,  # unchanged: `Surrogate()` directly, no `kalos.scale.candidates` involved.
+    "physics_mean": lambda names: PhysicsMeanSurrogate(names),
+    "multi_fidelity": lambda names: MultiFidelitySurrogate(names),
+}
+
+
 class ScaleUpTransferModel:
     """Predict a target KPI at a new scale from small-scale observations.
 
@@ -138,14 +172,36 @@ class ScaleUpTransferModel:
         process_columns: Sequence[str],
         target_column: str,
         config: ScaleFeatureConfig = DEFAULT_SCALE_FEATURE_CONFIG,
+        *,
+        candidate: str = "v0",
     ) -> None:
+        """`candidate` (optional, default `"v0"` - UNCHANGED default
+        behavior): selects which model `fit` builds.
+
+          - `"v0"` (default): `kalos.core.surrogate.Surrogate` directly,
+            exactly as before this parameter existed.
+          - `"physics_mean"`: `kalos.scale.candidates.PhysicsMeanSurrogate`.
+          - `"multi_fidelity"`: `kalos.scale.candidates.MultiFidelitySurrogate`.
+
+        See the module docstring's "V1 CANDIDATES" section for why these two
+        are opt-in rather than the default: measured on both the real
+        dataset and a harder synthetic one with a planted rank-crossing,
+        neither produced an extrapolate-up win over v0 that clears the noise
+        floor at the available sample size. Raises `ValueError` for any
+        other value, naming the three valid choices.
+        """
+        if candidate not in _CANDIDATE_FACTORIES:
+            raise ValueError(
+                f"candidate must be one of {sorted(_CANDIDATE_FACTORIES)}, got {candidate!r}"
+            )
         self.process_columns = list(process_columns)
         self.target_column = target_column
         self.config = config
+        self.candidate = candidate
         self.feature_names: list[str] | None = None
         self.bounds_: NDArray[np.float64] | None = None
         self.n_dropped_rows_: int = 0
-        self._surrogate: Surrogate | None = None
+        self._surrogate: Surrogate | ScaleCandidateModel | None = None
 
     def fit(
         self,
@@ -190,7 +246,9 @@ class ScaleUpTransferModel:
         else:
             box = np.asarray(bounds, dtype=float)
 
-        self._surrogate = Surrogate().fit(X_clean, y_clean, bounds=box, noise=noise)
+        factory = _CANDIDATE_FACTORIES[self.candidate]
+        model: Surrogate | ScaleCandidateModel = Surrogate() if factory is None else factory(names)
+        self._surrogate = model.fit(X_clean, y_clean, bounds=box, noise=noise)
         self.feature_names = names
         self.bounds_ = box
         return self
