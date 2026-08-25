@@ -246,3 +246,62 @@ def test_parse_upload_standard_csv_is_byte_identical_in_values():
     pd.testing.assert_frame_equal(
         parsed.reset_index(drop=True), raw_df.reset_index(drop=True), check_dtype=False
     )
+
+
+def test_batch_id_first_column_is_standard_not_transposed():
+    """The review blocker, locked in. A standard sheet whose first column is a
+    per-run identifier ("Batch-1".."Batch-N") satisfied the old "batch" keyword
+    on every sampled row and was confidently (1.0) TRANSPOSED - its real
+    headers replaced by the run ids. An id column is the signature of a
+    standard sheet (one labeled row per run); the id-pattern gate now rules it
+    standard before any keyword scoring runs, and the bare "batch" token is
+    gone from the keyword list (it names identity, not a parameter)."""
+    rng = np.random.default_rng(0)
+    n = 40
+    df = pd.DataFrame(
+        {
+            "Batch": [f"Batch-{i + 1}" for i in range(n)],
+            "temperature_C": rng.uniform(30.0, 38.0, n).round(1),
+            "ph": rng.uniform(6.5, 7.2, n).round(2),
+            "titer_g_L": rng.uniform(0.5, 8.0, n).round(2),
+        }
+    )
+    report = detect_orientation(df)
+    assert report.orientation == "standard"
+    assert report.signals.get("first_column_id_rate", 0.0) >= 0.7
+    assert report.normalized_frame is None
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [f"RUN-{i:04d}" for i in range(30)],
+        [f"exp_{i}" for i in range(30)],
+        [str(i + 1) for i in range(30)],
+        [f"BQ{i:04d}" for i in range(30)],
+    ],
+)
+def test_id_shaped_first_columns_are_standard(ids: list[str]):
+    """Every common run-id shape (prefix-counter, underscore, bare integer,
+    packed alnum) takes the id gate, not the heuristics."""
+    rng = np.random.default_rng(1)
+    df = pd.DataFrame({"id": ids, "temp": rng.uniform(30, 38, len(ids))})
+    assert detect_orientation(df).orientation == "standard"
+
+
+def test_id_gate_does_not_eat_a_genuinely_transposed_sheet():
+    """Parameter names carry words, not counters - the id gate must not fire
+    on a real transposed sheet, which still has to be caught and normalized."""
+    rng = np.random.default_rng(2)
+    df = pd.DataFrame(
+        {
+            "parameter": [
+                "temperature_C", "ph_setpoint", "feed_rate_mL_h",
+                "induction_time_h", "titer_g_L",
+            ],
+            **{f"exp{j}": rng.uniform(0, 10, 5).round(2) for j in range(1, 9)},
+        }
+    )
+    report = detect_orientation(df)
+    assert report.orientation == "transposed"
+    assert report.normalized_frame is not None

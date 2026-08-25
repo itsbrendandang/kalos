@@ -203,3 +203,44 @@ def test_constraint_response_is_json_serializable():
     out2 = _analyze(_sheet())
     json.dumps(out2["constraint"])
     json.dumps(out2["proposals"])
+
+
+def test_constraint_composes_with_the_replicate_aware_fit():
+    """Review finding (medium): on a replicated sheet the TARGET surrogate is
+    fit on replicate-averaged rows while the constraint surrogate is fit on
+    raw target-present rows, and the two live in one ModelListGP. BoTorch
+    formally supports differently-shaped training sets per sub-model, but
+    this exact combination - the common client case of a replicated DoE with
+    a purity floor - had zero coverage. Locks in: the analysis completes, the
+    constraint is applied, the batch is in-bounds, and the response stays
+    JSON-serializable."""
+    import json
+
+    rng = np.random.default_rng(21)
+    n_rec, n_rep = 12, 3
+    f0 = rng.uniform(0.0, 4.0, n_rec)
+    f1 = rng.uniform(0.0, 4.0, n_rec)
+    titer_true = 2.0 + 1.5 * f0 - 0.3 * (f1 - 2.0) ** 2
+    purity_true = 97.0 - 1.2 * f0  # anti-correlated with titer
+    rows = []
+    for k in range(n_rec):
+        for _ in range(n_rep):
+            rows.append(
+                {
+                    "Methanol": round(float(f0[k]), 3),
+                    "pH": round(float(f1[k]), 3),
+                    "purity_pct": round(float(purity_true[k] + rng.normal(0, 0.2)), 3),
+                    "lipase_titer": round(float(titer_true[k] + rng.normal(0, 0.8)), 3),
+                }
+            )
+    df = pd.DataFrame(rows)
+    res = _analyze(
+        df, "lipase_titer", constraint={"column": "purity_pct", "floor": 94.0}
+    )
+    assert res["noise"]["replicate_aware"] is True  # the combination under test
+    assert res["constraint"]["applied"] is True
+    assert len(res["proposals"]) >= 1
+    for p in res["proposals"]:
+        assert "recipe" in p
+    assert "purity_pct" not in res["features"]
+    json.dumps(res)

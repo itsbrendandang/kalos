@@ -28,6 +28,7 @@ job, not this pre-pass's.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -43,11 +44,31 @@ Orientation = Literal["standard", "transposed", "ambiguous"]
 # client-specific terms per that port's PROVENANCE.md).
 _BIOPROCESS_KEYWORDS: tuple[str, ...] = (
     "scale", "ph", "temp", "temperature", "time", "feed", "final", "activity",
-    "batch", "induction", "glycerol", "methanol", "antifoam", "foam",
+    "induction", "glycerol", "methanol", "antifoam", "foam",
     "broth", "withdrawals", "od600", "titer", "method", "page",
     "seed", "fermentor", "shift", "duration", "setpoint",
     "yield", "output", "concentration", "production", "biomass",
 )
+# "batch" is deliberately NOT in the keyword list. It is not a measurable
+# parameter name - it is what a per-run IDENTIFIER column is called, and a
+# standard sheet whose first column reads "Batch-1".."Batch-N" satisfied a
+# "batch" keyword on every sampled row, driving a confident (1.0) transpose of
+# a perfectly ordinary run sheet whose real headers were then replaced by
+# "Batch-1".."Batch-N". Caught in review, reproduced, and now locked in by
+# `test_batch_id_first_column_is_standard_not_transposed`. The id-pattern gate
+# below is the structural guard; dropping the keyword removes the fuel.
+
+# Per-run identifier shapes: a common prefix + separator + counter
+# ("Batch-1", "RUN-0007", "exp_12", "BQ0031"), or a bare integer counter.
+# A first column of parameter LABELS (the true transposed case) does not look
+# like this - parameter names differ from each other in words, not counters.
+_ID_LIKE_RE = re.compile(r"^[a-z]{0,12}[\s_\-#]*\d{1,6}$")
+_ID_FRACTION = 0.7
+# Fraction of sampled first-column values that must match the id shape before
+# the column is ruled a run-identifier. 0.7 tolerates a few stray labels
+# (headers, blanks, one-off notes) while a genuinely transposed sheet's
+# parameter names essentially never hit it - "temperature_C" or "feed rate"
+# contain no trailing counter.
 _TYPE_COLUMN_INDICATORS: tuple[str, ...] = ("feature", "objective", "ignore", "target")
 _STANDARD_HEADER_HINTS: tuple[str, ...] = ("param", "feature", "variable", "factor")
 
@@ -221,6 +242,23 @@ def _normalize_transposed(df: pd.DataFrame) -> pd.DataFrame | None:
     return pd.DataFrame(numeric_columns).reset_index(drop=True)
 
 
+def _first_column_id_rate(df: pd.DataFrame) -> float:
+    """Fraction of non-blank first-column values shaped like a run identifier.
+
+    The id shape (`_ID_LIKE_RE`): optional short alphabetic prefix, optional
+    separator, then a counter - "batch-1", "run 0007", "bq0031", "12". Values
+    are lowercased and whitespace-trimmed first. Blank cells are excluded from
+    the denominator (a sparse id column is still an id column). Returns 0.0 on
+    an empty column so the gate simply never fires.
+    """
+    values = df.iloc[:, 0].astype(str).str.strip().str.lower()
+    nonblank = values[(values != "") & (values != "nan")]
+    if len(nonblank) == 0:
+        return 0.0
+    matches = sum(bool(_ID_LIKE_RE.match(v)) for v in nonblank)
+    return matches / len(nonblank)
+
+
 def _first_column_numeric_rate(df: pd.DataFrame) -> float:
     """Fraction of the first column's non-null values that parse as plain
     numbers. `0.0` for an all-null or empty first column (never divides by
@@ -264,6 +302,22 @@ def detect_orientation(df: pd.DataFrame) -> OrientationReport:
                 orientation="standard",
                 confidence=first_col_numeric_rate,
                 signals={"first_column_numeric_rate": first_col_numeric_rate},
+            )
+
+        # Second hard gate, same rank as the numeric one: a first column of
+        # per-run IDENTIFIERS ("Batch-1", "RUN-0007", bare counters) is the
+        # signature of a STANDARD sheet - one row per run, labeled. A
+        # transposed sheet's first column holds parameter names, which do not
+        # look like a prefix+counter sequence. Without this gate, an id column
+        # can satisfy keyword heuristics ("batch" formerly did) and confidently
+        # transpose an ordinary sheet, replacing its real headers with the run
+        # ids - the review blocker this gate closes.
+        id_rate = _first_column_id_rate(df)
+        if id_rate >= _ID_FRACTION:
+            return OrientationReport(
+                orientation="standard",
+                confidence=id_rate,
+                signals={"first_column_id_rate": id_rate},
             )
 
         signals = _score_signals(df)

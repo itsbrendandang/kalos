@@ -103,3 +103,21 @@ def test_report_respects_explicit_bounds():
     wide_bounds = np.vstack([X.min(axis=0) - 1.0, X.max(axis=0) + 1.0])
     report = leave_one_scale_out_report(df, "titer_g_per_L", _PROCESS_COLUMNS, bounds=wide_bounds)
     assert report["n_scales"] == len(_SCALES)
+
+
+def test_float_noise_in_scale_does_not_split_a_scale_into_two_groups():
+    """Review finding, locked in. Scales are grouped by rounded value (the
+    same 6-decimal convention aggregate_replicates uses), not exact float
+    equality. Without rounding, a scale recorded as 100.0000000001 after a
+    unit round-trip would become its own 'scale', landing in the TRAINING set
+    of the fold that holds out 100.0 - a replicate of the held-out scale
+    leaking into its own extrapolation fold."""
+    df = _fabricate_batches([1.0, 10.0, 100.0], n_per_scale=4)
+    # one replicate of the largest scale carries float noise below the grain
+    noisy = df.index[df["scale_L"] == 100.0][0]
+    df.loc[noisy, "scale_L"] = 100.0 + 1e-9
+    report = leave_one_scale_out_report(df, "titer_g_per_L", _PROCESS_COLUMNS)
+    held_out = sorted({p["scale_L"] for p in report["per_scale"]})
+    assert held_out == [1.0, 10.0, 100.0]
+    n_by_scale = {p["scale_L"]: p["n"] for p in report["per_scale"]}
+    assert n_by_scale[100.0] == 4  # the noisy replicate stayed with its scale

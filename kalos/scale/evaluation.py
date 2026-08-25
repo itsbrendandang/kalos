@@ -204,6 +204,13 @@ def leave_one_scale_out_report(
     finite = np.isfinite(X).all(axis=1) & np.isfinite(y) & np.isfinite(scale)
     n_dropped = int((~finite).sum())
     X, y, scale = X[finite], y[finite], scale[finite]
+    # Group scales by ROUNDED value, matching the replicate-matching convention
+    # `kalos.core.replicates.aggregate_replicates` uses (round to 6 places).
+    # Exact float equality would split "2000.0" from "1999.9999999998" (a unit
+    # round-trip artifact) into two "scales", quietly turning a replicate of
+    # the held-out scale into TRAINING data for its own fold - a leak that
+    # inflates exactly the extrapolation claim this report exists to test.
+    scale = np.round(scale, 6)
     process_only = X[:, :n_process]
 
     if bounds is None:
