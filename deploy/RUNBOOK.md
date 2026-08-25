@@ -55,7 +55,7 @@ docker compose logs engine | grep "security posture"
 
 # 6. Health.
 docker compose ps                    # both engine and web should show "healthy"
-curl -f http://localhost:${KALOS_ENGINE_PORT:-8050}/
+curl -f http://localhost:${KALOS_ENGINE_PORT:-8050}/healthz
 curl -f http://localhost:${KALOS_WEB_PORT:-3000}/
 ```
 
@@ -170,10 +170,11 @@ script still copies it opportunistically under
 
 Both `engine` and `web` carry an image-level `HEALTHCHECK` (see
 `Dockerfile.engine` / `Dockerfile.web` for exactly what each checks and
-why, including why the engine's uses `GET /` rather than a dedicated
-`/healthz` - **there is no such route in `kalos/portal/app.py` today; this
-is flagged as required follow-up wiring, not something this deploy pack
-adds to the application**). `docker compose ps` shows `healthy` /
+why). The engine's hits `GET /healthz` (wave-2 fix; an earlier pass of this
+deploy pack used `GET /` as a stand-in because the route did not exist yet
+- see git history for that reasoning). `/healthz` is unauthenticated by
+design, returns a fixed `{"status": "ok"}`, and never touches the database,
+so it stays a pure liveness check. `docker compose ps` shows `healthy` /
 `unhealthy` / `starting` per service; `web`'s startup is ordered on
 `engine` reaching `healthy` via `depends_on: condition: service_healthy`.
 
@@ -188,38 +189,31 @@ adds to the application**). `docker compose ps` shows `healthy` /
 - [ ] `docker compose logs engine | grep "security posture"` shows
       `auth=enforced` and `cors=allowlist(N)`, not `OPEN` / `dev-localhost`.
 - [ ] TLS termination is delegated to a host-level reverse proxy (nginx,
-      Caddy, your cloud LB) placed in front of BOTH published ports. This
-      compose stack serves plain HTTP on both front doors; that is a
+      Caddy, your cloud LB) placed in front of the single published port.
+      This compose stack serves plain HTTP on its front door; that is a
       deliberate v0 scope cut, not an oversight - wiring TLS in is the
       first thing to add before this stack sees a network it does not
       fully trust.
-- [ ] **Known gap, read before enabling auth in production**: kalos-web's
-      browser client (`lib/api.ts`, confirmed by reading every
-      `app/*.tsx`/`components/*.tsx` file that imports it) sends every
-      `fetch()` call with NO `Authorization` header at all. With
-      `KALOS_AUTH_TOKENS` enforced, every one of those browser calls gets a
-      401 from the engine - kalos-web today has no code path that attaches
-      a bearer token. This deploy pack correctly satisfies
-      `assert_safe_exposure` so the engine starts and refuses anonymous
-      remote access at the network layer; it does NOT make kalos-web's own
-      UI functional against an auth-enforced engine, because that wiring
-      does not exist yet in the kalos-web repo (out of this pack's file
-      scope - `deploy/` and this repo only). Two honest options until that
-      lands:
-      1. Add bearer-token wiring to kalos-web's client (the real fix -
-         flag it as a follow-up task in that repo), or
-      2. For a v0 deployment on a network you already control end-to-end
-         (VPN, office IP allowlist, security group), set
-         `KALOS_ALLOW_OPEN_ACCESS=1` instead of `KALOS_AUTH_TOKENS`, keep
-         `KALOS_ANON_SALT` set regardless, and enforce the actual access
-         control at the network perimeter instead of in the app. This is a
-         deliberate, logged risk acceptance (`kalos/portal/config.py`'s
-         `open_access_explicitly_allowed`), not a bypass of the guard - it
-         is the guard's own documented escape hatch. Do not do this on a
-         network you do not fully control.
-- [ ] Only two ports are published: `KALOS_ENGINE_PORT` (default 8050) and
-      `KALOS_WEB_PORT` (default 3000). Confirm with `docker compose ps` -
-      no other service should show a `PORTS` column entry.
+- [x] **Auth between web and engine - CLOSED (wave 2)**: kalos-web now ships
+      a server-side proxy (`app/api/engine/[...path]/route.ts`). The browser
+      calls same-origin `/api/engine/...`; the Next server forwards to the
+      engine over the compose-internal network with `Authorization: Bearer
+      $KALOS_ENGINE_TOKEN`. The token is server-only env (never NEXT_PUBLIC_,
+      never in the client bundle), and the engine no longer publishes a host
+      port at all - one front door. Setup: mint a `KALOS_AUTH_TOKENS` entry
+      (subject e.g. "kalos-web-service") and set `KALOS_ENGINE_TOKEN` in
+      `deploy/.env` to its PLAINTEXT counterpart. (`.env.example` could not be
+      auto-edited - this workspace hard-denies `.env*` writes - add the
+      `KALOS_ENGINE_TOKEN=` line there by hand.) The old direct-browser mode
+      survives as an explicit dev escape hatch: set `NEXT_PUBLIC_API_URL` and
+      re-publish the engine port in the compose. The previous option of
+      `KALOS_ALLOW_OPEN_ACCESS=1` + network-perimeter control remains the
+      guard's own documented escape hatch for fully-controlled networks, but
+      is no longer needed to make the UI functional.
+- [ ] Only ONE port is published: `KALOS_WEB_PORT` (default 3000). The
+      engine is compose-internal only (wave 2 - the web server proxies to
+      it). Confirm with `docker compose ps` - no other service should show
+      a `PORTS` column entry.
 - [ ] Exactly one `engine` replica. `kalos/runner/singleton.py`'s
       `runner.lock` and the store's single-writer assumption
       (`kalos/store/sqlite_store.py`'s own docstring: "there is never more
@@ -255,15 +249,20 @@ into the JS files on disk inside the image.
   sibling `kalos-web` checkout for `web`, `deploy/backup` for `backup`) and
   all `${VAR}` substitutions resolving as intended.
 - Every fact this pack's comments assert about the kalos source was
-  confirmed by reading the actual files, not assumed: `kalos/portal/
-  __main__.py`'s uvicorn entrypoint and `assert_safe_exposure` call;
-  `kalos/portal/config.py`'s bind/CORS/salt logic; `kalos/portal/auth.py`'s
-  token model; `kalos/portal/app.py`'s registered routes (no `/healthz`)
-  and the `_refuse_open_remote_access` middleware; `kalos/store/
-  sqlite_store.py` and `kalos/portal/campaign.py`'s `KALOS_STATE_DIR`
-  handling (and the `SqliteStore`/`runner.lock` gap where it is ignored);
-  `kalos/runner/singleton.py`'s single-writer lock; `kalos-web/package.json`
-  and `next.config.ts` (no `output: "standalone"` today); `kalos-web/
+  confirmed by reading the actual files, not assumed, as of this task:
+  `kalos/portal/__main__.py`'s uvicorn entrypoint and `assert_safe_exposure`
+  call; `kalos/portal/config.py`'s bind/CORS/salt logic; `kalos/portal/
+  auth.py`'s token model; `kalos/portal/app.py`'s registered routes (no
+  `/healthz` at the time) and the `_refuse_open_remote_access` middleware;
+  `kalos/store/sqlite_store.py` and `kalos/portal/campaign.py`'s
+  `KALOS_STATE_DIR` handling (and the `SqliteStore`/`runner.lock` gap where
+  it was then ignored). **Both gaps were closed in a later wave**:
+  `kalos/portal/app.py` now has `GET /healthz`, and `SqliteStore`/
+  `SingletonLock` now read `KALOS_STATE_DIR` too - see the "Health checks"
+  section above and this Dockerfile's `KALOS_STATE_DIR` comment for the
+  current state. `kalos/runner/singleton.py`'s single-writer lock;
+  `kalos-web/package.json` and `next.config.ts` (no `output: "standalone"`
+  today); `kalos-web/
   lib/api.ts` and its callers (all `"use client"`, no `Authorization`
   header sent anywhere).
 - `deploy/backup/backup.sh` runs cleanly under `sh -n` (syntax check) and
