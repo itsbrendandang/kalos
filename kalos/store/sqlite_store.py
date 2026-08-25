@@ -1,18 +1,23 @@
 """SQLite-backed experiment store.
 
-Default location: `~/.kalos/experiments.db`. The path is a constructor
-argument specifically so tests can point at a `tmp_path` and never touch the
-real user database. `payload` / `config` / `result` / `provenance` are stored
-as JSON text columns; every mutation runs inside its own single-statement
-transaction (one connection per call, opened and closed within the method),
-which is transaction-safe enough for the lock'd, single-instance Singleton
-this store backs - there is never more than one writer at a time by design.
+Default location: `<KALOS_STATE_DIR>/experiments.db`, falling back to
+`~/.kalos/experiments.db` when `KALOS_STATE_DIR` is unset - the same default
+`kalos.portal.campaign.CampaignStore` and `kalos.portal.app`'s `_LATEST`
+cache use, so all of a tenant's on-disk state lands under one directory. The
+path is also a constructor argument specifically so tests can point at a
+`tmp_path` and never touch the real user database. `payload` / `config` /
+`result` / `provenance` are stored as JSON text columns; every mutation runs
+inside its own single-statement transaction (one connection per call, opened
+and closed within the method), which is transaction-safe enough for the
+lock'd, single-instance Singleton this store backs - there is never more
+than one writer at a time by design.
 """
 from __future__ import annotations
 
 import contextlib
 import json
 import math
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -21,7 +26,28 @@ from typing import Any
 
 from .models import Experiment, Status, legal_transition
 
+# The fallback used when neither an explicit `path` nor `KALOS_STATE_DIR` is
+# set - i.e. today's behavior, unchanged. Kept as a plain module constant
+# (not folded into a function) so existing tests that
+# `monkeypatch.setattr(sqlite_store_module, "DEFAULT_DB_PATH", tmp_path / ...)`
+# keep working unmodified.
 DEFAULT_DB_PATH = Path.home() / ".kalos" / "experiments.db"
+
+
+def _default_db_path() -> Path:
+    """Resolve the no-argument default at CALL time, not import time.
+
+    Reads `KALOS_STATE_DIR` fresh on every call (matching
+    `kalos.portal.campaign.CampaignStore.__init__`'s convention exactly, down
+    to the same `Path.home() / ".kalos"` fallback) rather than baking it into
+    a module-level constant computed once at import - call-time reads let a
+    test `monkeypatch.setenv("KALOS_STATE_DIR", ...)` take effect without a
+    process restart, and let one process open stores under different state
+    dirs (e.g. a multi-tenant test run) simply by constructing `SqliteStore`
+    after changing the env var.
+    """
+    state_dir = os.environ.get("KALOS_STATE_DIR")
+    return Path(state_dir) / "experiments.db" if state_dir else DEFAULT_DB_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (
@@ -100,7 +126,7 @@ class SqliteStore:
     """CRUD + lifecycle mutations over the `experiments` table."""
 
     def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path) if path is not None else DEFAULT_DB_PATH
+        self.path = Path(path) if path is not None else _default_db_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.closing(self._connect()) as conn:
             with conn:

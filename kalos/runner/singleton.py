@@ -4,9 +4,10 @@ Pulls `READY` experiment JSON through a `BackendAdapter`, runs the existing BO
 engine (`kalos.portal.app._analyze`, called verbatim - this module adds
 orchestration, not new science), pushes the processed result back, and marks
 the experiment `DONE` (or `FAILED` with an actionable message). A PID/lock
-file at `~/.kalos/runner.lock` (path injectable) guarantees only one runner
-instance processes experiments at a time, with stale-lock detection so a
-crashed runner does not wedge the system.
+file at `<KALOS_STATE_DIR>/runner.lock` (path injectable), falling back to
+`~/.kalos/runner.lock` when `KALOS_STATE_DIR` is unset, guarantees only one
+runner instance processes experiments at a time, with stale-lock detection so
+a crashed runner does not wedge the system.
 """
 from __future__ import annotations
 
@@ -35,11 +36,30 @@ try:
 except ImportError:  # pragma: no cover - kalos always importable in practice
     _PACKAGE_VERSION = "unknown"
 
+# The fallback used when neither an explicit `path` nor `KALOS_STATE_DIR` is
+# set - i.e. today's behavior, unchanged. Kept as a plain module constant
+# (not folded into a function) so existing tests that
+# `monkeypatch.setattr(singleton_module, "DEFAULT_LOCK_PATH", tmp_path / ...)`
+# keep working unmodified.
 DEFAULT_LOCK_PATH = Path.home() / ".kalos" / "runner.lock"
 
 # A lock older than this is assumed abandoned by a crashed/killed runner even
 # if its pid happens to be reused by an unrelated process by the time we look.
 _DEFAULT_STALE_SECONDS = 3600.0
+
+
+def _default_lock_path() -> Path:
+    """Resolve the no-argument default at CALL time, not import time.
+
+    Reads `KALOS_STATE_DIR` fresh on every call, matching
+    `kalos.portal.campaign.CampaignStore.__init__`'s convention exactly (same
+    `Path.home() / ".kalos"` fallback) - see `kalos/store/sqlite_store.py`'s
+    `_default_db_path` for the identical reasoning: call-time reads let a
+    test `monkeypatch.setenv("KALOS_STATE_DIR", ...)` take effect with no
+    process restart.
+    """
+    state_dir = os.environ.get("KALOS_STATE_DIR")
+    return Path(state_dir) / "runner.lock" if state_dir else DEFAULT_LOCK_PATH
 
 def _err_zero_variance_target(target: str) -> str:
     return (
@@ -78,7 +98,7 @@ class SingletonLock:
     """
 
     def __init__(self, path: str | Path | None = None, *, stale_after: float = _DEFAULT_STALE_SECONDS) -> None:
-        self.path = Path(path) if path is not None else DEFAULT_LOCK_PATH
+        self.path = Path(path) if path is not None else _default_lock_path()
         self.stale_after = stale_after
         self._held = False
 
