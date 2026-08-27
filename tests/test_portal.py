@@ -48,6 +48,14 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
     # Note `clears_floor` still keys off the POOLED score alone: tightening the
     # gate changes which uploads the API accepts and is a product decision, not a
     # side effect of adding a measurement.
+    #
+    # `calibration` joined it for the same reason as the producer_* group: the
+    # pooled Spearman says the model RANKS held-out runs correctly and says
+    # nothing about whether its error bars are the right size, and the scientist
+    # acts on the +/-. The held-out sd it needs was already computed inside the
+    # CV and discarded, so this was reported as unmodeled for want of a number
+    # the engine had already paid for. It is reported beside the verdict, not
+    # folded into it.
     assert set(rel) == {
         "spearman",
         "ci95",
@@ -59,6 +67,7 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
         "producer_clears_floor",
         "n_producers",
         "producer_threshold",
+        "calibration",
     }
     assert "scale-up transfer" in rel["unmodeled"]
 
@@ -91,3 +100,30 @@ def test_latest_reflects_last_upload(tmp_path, monkeypatch):
     monkeypatch.setattr(portal, "_LATEST", {})
     reloaded = portal.latest(princ)
     assert reloaded["has_data"] is True and reloaded["dataset"] == "runs.csv"
+
+
+def test_importing_the_analysis_module_does_not_pull_torch():
+    """The idle `--watch` poller and the portal both import
+    `kalos.portal.analysis` at boot and may never run an analysis, so the
+    torch/botorch/gpytorch stack is deferred to `_analyze`. That intent lived
+    only in a comment, and a single top-level
+    `from kalos.core.evaluation import producer_only_spearman` - added for one
+    call site inside `_analyze` - quietly defeated it: `evaluation` imports
+    `surrogate`, so importing this module cost 1.2s and loaded the whole stack.
+
+    Asserted in a SUBPROCESS because the test session has torch loaded already.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import kalos.portal.analysis; "
+        "print('torch' in sys.modules or 'botorch' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False", (
+        "kalos.portal.analysis pulled torch at import time; move the offending "
+        "import into the deferred block inside _analyze"
+    )

@@ -24,6 +24,7 @@ information than it cost.
 from __future__ import annotations
 
 import itertools
+import logging
 
 import numpy as np
 import torch
@@ -35,6 +36,8 @@ from botorch.optim import (
 )
 
 from .surrogate import DEVICE, DTYPE, Surrogate, sanitize_bounds
+
+logger = logging.getLogger(__name__)
 
 # Enumerating one continuous optimization per categorical combination is exact
 # but costs a full multi-start solve per combination. Past this many combinations
@@ -53,6 +56,7 @@ def propose(
     cat_dims: list[int] | None = None,
     cat_cardinalities: list[int] | None = None,
     pending: np.ndarray | None = None,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Return `q` proposed points (shape q x d) maximizing constrained-free qLogNEI.
 
@@ -72,6 +76,21 @@ def propose(
     optimizer from proposing anything at all. Pass `None` (the default) when
     nothing is running, which leaves the acquisition unchanged.
 
+    `seed` governs the stochastic multi-start acquisition optimization (the
+    raw-sample initial condition draws inside `optimize_acqf` /
+    `optimize_acqf_mixed*`). `None` (the default) seeds nothing here, which is
+    byte-identical to the historical behavior: reproducibility is entirely the
+    caller's responsibility, via seeding the global torch RNG before calling
+    (as the portal's `_seed_everything` and the bench harness already do). A
+    library consumer that never seeds the global RNG gets silently
+    non-reproducible proposals under that contract - passing an explicit `seed`
+    here closes that gap. It is applied inside `torch.random.fork_rng()`, which
+    snapshots the caller's RNG state, seeds only within the block, and restores
+    the snapshot on exit - so a seeded call is reproducible without clobbering
+    the caller's own global RNG state as a side effect (a library function that
+    resets global state on the caller behind their back is a separate bug, not
+    a fix for this one).
+
     Every returned coordinate is clamped into `[lower, upper]` per feature so a
     proposal can never fall outside the observed design box. This guards against
     the historical out-of-range blow-up (e.g. a `Culture_Volume ~= 33,000,000`
@@ -86,21 +105,27 @@ def propose(
             torch.as_tensor(upper, dtype=DTYPE, device=DEVICE),
         ]
     )
-    # Noisy EI over the observed baseline (titer/yield are noisy), pruning baseline
-    # points that cannot be optimal so the acquisition stays cheap. X_baseline is
-    # the raw training design; the model applies its input transform internally.
     X_pending = _sanitize_pending(pending, lower, upper, cat_dims)
-    acq = qLogNoisyExpectedImprovement(
-        surrogate.model,
-        X_baseline=surrogate._X,
-        prune_baseline=True,
-        X_pending=X_pending,
-    )
-    if cat_dims:
-        candidates = _optimize_mixed(
-            acq, b, q, num_restarts, raw_samples, cat_dims, cat_cardinalities or []
+
+    def _run_acqf_optimization() -> torch.Tensor:
+        # Noisy EI over the observed baseline (titer/yield are noisy), pruning
+        # baseline points that cannot be optimal so the acquisition stays cheap.
+        # X_baseline is the raw training design; the model applies its input
+        # transform internally. `prune_baseline=True` draws posterior samples to
+        # decide what to prune, so building `acq` is itself stochastic - it must
+        # live inside this closure (and therefore inside the `seed` fork below)
+        # alongside `optimize_acqf`'s own raw-sample draws, or a seeded call
+        # would still leak unseeded randomness into the caller's global RNG.
+        acq = qLogNoisyExpectedImprovement(
+            surrogate.model,
+            X_baseline=surrogate._X,
+            prune_baseline=True,
+            X_pending=X_pending,
         )
-    else:
+        if cat_dims:
+            return _optimize_mixed(
+                acq, b, q, num_restarts, raw_samples, cat_dims, cat_cardinalities or []
+            )
         candidates, _ = optimize_acqf(
             acq_function=acq,
             bounds=b,
@@ -108,6 +133,17 @@ def propose(
             num_restarts=num_restarts,
             raw_samples=raw_samples,
         )
+        return candidates
+
+    if seed is None:
+        candidates = _run_acqf_optimization()
+    else:
+        # devices=[] restricts the fork to CPU RNG state (DEVICE is always CPU
+        # here), avoiding an unnecessary and potentially warning-raising probe
+        # of CUDA RNG state on machines without a GPU.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            candidates = _run_acqf_optimization()
     out = candidates.detach().cpu().numpy()
     # Belt-and-suspenders: clamp each coordinate back into the observed box. The
     # optimizer respects the bounds it is given, but a NaN/degenerate corner or a
@@ -141,6 +177,14 @@ def _sanitize_pending(
     the design is rejected wholesale (it is a caller bug, not a bad row), again by
     returning None rather than raising, because failing to propose is a worse
     outcome than proposing without the pending penalty.
+
+    The wholesale width-mismatch rejection and any row-level drop from the
+    finite-value filter are each logged once at warning level, not silent: a
+    caller bug that disables the in-flight guard (e.g. passing the wrong
+    design's pending block) would otherwise be indistinguishable downstream
+    from "nothing is running" - both read as `n_pending_considered == 0`. The
+    documented "nothing running" fast paths (`pending is None` / empty) are the
+    normal, expected case and are not logged.
     """
     if pending is None:
         return None
@@ -150,8 +194,22 @@ def _sanitize_pending(
     if arr.ndim != 2 or arr.shape[0] == 0:
         return None
     if arr.shape[1] != lower.shape[0]:
+        logger.warning(
+            "pending block rejected: expected width %d, got width %d (%d rows)",
+            lower.shape[0],
+            arr.shape[1],
+            arr.shape[0],
+        )
         return None
-    arr = arr[np.isfinite(arr).all(axis=1)]
+    total = arr.shape[0]
+    finite_mask = np.isfinite(arr).all(axis=1)
+    arr = arr[finite_mask]
+    if arr.shape[0] < total:
+        logger.warning(
+            "pending block dropped %d of %d rows: non-finite coordinates",
+            total - arr.shape[0],
+            total,
+        )
     if arr.shape[0] == 0:
         return None
     arr = np.clip(arr, lower, upper)

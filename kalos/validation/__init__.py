@@ -8,11 +8,11 @@ learns from bad data and produces a confident, wrong recommendation. This
 package is the layer that looks for exactly those failure modes before a
 run sheet reaches the engine.
 
-`validate_frame` is the entry point: run all nine checks, aggregate their
+`validate_frame` is the entry point: run all eleven checks, aggregate their
 findings into one `ValidationReport`, and never raise (a validation gate
 that crashes on the data it exists to catch is worse than no gate at all).
 `report.py` defines the report's shape, `bounds.py` the physically-possible
-ranges checks compare against, `checks.py` the nine checks themselves.
+ranges checks compare against, `checks.py` the eleven checks themselves.
 
 Torch-free by contract (numpy/pandas/scipy only), matching the rest of the
 domain-neutral layer this package sits alongside.
@@ -22,8 +22,10 @@ from __future__ import annotations
 from .bounds import DIMENSION_BOUNDS, DimensionBounds, infer_dimension
 from .checks import (
     check_constant_columns,
+    check_constant_within_group,
     check_controls_present,
     check_duplicate_rows,
+    check_informative_missingness,
     check_missingness,
     check_outliers,
     check_physical_bounds,
@@ -64,4 +66,6 @@ __all__ = [
     "check_replicate_adequacy",
     "check_controls_present",
     "check_constant_columns",
+    "check_informative_missingness",
+    "check_constant_within_group",
 ]

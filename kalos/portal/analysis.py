@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 
 from kalos.core.drivers import benjamini_hochberg, bootstrap_spearman, spearman_driver_matrix
-from kalos.core.evaluation import producer_only_spearman
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
 from kalos.core.gp_shape import gp_shape_report
@@ -49,6 +48,15 @@ from kalos.validation.checks import _RUN_ID_RE
 # torch/botorch/gpytorch stack (~220 MB) before any analysis ever runs. They
 # are imported lazily inside `_analyze`/`_seed_everything`, the only places
 # that actually need them. `kalos.domains` above is torch-free by contract.
+#
+# This is load-bearing and easy to break by accident: it was broken, by a single
+# top-level `from kalos.core.evaluation import producer_only_spearman` added for
+# one call inside `_analyze`. `evaluation` imports `surrogate`, so importing this
+# module pulled the whole stack (measured: 1.2s and `torch in sys.modules` right
+# after `import kalos.portal.analysis`) and the poller paid the tax it was
+# written to avoid. `tests/test_portal.py` now asserts the property instead of
+# trusting this comment. Every name from `kalos.core.evaluation` belongs in the
+# deferred block inside `_analyze`.
 
 # The default (bioprocess) column-role hints, kept as module-level names because
 # `_anonymize_result` and the provenance defaults reference them. Sourced from
@@ -156,11 +164,66 @@ CONFORMAL_ALPHA = 0.1
 # "90%" on another; a stated coverage that is wrong on screen is an overclaim,
 # not a hedge, so the engine now ships the number it actually computed.
 
+CV_N_REPEATS = 2
+# How many partitions `grouped_cv_report` draws for the reliability CI. On a
+# continuous target the grouped CV takes the unshuffled GroupKFold branch, so
+# a SINGLE partition's group-bootstrap CI only ever covers group-resampling
+# variance, not how much the estimate moves under a different, equally valid
+# partition - on the real media DoE the pooled Spearman moved 0.44 to 0.71
+# across n_splits 3 to 8 alone. Repeated CV over shuffled partitions is what
+# makes the CI honest about that.
+#
+# Repeat 0 is always the free unshuffled partition (the point estimate's
+# anchor, already paid for today), so each ADDITIONAL repeat costs one more
+# round of n_splits GP fits - not cheap at this module's per-fit cost. Timed
+# end-to-end on a 60-row, 13-column sheet on the dev machine this was tuned
+# on: n_repeats=1 (today's cost) ~5.3-6.1s, n_repeats=2 ~7.3-8.6s,
+# n_repeats=3 ~10.3-10.6s - already over the ~10s budget before counting any
+# slower CI hardware or a larger upload. 2 is the largest value that stayed
+# comfortably under budget with margin to spare: one extra shuffled partition
+# beyond today's, which is enough to turn "the CI is conditional on one fixed
+# split" into "the CI has seen the estimate move at least once," without
+# betting the request's latency on it.
+
 RELIABILITY_SPEARMAN_FLOOR = 0.20
 # The one out-of-fold Spearman floor this module uses, for the reliability verdict
 # AND for gating the GP shape report. It was previously a bare 0.20 literal in two
 # places here; a single name means the verdict and the shapes can never be held to
 # different bars, and a future change to the bar cannot move one without the other.
+
+LOGO_MAX_GROUPS = 12
+# Leave-one-group-out (`kalos.core.evaluation.logo_report`) costs one Surrogate GP
+# fit PER GROUP - unlike `grouped_cv_report`'s fixed `n_splits` folds, a LOGO run
+# grows with however many groups the sheet declares, so an unbounded sheet could
+# turn one request into dozens of GP fits. Timed end-to-end on this dev machine,
+# a 60-row, 2-continuous-feature sheet (12 recipes x 5 reps): without a declared
+# group column (`cv_logo` skipped) `_analyze` ran 1.46-2.05s across 4 runs
+# (min 1.46s); with a declared 12-group column - LOGO_MAX_GROUPS exactly, the
+# most expensive case this cap still allows - it ran 2.02-2.59s (min 2.02s), a
+# delta of roughly 0.5-0.6s for 12 extra GP fits on this machine, each fit on a
+# fold nearly as large as the full sheet (leave-ONE-group-out trains on
+# n_groups-1 of n_groups groups, a much bigger training split per fit than the
+# 5-fold CV's 4/5). That stays comfortably under a ~12s budget even with
+# slower CI hardware or a larger upload; a sheet with more groups than this cap
+# skips LOGO instead of letting the cost scale unbounded with group count, and
+# says so via `cv_logo`'s `reason` field below rather than staying silent about
+# why the number is missing.
+
+CV_TOPK_K = 5
+# How many of the top-ranked recipes `cv_topk` (kalos.core.evaluation.top_k_overlap)
+# scores. 5 mirrors `q=5`, the size of the batch this module actually proposes
+# below (`propose(..., q=5, ...)`) - the top-k question this metric answers
+# ("of the ones I'd actually advance, how many does the model get right") is
+# most honest when k matches the real decision size, not an arbitrary round number.
+
+GROUP_MEAN_BASELINE_MIN_GROUPS = 5
+# `cv_group_mean_baseline` (kalos.core.evaluation.group_mean_baseline_spearman)
+# needs enough REPLICATED groups for the leave-one-row-out group mean to be a
+# real prediction rather than noise from 1-2 groups' worth of pairs. 5 is a
+# convention, chosen for the same reason `MIN_REPLICATED_FOR_HETERO` (see
+# kalos.core.replicates) picks a small integer over a formula: below it, a
+# Spearman computed against so few independent group means would read as
+# confident nonsense, so the baseline declines rather than reports one.
 
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
@@ -423,7 +486,19 @@ def _analyze(
     # Deferred: these transitively import torch/botorch/gpytorch (see the
     # module-level note above). This is the one place in this module that
     # actually needs them, so this is where the torch tax is paid.
-    from kalos.core.evaluation import grouped_cv_report
+    # `kalos.core.gates` and `kalos.core.feasibility` do not themselves import
+    # torch, but they are only ever used from inside this function, so they are
+    # kept in this same deferred block rather than opening a second import site.
+    from kalos.core.evaluation import (
+        group_mean_baseline_spearman,
+        grouped_cv_report,
+        interval_calibration,
+        logo_report,
+        producer_only_spearman,
+        top_k_overlap,
+    )
+    from kalos.core.feasibility import feasibility_cv_report
+    from kalos.core.gates import check_gates
     from kalos.core.optimize import MAX_MIXED_COMBOS, propose
     from kalos.core.surrogate import Surrogate
 
@@ -598,9 +673,18 @@ def _analyze(
 
     # honest grouped cross-validation: pooled out-of-fold predictions + a
     # group-level bootstrap CI, all through the single leakage-checked splitter.
-    rep = grouped_cv_report(X, y, groups=groups, n_splits=5, bounds=bounds, cat_dims=cat_dims)
+    rep = grouped_cv_report(
+        X, y, groups=groups, n_splits=5, bounds=bounds, cat_dims=cat_dims, n_repeats=CV_N_REPEATS,
+    )
     rho = rep["spearman"]
-    oof_a, oof_p = rep["oof_actual"], rep["oof_pred"]
+    # Repeat-0-only: the point estimate and the OOF pools below stay anchored to
+    # the SAME unshuffled partition `grouped_cv_report` always uses for repeat 0,
+    # so calibration/conformal/producer-only ranking all read off one consistent
+    # set of predictions (see `grouped_cv_report`'s docstring for why pooling
+    # across repeats here would double-count rows with correlated errors instead
+    # of adding independent evidence). Only `cv_ci95` below draws on every
+    # repeat's partition.
+    oof_a, oof_p, oof_s = rep["oof_actual"], rep["oof_pred"], rep["oof_std"]
 
     # distribution-free +/- band from the pooled out-of-fold residuals (approximate
     # coverage under grouped CV). Honest alternative to the surrogate's own std,
@@ -610,8 +694,23 @@ def _analyze(
 
     # Honest reliability verdict: only what this path can actually assess. The
     # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
-    # NOT assert feasibility or calibration gates, which are not measured here.
+    # NOT assert the feasibility gate, which is not measured here.
     ci95 = None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)]
+
+    # CALIBRATION. A model can rank held-out runs correctly and still state every
+    # uncertainty at half its true width, and the scientist reading "4.2 +/- 0.3"
+    # is acting on the 0.3. The held-out posterior sd needed to check that was
+    # already computed inside the CV and then thrown away, so calibration was
+    # reported as unmeasured for want of a value the engine had already paid for.
+    # It is now kept and scored: `ece` is the mean gap between nominal and
+    # empirical coverage across four central intervals, on the same 0-to-1 scale
+    # `GatesConfig.max_ece` is written against, and `z_std` says which way a
+    # miscalibrated model errs (above 1.0 = bands too narrow).
+    #
+    # Reported, NOT folded into `clears_floor`. Tightening the verdict changes
+    # which uploads the API accepts, which is a product decision - the same line
+    # `producer_clears_floor` sits on.
+    calibration = interval_calibration(oof_a, oof_p, oof_s)
 
     # PRODUCER-ONLY ranking. The pooled `rho` above is taken over every held-out
     # row, producers and non-producers together, so a model can score well on it
@@ -641,9 +740,17 @@ def _analyze(
         "n_producers": int(prod["n_producers"]),
         "producer_threshold": float(prod["threshold"]),
         "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
+        # Held-out coverage of the GP's own Gaussian bands. `available` is false
+        # on a sheet with too few out-of-fold points for a coverage rate to mean
+        # anything, and the matching "calibration" line stays in `unmodeled`.
+        "calibration": calibration,
         "unmodeled": [
             "feasibility probability",
-            "calibration (ECE)",
+            *(
+                []
+                if calibration["available"]
+                else ["calibration (ECE): " + str(calibration["reason"])]
+            ),
             "scale-up transfer",
             *(
                 []
@@ -652,6 +759,175 @@ def _analyze(
             ),
         ],
     }
+
+    # PROMOTION VERDICT. `check_gates` (kalos/core/gates.py) has existed since
+    # the lean-engine port but had ZERO callers on this path, and
+    # `feasibility_cv_auc` had zero callers outside its own tests - the
+    # fail-closed gate the codebase already built was never actually asked
+    # anything. This wires it up, WITHOUT changing what the API accepts: the
+    # verdict is REPORTED, never used to reject an upload. Gating uploads on a
+    # promotion verdict is a product decision (same line `producer_clears_floor`
+    # and `clears_floor` already sit on above) that this change does not make.
+    #
+    # feasibility_cv_report is cheap - a handful of sklearn LogisticRegression
+    # fits under CV, no GP involved - unlike the grouped surrogate CV above, so
+    # computing it here costs essentially nothing next to the GP fits this
+    # function already pays for.
+    feas = feasibility_cv_report(X, y, groups=recipe_key)
+
+    # gate_stats assembles the four keys `check_gates` reads by name
+    # (kalos/core/gates.py: surrogate_spearman, feasibility_auc, ece, brier).
+    #
+    # DELIBERATE CHOICE, stated here because it is easy to get backwards: the
+    # `ece` fed to the gate is `feas["ece"]` - the FEASIBILITY CLASSIFIER's
+    # expected calibration error (is the stated P(feasible) itself honest) -
+    # NOT `calibration["ece"]` from `reliability` above, which is the
+    # REGRESSION interval calibration ECE (are the titer error bars honest).
+    # Both are legitimately named "ece", both live on the same 0-to-1 scale,
+    # and they answer different questions. `GatesConfig.max_ece` was written
+    # in the lean engine against the classifier metric - promotion asks "is
+    # this model's feasibility judgment trustworthy enough to gate
+    # acquisition on", not "are this model's regression error bars the right
+    # width" - so the classifier's `ece` is what belongs here. Naming both in
+    # this comment is the whole point: nothing downstream should ever swap
+    # them without knowing it changed the question being asked.
+    gate_stats = {
+        "surrogate_spearman": rho,  # the pooled CV rho already computed above
+        "feasibility_auc": feas["auc"],
+        "ece": feas["ece"],
+        "brier": feas["brier"],
+    }
+    promotion_result = check_gates(gate_stats)
+    promotion = {
+        "passed": promotion_result.passed,
+        "failures": promotion_result.failures,
+        # `check_gates` only ever inserts a value into its `metrics` dict when
+        # `_finite` accepts it (isinstance float/int, not bool, math.isfinite),
+        # so this is strict-JSON safe by construction - no NaN can reach here.
+        "metrics": promotion_result.metrics,
+        "summary": promotion_result.summary,
+        # FAIL-CLOSED IS CORRECT, BUT ILLEGIBLE WITHOUT THIS. On an all-producer
+        # sheet (no non-producers to build a feasibility classifier from) or
+        # any sheet too small to measure one of the four gates,
+        # `feasibility_auc`/`ece`/`brier` come back `nan`, `check_gates` fails
+        # closed with "missing/NaN (unmeasured)" failures, and `passed` reads
+        # `False` - which is the RIGHT answer (an unmeasured gate must block,
+        # not silently pass), but reads exactly like a rejection if nothing
+        # explains it. This fixed string is that explanation. It does not
+        # soften the verdict - `passed` and `failures` are unchanged - it only
+        # states what a `False` here does and does not mean.
+        "meaning": (
+            'passed=false means "not yet shown fit to promote", which '
+            "includes the case where a required metric is unmeasurable on "
+            "this data (e.g. an all-producer sheet with no non-producers to "
+            "score feasibility against). It is not a rejection of the analysis."
+        ),
+    }
+
+    # LEAVE-ONE-GROUP-OUT. Grouped K-fold above tests generalization to a FEW
+    # unseen groups among many familiar ones; LOGO is the harder question -
+    # generalization to the NEXT group the model has seen nothing like - and
+    # the two can diverge sharply (see `logo_report`'s docstring: -0.12 vs 0.91
+    # on the owner's real clone-selection data). Only run when there is a
+    # DECLARED/detected group column (`gcol` is not None): the recipe-hash
+    # fallback groups by feature identity, so leaving one recipe-hash group out
+    # would just be a costlier copy of the CV already computed above, not a
+    # harder question. Also capped at `LOGO_MAX_GROUPS` groups, since LOGO
+    # costs one GP fit per group (see that constant's comment for the measured
+    # timing this cap is tuned against) - absence is always explained via
+    # `reason`, never silent.
+    cv_logo: dict[str, Any]
+    if gcol is None:
+        cv_logo = {
+            "spearman": None,
+            "n_groups": None,
+            "n_oof": None,
+            "reason": (
+                "no declared/detected group column; leave-one-group-out over "
+                "the recipe-hash fallback would just be a costlier copy of "
+                "the grouped CV already reported as cv_spearman"
+            ),
+        }
+    else:
+        n_logo_groups = int(len(np.unique(np.asarray(pd.Series(groups).astype(str).values))))
+        if n_logo_groups > LOGO_MAX_GROUPS:
+            cv_logo = {
+                "spearman": None,
+                "n_groups": n_logo_groups,
+                "n_oof": None,
+                "reason": (
+                    f"{n_logo_groups} groups exceeds the leave-one-group-out cap "
+                    f"of {LOGO_MAX_GROUPS} groups (one GP fit per held-out group)"
+                ),
+            }
+        else:
+            logo = logo_report(X, y, groups, bounds=bounds, cat_dims=cat_dims)
+            logo_rho = logo["spearman"]
+            cv_logo = {
+                "spearman": None if logo_rho != logo_rho else round(float(logo_rho), 3),
+                "n_groups": logo["n_groups"],
+                "n_oof": logo["n_oof"],
+                "reason": None,
+            }
+
+    # TOP-K OVERLAP. The client's actual decision is "which k recipes do I
+    # advance", not "how well-ranked is the whole held-out set" - Spearman can
+    # look fine while the model gets exactly the recipes that matter out of
+    # order (see `top_k_overlap`'s docstring). Computed on the same repeat-0
+    # pooled OOF everything else in this function reads off.
+    topk = top_k_overlap(oof_a, oof_p, CV_TOPK_K)
+    cv_topk: dict[str, Any] = {
+        "overlap": None if not topk["evaluable"] else round(float(topk["overlap"]), 3),
+        "k": topk["k"],
+        "n": topk["n"],
+        "evaluable": bool(topk["evaluable"]),
+        "reason": topk["reason"],
+    }
+
+    # GROUP-MEAN BASELINE FLOOR. How much of the apparent CV signal is just the
+    # model recognizing which recipe a row belongs to, rather than modeling the
+    # process? (See `group_mean_baseline_spearman`'s docstring: on the owner's
+    # real data this floor alone captured ~0.75 of a trained model's ~0.86
+    # headline.) Computed over `recipe_key` - the same replicate grouping the
+    # noise floor and driver panel already use - only when enough groups are
+    # actually replicated to make the leave-one-row-out means a real signal
+    # rather than noise from a couple of pairs.
+    n_groups_with_reps = int((pd.Series(recipe_key).value_counts() >= 2).sum())
+    cv_group_mean_baseline: dict[str, Any]
+    if n_groups_with_reps < GROUP_MEAN_BASELINE_MIN_GROUPS:
+        cv_group_mean_baseline = {
+            "spearman": None,
+            "n_evaluable": 0,
+            "n_groups_used": 0,
+            "interpretation": None,
+            "reason": (
+                f"only {n_groups_with_reps} recipes have 2+ rows; need at "
+                f"least {GROUP_MEAN_BASELINE_MIN_GROUPS} to compute a "
+                "group-mean floor"
+            ),
+        }
+    else:
+        gmb = group_mean_baseline_spearman(y, recipe_key)
+        if gmb["evaluable"]:
+            cv_group_mean_baseline = {
+                "spearman": round(float(gmb["spearman"]), 3),
+                "n_evaluable": gmb["n_evaluable"],
+                "n_groups_used": gmb["n_groups_used"],
+                "interpretation": (
+                    "A model whose CV Spearman does not clearly beat this "
+                    "floor may be recognizing recipes, not modeling the "
+                    "process."
+                ),
+                "reason": None,
+            }
+        else:
+            cv_group_mean_baseline = {
+                "spearman": None,
+                "n_evaluable": gmb["n_evaluable"],
+                "n_groups_used": gmb["n_groups_used"],
+                "interpretation": None,
+                "reason": gmb["reason"],
+            }
 
     # signed drivers, each with a bootstrap 95% CI so the client can tell a real
     # driver from noise. A driver whose CI straddles zero is NOT distinguishable
@@ -677,16 +953,39 @@ def _analyze(
     # BH runs over every tested feature BEFORE the top-k cut, never after -
     # correcting for 8 tests when 30 were performed would understate the very
     # multiplicity it exists to control.
+    #
+    # THE UNIT OF ANALYSIS IS THE RECIPE, NOT THE ROW. Both tests above ask "how
+    # surprising is this association, given how much independent evidence there
+    # is?", and on a replicated sheet a row is not independent evidence: three
+    # wells of one recipe carry one recipe's worth of information about the
+    # process, plus three draws of assay noise. Testing rows counts them as three,
+    # so the p-value that feeds BH is computed against an `n` the sheet does not
+    # have, and BH stops correcting anything.
+    #
+    # That is not a rounding error. Re-running the 30-noise-feature simulation on
+    # 20 recipes x 3 replicates (300 reports, the replication depth a media DoE
+    # actually ships with) put a "significant" driver in 87.0% of reports, against
+    # 7.3% for the same 60 rows drawn independently. Collapsing replicates to
+    # recipe means first brings it back to 8.0%; a cluster bootstrap alone does
+    # not (82.5%), because the row-level p-values are what BH is reading.
+    #
+    # So the panel is computed on replicate-averaged rows, keyed by the same
+    # `recipe_key` the CV grouping and the noise floor already use. On a sheet
+    # with no replicates every group is a singleton and `aggregate_replicates` is
+    # an exact no-op, so unreplicated uploads are unchanged.
     drv: list[dict[str, Any]] = []
     n_tested = len(cont_feats)
+    n_driver_units = int(len(y))
     if cont_feats:
         names = [str(c) for c in cont_feats]
-        Xcont = X[:, : len(cont_feats)]
-        matrix = spearman_driver_matrix(Xcont, y, feature_names=names)
+        Xr, yr, _rv, _rn = aggregate_replicates(X, y, groups=recipe_key)
+        n_driver_units = int(Xr.shape[0])
+        Xcont = Xr[:, : len(cont_feats)]
+        matrix = spearman_driver_matrix(Xcont, yr, feature_names=names)
         point = np.asarray(matrix["rho"]).astype(float)
         pvals = np.asarray(matrix["pvals"]).astype(float)
         bh_survives = benjamini_hochberg(pvals, q=DRIVER_FDR_Q)
-        boot = bootstrap_spearman(Xcont, y, feature_names=names)
+        boot = bootstrap_spearman(Xcont, yr, feature_names=names)
         boot_lo = np.asarray(boot["lo"], dtype=float)
         boot_hi = np.asarray(boot["hi"], dtype=float)
         for j, c in enumerate(cont_feats):
@@ -734,6 +1033,10 @@ def _analyze(
     best_reproducible: float | None = None
     replicate_aware = False
     incumbent = best_single
+    # The rows the PROPOSAL surrogate is fit on. They stay the raw rows unless the
+    # replicate-aware swap below happens, and they are what the shape report has
+    # to be handed - see the `gp_shape_report` call for why that matters.
+    X_fit, y_fit = X, y
     if nr["n_replicated"] >= 1:
         Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y, groups=recipe_key)
         best_reproducible = float(yf.max())
@@ -746,6 +1049,7 @@ def _analyze(
             per_point_var = float(sigma2) / np.maximum(n_reps_g, 1).astype(float)
             s = Surrogate().fit(Xf, yf, bounds=bounds, noise=per_point_var, cat_dims=cat_dims)
             incumbent = best_reproducible
+            X_fit, y_fit = Xf, yf
 
     # proposed next batch, with predicted target + uncertainty + a why per row
     if not replicate_aware:
@@ -785,10 +1089,20 @@ def _analyze(
     #
     # Continuous features only, matching the driver panel: a swept axis has to be
     # a measurement, not an integer category code.
+    #
+    # `X_fit`/`y_fit` are the rows this surrogate was actually fit on, which is
+    # the contract `gp_shape_report` states and, on the replicate-aware path, is
+    # NOT the raw sheet. It sweeps each feature through the incumbent - the row
+    # with the best measured target - and on raw rows that is `best_single`, the
+    # luckiest single well. Anchoring the shapes there re-introduces exactly the
+    # noise spike the replicate-averaged fit exists to ignore, and it does it
+    # inside a GP that never saw that row. The observed spread it compares peak
+    # height against would be the raw spread too, assay noise included, which
+    # makes a real bump read as flat.
     gp_shapes = gp_shape_report(
         s,
-        Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0)),
-        y,
+        X_fit[:, : len(cont_feats)] if cont_feats else np.empty((len(y_fit), 0)),
+        y_fit,
         feature_names=[str(c) for c in cont_feats],
         cv_spearman=None if rho != rho else float(rho),
         rho_floor=RELIABILITY_SPEARMAN_FLOOR,
@@ -847,6 +1161,18 @@ def _analyze(
         "cv_spearman": None if rho != rho else round(rho, 3),
         "cv_ci95": ci95,
         "cv_n_groups": rep["n_groups"],
+        # How many partitions actually went into `cv_ci95` above - the requested
+        # ceiling (`CV_N_REPEATS`) collapses to 1 when the sheet has too few
+        # groups for a second, genuinely different partition to exist (see
+        # `grouped_cv_report`'s docstring), so this is the EFFECTIVE count, not
+        # the requested one.
+        "cv_n_repeats": rep["n_repeats"],
+        # Per-repeat pooled Spearman, so the partition-to-partition spread that
+        # widens `cv_ci95` is visible on its own rather than only as a width.
+        # NaN -> None: this dict is serialized straight into an API response.
+        "cv_spearman_per_repeat": [
+            None if s != s else round(float(s), 3) for s in rep["spearman_per_repeat"]
+        ],
         "conformal_q": conformal_q,
         # The band's ACTUAL coverage, so no consumer has to hardcode it.
         "conformal_coverage": round(1.0 - CONFORMAL_ALPHA, 4),
@@ -860,8 +1186,27 @@ def _analyze(
             "fdr_q": DRIVER_FDR_Q,
             "n_bootstrap": 200,
             "ranked_by": "abs_rho",
+            # The unit of analysis, stated rather than assumed. Replicates of one
+            # recipe are averaged before the panel runs, so `n_units` (not the row
+            # count) is the independent evidence every p-value and CI is computed
+            # against. On an unreplicated sheet the two are equal.
+            "unit": "recipe",
+            "n_units": n_driver_units,
+            "n_rows": int(len(y)),
         },
         "reliability": reliability,
+        # Fail-closed promotion verdict, REPORTED not enforced (see the block
+        # above where `promotion` is assembled for why this must never change
+        # what the API accepts).
+        "promotion": promotion,
+        # Leave-one-group-out, top-k overlap, and the group-mean baseline floor
+        # - three evaluation-hygiene checks that ask harder or narrower
+        # questions than the pooled grouped-CV Spearman above. Each is `None`
+        # with a stated `reason` when it cannot be computed on this sheet,
+        # rather than silently absent.
+        "cv_logo": cv_logo,
+        "cv_topk": cv_topk,
+        "cv_group_mean_baseline": cv_group_mean_baseline,
         "best": round(best_single, 4),
         "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware, het),
         "drivers": drv,

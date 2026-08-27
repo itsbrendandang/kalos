@@ -5,11 +5,13 @@ import os
 
 import numpy as np
 import pytest
+import torch
 
 from kalos import (
     GatesConfig,
     MultiObjectiveSurrogate,
     Surrogate,
+    bootstrap_spearman,
     check_gates,
     grouped_cv_spearman,
     propose,
@@ -118,6 +120,74 @@ def test_multiobjective_degenerate_feature_never_proposes_out_of_range():
     assert np.all(np.abs(nxt[:, 1] - 1000.0) <= 1e-3)
     assert np.all(nxt[:, 0] >= methanol.min() - 1e-6)
     assert np.all(nxt[:, 0] <= methanol.max() + 1e-6)
+
+
+def test_multiobjective_models_do_not_share_an_input_transform():
+    """`MultiObjectiveSurrogate.fit` builds one GP per objective in a
+    `ModelListGP`. Passing the SAME `Normalize` instance to every model is
+    benign while bounds are fixed, but it is one `learn_bounds=True` away from
+    cross-coupling the objectives through shared transform state - sharing a
+    stateful `torch.nn.Module` across models is a latent aliasing hazard even
+    when today's fit never mutates it. Each model must own its own instance."""
+    rng = np.random.default_rng(1)
+    n, d = 14, 2
+    X = rng.uniform(0, 1, (n, d))
+    Y = np.stack([X[:, 0] - 0.5 * X[:, 1], 0.5 * X[:, 1] - X[:, 0]], axis=-1)
+    bounds = np.array([[0, 0], [1, 1]], float)
+    s = MultiObjectiveSurrogate().fit(X, Y, bounds=bounds)
+    transforms = list(s.model.models)
+    assert len({id(m.input_transform) for m in transforms}) == len(transforms)
+
+
+def test_multiobjective_fresh_normalize_leaves_the_fit_unchanged():
+    """The per-model `Normalize` is a pure isolation change, not a behavior
+    change: the bounds are identical across objectives either way, so fitting
+    the same data twice must still give the same posterior mean."""
+    rng = np.random.default_rng(2)
+    n, d = 14, 2
+    X = rng.uniform(0, 1, (n, d))
+    Y = np.stack([X[:, 0] - 0.5 * X[:, 1], 0.5 * X[:, 1] - X[:, 0]], axis=-1)
+    bounds = np.array([[0, 0], [1, 1]], float)
+    s1 = MultiObjectiveSurrogate().fit(X, Y, bounds=bounds)
+    s2 = MultiObjectiveSurrogate().fit(X, Y, bounds=bounds)
+    Xt = torch.as_tensor(X, dtype=torch.float64)
+    p1 = s1.model.posterior(Xt).mean.detach().numpy()
+    p2 = s2.model.posterior(Xt).mean.detach().numpy()
+    assert np.allclose(p1, p2, atol=1e-6)
+
+
+def test_bootstrap_spearman_degenerate_draws_are_not_zero_anchored():
+    """A near-constant column makes some bootstrap resamples degenerate: with
+    only two non-zero rows out of ten, roughly 1 in 10 resamples misses both
+    and the column goes constant for that draw, so Spearman's rho is undefined
+    (nan) for it. Coercing that nan to 0.0 (the old behavior) is a fabricated
+    "this draw found no association" data point, not a neutral default - it
+    pulls the whole bootstrap distribution toward zero and narrows the CI
+    dishonestly for exactly the noisiest features. The fix computes mean/std/CI
+    over the valid draws only, so a real association is not zero-anchored."""
+    rng = np.random.default_rng(0)
+    n = 10
+    x = np.array([0.0] * 8 + [1.0, 2.0])  # near-constant: most mass at one value
+    y = np.arange(n, dtype=float) + rng.normal(0, 0.01, n)
+    out = bootstrap_spearman(x.reshape(-1, 1), y, B=200, random_state=0, feature_names=["x"])
+    assert np.isfinite(out["mean"]).all()
+    assert np.isfinite(out["std"]).all()
+    assert np.isfinite(out["lo"]).all() and np.isfinite(out["hi"]).all()
+    assert out["lo"][0] > 0  # a real positive association; the CI must not include 0
+
+
+def test_bootstrap_spearman_all_degenerate_column_falls_back_to_zero():
+    """Every resample of a truly constant column is degenerate - there is no
+    valid draw anywhere to compute a mean/std/CI from. That reproduces the
+    pre-fix safe output (all zeros) rather than leaking a nan into a
+    strict-JSON API response, which would 500 the request."""
+    x = np.zeros(10)
+    y = np.arange(10, dtype=float)
+    out = bootstrap_spearman(x.reshape(-1, 1), y, B=50, random_state=0, feature_names=["x"])
+    assert out["mean"][0] == 0.0
+    assert out["std"][0] == 0.0
+    assert out["lo"][0] == 0.0
+    assert out["hi"][0] == 0.0
 
 
 @pytest.mark.skipif(
