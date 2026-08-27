@@ -22,11 +22,31 @@ duplicate these elsewhere):
     mL/h, ml/h -> v
     uL/h, µL/h -> v / 1000       (ascii "u" and the micro sign both accepted)
     L/h        -> v * 1000
+    mL/min     -> v * 60         (per-minute gas/liquid flow, e.g. sparge air)
+    L/min      -> v * 60000
   time          -> base hours (h)
     h, hr -> v
     min   -> v / 60
+  agitation     -> base rpm
+    rpm -> v
+  pressure      -> base bar
+    bar -> v
+  mass          -> base grams (g)
+    g  -> v
+    kg -> v * 1000
   dimensionless -> no unit at all (pH, OD): value passes through unchanged,
     canonical suffix is the empty string.
+
+NOTE on what is deliberately NOT a recognized unit: bare "L"/"mL" (volume) is
+NOT in the registry, on purpose. Bioprocess run sheets commonly use "L" as a
+VESSEL-SIZE IDENTIFIER, not a measurement - "5L", "500L" (bioreactor scale
+labels), not "5 liters of something". Recognizing "L" as a unit would
+silently convert that identifier into a numeric measurement (stripping the
+label and keeping the bare number) - `is_known_unit`'s docstring below and
+`tests/test_validation_gate.py::test_unrecognized_unit_is_not_silently_converted`
+both encode this as a deliberate, tested exclusion. Do not add it back
+without addressing that collision first (e.g. requiring a compound token
+like "L/well" that a vessel-size label would never produce).
 
 Every unit token maps to a `(dimension, to_base_fn, canonical_suffix)` triple
 in `_UNIT_TABLE`. This keeps the registry a small, readable, data-driven table
@@ -68,10 +88,25 @@ _UNIT_TABLE: dict[str, _UnitDef] = {
     "ml/h": _UnitDef("flow_rate", lambda v: v, "_ml_h"),
     "ul/h": _UnitDef("flow_rate", lambda v: v / 1000.0, "_ml_h"),
     "l/h": _UnitDef("flow_rate", lambda v: v * 1000.0, "_ml_h"),
+    # gas/liquid flow rate given per-minute rather than per-hour (common on
+    # bioreactor gas-flow controllers, e.g. "2.5 L/min" sparge air) -> same
+    # base (mL/h) and suffix as the per-hour tokens above, mirroring that
+    # existing ml/h <-> l/h pairing.
+    "ml/min": _UnitDef("flow_rate", lambda v: v * 60.0, "_ml_h"),
+    "l/min": _UnitDef("flow_rate", lambda v: v * 60_000.0, "_ml_h"),
     # time -> base hours
     "h": _UnitDef("time", lambda v: v, "_h"),
     "hr": _UnitDef("time", lambda v: v, "_h"),
     "min": _UnitDef("time", lambda v: v / 60.0, "_h"),
+    # agitation -> base rpm (a single unit; no conversion needed)
+    "rpm": _UnitDef("agitation", lambda v: v, "_rpm"),
+    # pressure -> base bar (a single unit; no conversion needed)
+    "bar": _UnitDef("pressure", lambda v: v, "_bar"),
+    # volume ("L"/"mL") is deliberately NOT registered here - see the module
+    # docstring's "NOTE on what is deliberately NOT a recognized unit" above.
+    # mass -> base grams
+    "g": _UnitDef("mass", lambda v: v, "_g"),
+    "kg": _UnitDef("mass", lambda v: v * 1000.0, "_g"),
     # dimensionless -> value unchanged, no suffix
     "ph": _UnitDef("dimensionless", lambda v: v, ""),
     "od": _UnitDef("dimensionless", lambda v: v, ""),
@@ -137,6 +172,9 @@ _BASE_UNIT_LABELS: dict[str, str] = {
     "_g_l": "g/L",
     "_ml_h": "mL/h",
     "_h": "hours",
+    "_rpm": "rpm",
+    "_bar": "bar",
+    "_g": "grams",
     "": "dimensionless",
 }
 

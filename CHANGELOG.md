@@ -2,6 +2,97 @@
 
 Newest first.
 
+## 2026-08-25 (wave 1: the engine practices what its benchmark proved)
+
+Six parallel agents; every measured claim below is from a locked regression
+test or a reported run.
+
+### Added - production proposals are finally feasibility-gated
+
+BENCHMARK.md proved plain BO loses to random search on zero-inflated titers
+and that feasibility-gated EI fixes it - and the fix lived only in the bench
+harness while production proposed ungated. Now the acquisition itself is
+gated: log(EI x p_feasible) = logEI + log p_feasible, with the fitted
+StandardScaler+LogisticRegression rebuilt exactly as a differentiable torch
+module (gradients verified end to end), q-batch feasibility composed as a
+product (conservative under zero-inflation, documented as an approximation).
+
+Gate POLICY, all three conditions reported and none silent: the classifier
+actually fit (not its cold-start fallback), n_infeasible >= 5, and CV
+feasibility AUC >= the SAME 0.65 floor the promotion gate already uses - one
+number, one meaning. Any condition failing reproduces the ungated path
+byte-identically (asserted at the propose() call level, not assumed).
+Measured: on a feature-dependent zero-inflated sheet, gated batches score
+mean p_feasible 0.953 vs 0.389 ungated on the identical classifier; through
+the production propose() path on an 85%-infeasible pool, gated best-found
+9.084 vs ungated 8.884 over 8 seeds. The response reports `proposal_gating`
+and every proposal row carries `p_feasible`.
+
+### Added - the decided constrained behavior exists: maximize titer s.t. a floor
+
+`_analyze(..., constraint={"column": "purity_pct", "floor": 95.0})` fits a
+second GP on the constraint outcome and threads it through BoTorch's native
+constrained qLogNEI (ModelListGP + objective index + less-than-zero callable;
+verified against the installed 0.18.1 source, including that prune_baseline
+respects the constraints). Composes with the feasibility gate. Falls back to
+unconstrained - reported, never crashing - on a missing/sparse column or fit
+failure. The constraint column is stripped from features unconditionally,
+including against a declared-roles bypass; both leakage paths are tested.
+Measured: on an anti-correlated titer/purity design, constrained batches
+predict purity 94.5 vs 89.6 unconstrained.
+
+### Added - ScaleBridge v0 (kalos/scale/): physics-informed scale transfer
+
+Geometry/power/gas-velocity/kLa/hydrostatic proxies with every constant
+exposed as a fittable parameter and cited (van't Riet 1979, Rushton 1950,
+Doran); transfer as feature engineering over the proven Surrogate;
+leave-one-scale-out evaluation with extrapolation direction reported
+separately. Measured on the 55-run synthetic scale-up set: pooled MAE 0.66 vs
+naive 1.77/1.42, Spearman 0.68 vs ~0. Stated plainly: on upward extrapolation
+to 2000 L the model wins on MAE (0.53 vs 1.4-1.5) but has NOT yet
+demonstrated correct ranking (Spearman -0.7 on an n=5 coarse grid) - v0
+regresses toward a scale-adjusted mean; the v1 path (physics-informed mean
+function, more scales) is documented in the module.
+
+### Added - ingestion grows two tiers
+
+- Orientation pre-pass (kalos/normalize/orientation.py): transposed run
+  sheets (rows = parameters) are detected and normalized before anything else
+  sees them, traced via frame metadata and surfaced as `orientation` in the
+  response. Hardened beyond the ported heuristic: a first column that is
+  itself numeric can never be read as parameter labels, and shape signals
+  alone never suffice - the port's raw heuristic false-positived on kalos's
+  own standard tall/narrow fixtures, caught by the existing hardening tests.
+- Open-source LLM provider seam (KALOS_LLM_PROVIDER: anthropic | ollama |
+  none): the Ollama path speaks the real API (health via /api/tags,
+  generate with format json, temperature 0), validates against the identical
+  schema the Anthropic path uses, and falls back deterministically on any
+  failure - the LLM proposes, deterministic code validates, unchanged.
+  Stdlib HTTP only; "none" never touches the network. Units gained rpm, bar,
+  g/kg, L/min + agitation/pressure synonyms; bare L/mL stays deliberately
+  excluded (vessel-size labels, not measurements - the existing test that
+  guards this exclusion caught the naive addition).
+
+### Added - deploy/ - the stack becomes deployable
+
+Multi-stage non-root images (CPU-only torch), compose with health checks and
+env-driven secrets satisfying the bind-safety guard by construction, and a
+SQLite backup sidecar using the Online Backup API (a cp of a live rollback-
+journal database can silently lose the in-flight transaction), retention
+windowed, backups outside the compose volumes. RUNBOOK.md carries deploy /
+upgrade / rollback / restore-drill / security checklist. Found and
+documented: SqliteStore and the runner lock hardcode ~/.kalos and ignore
+KALOS_STATE_DIR (compose works around it; engine fix queued), and kalos-web
+sends no Authorization header yet (both options documented in the runbook).
+
+### Fixed / smaller
+
+- FeasibilityClassifier gained a public `fitted` accessor and
+  `torch_gate_params()` so callers never reach into sklearn internals.
+- The research memo (scratchpad, feeding wave 2) verified kalos is clean of
+  the upstream-DELETED HeteroskedasticSingleTaskGP and already on the
+  recommended train_Yvar pattern.
+
 ## 2026-08-23 (the review's remainder, built by a Sonnet fleet)
 
 Five agents implemented the rest of the 2026-08-22 engine review plus portable

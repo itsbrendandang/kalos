@@ -20,6 +20,29 @@ partial round is computed as if the in-flight runs did not exist, so the
 optimizer happily proposes a recipe already incubating in the shaker: the
 scientist spends budget twice on one point and the round returns less
 information than it cost.
+
+Two optional compositions on top of the base qLogNEI, both opt-in via
+`propose`'s keyword-only arguments and both OFF by default (byte-identical to
+the historical behavior when neither is passed):
+
+- `feasibility_classifier`: gates the acquisition by a fitted
+  `FeasibilityClassifier`'s P(feasible), in LOG space -
+  `log(EI * p_feasible) = logEI(X) + log p_feasible(X)` - via a small
+  torch-differentiable reimplementation of the classifier's fitted sklearn
+  pipeline (`_FeasibilityGate`). See `_FeasibilityGatedLogNEI` below for the
+  q-batch composition rule. The POLICY of *when* to gate (is the classifier
+  really fit, is the sheet zero-inflated enough, is its CV AUC trustworthy)
+  is decided by the caller (`kalos.portal.analysis._analyze`), not here -
+  this module only knows how to compose the acquisition once told to.
+- `constraint_surrogate` + `constraint_floor`: a second outcome (fit as its
+  own `Surrogate`, e.g. a purity column) the proposed batch must respect,
+  via BoTorch's native `qLogNoisyExpectedImprovement(..., constraints=...)`
+  on a `ModelListGP([target, constraint])`. Also decided by the caller
+  (whether the column exists, has enough rows, and the constraint model
+  actually fits).
+
+The two compose freely: passing both wraps the constrained base acquisition
+with the feasibility gate on top.
 """
 from __future__ import annotations
 
@@ -28,13 +51,17 @@ import logging
 
 import numpy as np
 import torch
+from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.acquisition.logei import qLogNoisyExpectedImprovement
+from botorch.acquisition.objective import GenericMCObjective
+from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.optim import (
     optimize_acqf,
     optimize_acqf_mixed,
     optimize_acqf_mixed_alternating,
 )
 
+from .feasibility import FeasibilityClassifier
 from .surrogate import DEVICE, DTYPE, Surrogate, sanitize_bounds
 
 logger = logging.getLogger(__name__)
@@ -44,6 +71,118 @@ logger = logging.getLogger(__name__)
 # we switch to the alternating optimizer, which does not enumerate. 64 keeps the
 # exact path (the better optimizer) for realistic small categorical spaces.
 MAX_MIXED_COMBOS = 64
+
+
+class _FeasibilityGate(torch.nn.Module):
+    """Differentiable log P(feasible), rebuilt from a fitted
+    `Pipeline(StandardScaler(), LogisticRegression())`.
+
+    `StandardScaler` + `LogisticRegression` compose to an affine map followed by
+    a sigmoid: `p = sigmoid(((x - mean) / scale) @ coef + intercept)`. Rebuilding
+    that identity as a torch module (float64, CPU - matching `DTYPE`/`DEVICE`,
+    the surrogate's own precision and device) keeps the whole gated acquisition
+    score differentiable end to end, which `optimize_acqf`'s gradient-based
+    multi-start L-BFGS requires; calling back into the sklearn/numpy pipeline
+    from inside `forward()` would break autograd at that boundary and leave the
+    optimizer with no gradient to climb.
+
+    CATEGORICAL DIMS, STATED EXPLICITLY: the classifier this gate reproduces was
+    fit on the same integer level codes the GP sees for categorical columns
+    (`kalos.portal.analysis._analyze` fits `FeasibilityClassifier` on the same
+    `X` the surrogate uses). A logistic regression treats an integer code as an
+    ORDINAL number, not an unordered label, so "level 2 is between level 1 and
+    level 3" is an assumption the model makes that the data does not actually
+    support. This is a known, deliberate approximation carried over unchanged
+    from that fit - one-hot encoding the categorical dims for the classifier is
+    a possible refinement, not implemented here.
+    """
+
+    def __init__(
+        self,
+        mean: np.ndarray,
+        scale: np.ndarray,
+        coef: np.ndarray,
+        intercept: float,
+    ) -> None:
+        super().__init__()
+        self.register_buffer("_mean", torch.as_tensor(mean, dtype=DTYPE, device=DEVICE))
+        self.register_buffer("_scale", torch.as_tensor(scale, dtype=DTYPE, device=DEVICE))
+        self.register_buffer("_coef", torch.as_tensor(coef, dtype=DTYPE, device=DEVICE))
+        self.register_buffer(
+            "_intercept", torch.as_tensor(float(intercept), dtype=DTYPE, device=DEVICE)
+        )
+
+    def log_p_feasible(self, X: torch.Tensor) -> torch.Tensor:
+        """`log sigmoid(w . (x - mu) / s + b)`, elementwise over `X`'s leading dims.
+
+        `X` is `... x d`; the affine map contracts the trailing (feature) dim, so
+        the result has `X`'s shape minus that trailing dimension - e.g. a
+        `batch_shape x q x d` candidate tensor from `optimize_acqf` comes back as
+        `batch_shape x q`, one log-probability per candidate POINT (not yet
+        reduced over `q` - see `_FeasibilityGatedLogNEI` for that reduction).
+        """
+        z = ((X - self._mean) / self._scale) @ self._coef + self._intercept
+        return torch.nn.functional.logsigmoid(z)
+
+
+class _FeasibilityGatedLogNEI(AcquisitionFunction):
+    """`log(EI * p_feasible) = logEI(X) + log p_feasible(X)`, wrapping a base
+    qLogNEI (itself optionally already constrained, see `propose`) with a
+    `_FeasibilityGate`.
+
+    Q-BATCH COMPOSITION, STATED EXPLICITLY (this is a documented design choice,
+    not an incidental implementation detail): the base acquisition already
+    reduces `X`'s `q` dimension internally (qLogNEI's own smooth-max over the
+    batch's joint improvement), returning one log-EI value per t-batch. The
+    per-point `log p_feasible` terms, one per candidate in the q-batch, are
+    summed across `q` before being added to that already-reduced log-EI. In
+    probability space this is `P(batch feasible) = prod_i P(feasible_i)`: the q
+    points' feasibility is treated as INDEPENDENT events. That is an
+    approximation - EI itself is not a simple per-point sum over `q`, so "the
+    q-batch's EI x its batch feasibility" does not literally decompose this way
+    - but it is the natural per-point extension of the q=1 rule this module is
+    asked to implement, it keeps every term differentiable and cheap (no extra
+    MC sampling), and it errs toward gating a batch MORE harshly as `q` grows
+    (each additional low-feasibility point pulls the whole batch's score down),
+    which is the conservative direction to be wrong in when zero-inflation is
+    exactly the failure mode being guarded against. A tighter joint treatment
+    (e.g. a smoothed indicator on the batch's MINIMUM per-point feasibility,
+    mirroring how botorch's own `constraints=` argument treats a q-batch
+    constraint) is a possible refinement, not implemented here.
+    """
+
+    def __init__(self, base_acqf: AcquisitionFunction, gate: _FeasibilityGate) -> None:
+        # Mirrors botorch's own acquisition-wrapping pattern (see
+        # `FixedFeatureAcquisitionFunction`): call `Module.__init__` directly
+        # rather than `AcquisitionFunction.__init__`, since this wrapper has no
+        # single `model` of its own to hand the base class - it delegates to
+        # `base_acqf.model` below instead, which is what `optimize_acqf`'s
+        # initializers (`gen_batch_initial_conditions` et al.) actually read.
+        torch.nn.Module.__init__(self)
+        self.base_acqf = base_acqf
+        self.gate = gate
+        self.model = base_acqf.model
+
+    # `optimize_acqf_mixed` (the categorical path) treats the acquisition's
+    # pending points as an attribute it can read and write: it reads
+    # `acq_function.X_pending` up front and calls `set_X_pending(...)` to pin
+    # candidates while it enumerates fixed categorical assignments. A wrapper
+    # that does not forward both breaks exactly and only the
+    # categorical+gated combination - the continuous path never touches
+    # either - which is why the scoped gate tests (continuous designs) stayed
+    # green while the full suite's mixed-design tests caught it. Both forward
+    # to the base acquisition, which owns the pending state.
+    @property
+    def X_pending(self) -> torch.Tensor | None:
+        return self.base_acqf.X_pending
+
+    def set_X_pending(self, X_pending: torch.Tensor | None = None) -> None:
+        self.base_acqf.set_X_pending(X_pending)
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        log_ei = self.base_acqf(X)
+        log_pf = self.gate.log_p_feasible(X).sum(dim=-1)  # sum over q, see class docstring
+        return log_ei + log_pf
 
 
 def propose(
@@ -57,6 +196,9 @@ def propose(
     cat_cardinalities: list[int] | None = None,
     pending: np.ndarray | None = None,
     seed: int | None = None,
+    feasibility_classifier: FeasibilityClassifier | None = None,
+    constraint_surrogate: Surrogate | None = None,
+    constraint_floor: float | None = None,
 ) -> np.ndarray:
     """Return `q` proposed points (shape q x d) maximizing constrained-free qLogNEI.
 
@@ -96,8 +238,37 @@ def propose(
     the historical out-of-range blow-up (e.g. a `Culture_Volume ~= 33,000,000`
     proposal) that the acquisition optimizer could produce for a degenerate or
     near-constant feature. See `sanitize_bounds` for the degenerate handling.
+
+    `feasibility_classifier`, when given, gates the acquisition by the
+    classifier's P(feasible) in log space (see `_FeasibilityGatedLogNEI`).
+    Deliberately defensive: the gate is applied only when the classifier is
+    ALSO `.fitted` (not the cold-start fallback, which returns a uniform
+    P(feasible)=1 and would multiply the acquisition by a no-op while still
+    reading as "gated"); a caller that passes an unfitted classifier gets the
+    unchanged, ungated acquisition rather than a misleading gate. Whether to
+    pass a classifier AT ALL is a policy decision this function does not make
+    (see `kalos.portal.analysis._analyze`'s GATE POLICY) - `None` (the
+    default) is byte-identical to the pre-gating behavior.
+
+    `constraint_surrogate` + `constraint_floor`, when both given, add a
+    black-box constraint on a SECOND fitted outcome (e.g. `purity >= 95.0`) via
+    BoTorch's native `constraints=` argument on `qLogNoisyExpectedImprovement`:
+    the target and constraint models are combined into a `ModelListGP`, the
+    objective selects the target's output index, and the constraint callable is
+    satisfied where `constraint_floor - constraint_value <= 0`. `None` for
+    either (the default) leaves the acquisition unconstrained; passing only one
+    of the pair raises `ValueError`, since a floor with no model (or a model
+    with no floor) cannot be turned into a constraint.
+
+    Both compositions are independent and stack: gating and constraining can be
+    combined by passing both.
     """
     assert surrogate.model is not None and surrogate._X is not None, "fit the surrogate first"
+    if (constraint_surrogate is None) != (constraint_floor is None):
+        raise ValueError(
+            "constraint_surrogate and constraint_floor must be given together "
+            "(a floor with no model, or a model with no floor, is not a constraint)"
+        )
     lower, upper = sanitize_bounds(bounds)
     b = torch.stack(
         [
@@ -116,12 +287,37 @@ def propose(
         # live inside this closure (and therefore inside the `seed` fork below)
         # alongside `optimize_acqf`'s own raw-sample draws, or a seeded call
         # would still leak unseeded randomness into the caller's global RNG.
-        acq = qLogNoisyExpectedImprovement(
-            surrogate.model,
+        if constraint_surrogate is not None:
+            assert constraint_surrogate.model is not None, "fit constraint_surrogate first"
+            # ModelListGP explicitly supports differently-shaped training data per
+            # sub-model (see its docstring) - the target and constraint surrogates
+            # are routinely fit on different row subsets (the constraint column is
+            # often sparser than the target), which is exactly this case.
+            model = ModelListGP(surrogate.model, constraint_surrogate.model)
+            # Posterior samples from the ModelListGP come back with a trailing
+            # output dim of 2: [target, constraint], in the order the two models
+            # were listed above. The objective selects the target for EI; the
+            # constraint callable is satisfied (per qLogNEI's `constraints`
+            # contract) where its output is < 0, i.e. constraint_floor - value <= 0
+            # <=> value >= constraint_floor.
+            objective = GenericMCObjective(lambda Y, X=None: Y[..., 0])
+            floor = float(constraint_floor)  # type: ignore[arg-type]
+            constraints = [lambda Y: floor - Y[..., 1]]
+        else:
+            model = surrogate.model
+            objective = None
+            constraints = None
+        acq: AcquisitionFunction = qLogNoisyExpectedImprovement(
+            model,
             X_baseline=surrogate._X,
             prune_baseline=True,
             X_pending=X_pending,
+            objective=objective,
+            constraints=constraints,
         )
+        if feasibility_classifier is not None and feasibility_classifier.fitted:
+            mean, scale, coef, intercept = feasibility_classifier.torch_gate_params()
+            acq = _FeasibilityGatedLogNEI(acq, _FeasibilityGate(mean, scale, coef, intercept))
         if cat_dims:
             return _optimize_mixed(
                 acq, b, q, num_restarts, raw_samples, cat_dims, cat_cardinalities or []

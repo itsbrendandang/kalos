@@ -1,0 +1,164 @@
+# kalos deployment stack: engine (FastAPI/uvicorn) + kalos-web (Next.js) +
+# a SQLite backup sidecar. See ../RUNBOOK.md for deploy/upgrade/rollback/
+# restore procedures and the security checklist.
+#
+# Why this differs from the reference Voyager topology (docs read for this
+# task, itsbrendandang/voyager-app-deployment):
+#
+#   - No `postgres` service. kalos's data model is SQLite at
+#     `~/.kalos/{experiments,portal}.db` inside the engine container (see
+#     Dockerfile.engine's KALOS_STATE_DIR comment for exactly why that path
+#     is not arbitrary). The reference's Postgres+db-backup PATTERN (named
+#     volume for data, a separate backup sidecar on its own schedule with a
+#     host-mounted, non-compose-volume backup directory) is kept; the
+#     database engine it backs is not.
+#
+#   - TWO host-published front doors, not one. kalos-web's data-fetching code
+#     (lib/api.ts) runs entirely in "use client" components - confirmed by
+#     reading every app/*.tsx that imports it - so it is the BROWSER, not
+#     the Next.js server, that calls the engine's `/api/*` routes directly.
+#     That means the engine cannot be a docker-network-only backend the way
+#     the reference's Flask `backend` service was; it has to be reachable
+#     from wherever the browser sits, hence its own published port. This
+#     also means the engine's per-request "refuse open remote access" guard
+#     (kalos/portal/app.py's `_refuse_open_remote_access` middleware) sees
+#     every browser call as a REMOTE peer (Docker's bridge network address,
+#     not loopback) - which is exactly why the auth env below is not
+#     optional. See the security note further down.
+#
+#   - Still true here, matching the reference: only the two front-door
+#     services publish a host port; `restart: unless-stopped` (app
+#     services) / `restart: always` (backup); a named volume for the data
+#     the engine owns, with backups written to a host-mounted directory
+#     OUTSIDE that volume so `docker compose down -v` cannot take backups
+#     with it; secrets flow through `.env` (see .env.example), never
+#     hardcoded here.
+#
+# SECURITY: the engine is bound 0.0.0.0 inside its container (KALOS_HOST
+# below) so the browser's direct calls can reach it through the published
+# port. kalos/portal/config.py's `assert_safe_exposure` refuses to let
+# uvicorn start on a non-loopback bind unless authentication is actually
+# configured AND KALOS_ANON_SALT is set (or the operator explicitly opts
+# into KALOS_ANON_SALT into open access via KALOS_ALLOW_OPEN_ACCESS=1 - see
+# .env.example and RUNBOOK.md, "Security checklist", for that tradeoff and a
+# real gap it surfaces in kalos-web's current client code). This compose
+# file supplies KALOS_AUTH_TOKENS and KALOS_ANON_SALT from `.env` precisely
+# so that guard passes; leave either unset and the engine container will
+# exit non-zero at startup with the reason on stderr (`docker compose logs
+# engine`) rather than serving open - that failure is correct, not a bug in
+# this compose file.
+
+services:
+  engine:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.engine
+    image: kalos-engine:${KALOS_IMAGE_TAG:-local}
+    restart: unless-stopped
+    environment:
+      # 0.0.0.0, not the image's loopback default - see the SECURITY note
+      # above. Required so the browser (via the published port below) and
+      # the `web` service's own server-side code (SSR/RSC, none of which
+      # exists on the hot path today but may later) can both reach it.
+      - KALOS_HOST=0.0.0.0
+      - KALOS_PORT=8050
+      # REQUIRED for a non-loopback bind to start at all (assert_safe_exposure).
+      # Inline JSON array of provisioned bearer tokens - see .env.example for
+      # the exact shape and how to generate a token_sha256.
+      - KALOS_AUTH_TOKENS=${KALOS_AUTH_TOKENS}
+      # REQUIRED for a non-loopback bind to start at all (assert_safe_exposure).
+      # Seeds identity-pseudonymization (kalos/data/anonymizer.py); unset it
+      # falls back to a published, dictionary-attackable dev salt.
+      - KALOS_ANON_SALT=${KALOS_ANON_SALT}
+      # REQUIRED to let kalos-web's browser origin call this engine at all -
+      # unset, only http://localhost / http://127.0.0.1 origins are allowed
+      # (kalos/portal/config.py's dev/pilot default), which a deployed
+      # kalos-web almost never is. Must match the ORIGIN the browser loads
+      # kalos-web from (see .env.example).
+      - KALOS_CORS_ORIGINS=${KALOS_CORS_ORIGINS}
+      # State dir - see Dockerfile.engine's comment for why this is the
+      # container's literal $HOME/.kalos and not an arbitrary path.
+      - KALOS_STATE_DIR=/home/kalos/.kalos
+      # Optional external-provider credentials (kalos/providers/, all
+      # keyless-by-default - see kalos/.env.example in the engine repo for
+      # the full list and what each unlocks). Passed through only if set;
+      # kalos treats an unset var and an empty one the same
+      # (os.environ.get(X, "").strip() throughout kalos/providers/).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - BENCHLING_API_KEY=${BENCHLING_API_KEY:-}
+      - BENCHLING_TENANT=${BENCHLING_TENANT:-}
+      # Sizing knobs, all with working defaults - only takes effect if set.
+      - KALOS_MAX_UPLOAD_MB=${KALOS_MAX_UPLOAD_MB:-}
+      - KALOS_MAX_FIT_ROWS=${KALOS_MAX_FIT_ROWS:-}
+      - KALOS_TORCH_THREADS=${KALOS_TORCH_THREADS:-}
+    volumes:
+      # Named volume: survives container recreation (rebuild, image update).
+      # Mounted at the engine's actual $HOME/.kalos - see Dockerfile.engine.
+      - kalos-state:/home/kalos/.kalos
+    ports:
+      # The one place a container port is published for this service -
+      # required because the browser calls it directly (see header note),
+      # not because it should be casually more open than that.
+      - "${KALOS_ENGINE_PORT:-8050}:8050"
+    # HEALTHCHECK is baked into the image (Dockerfile.engine) - no override
+    # needed here; compose reads the image-level healthcheck for
+    # `condition: service_healthy` below.
+
+  web:
+    build:
+      context: ../../kalos-web
+      dockerfile: ../kalos/deploy/Dockerfile.web
+      args:
+        # Baked into the client bundle at BUILD time, not read at container
+        # start - see Dockerfile.web's long comment on this. Must be the URL
+        # the BROWSER can reach the engine at, i.e. normally
+        # http://<host>:${KALOS_ENGINE_PORT} or, once a TLS-terminating proxy
+        # sits in front (out of scope for v0 - see RUNBOOK.md), the proxy's
+        # public engine URL.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-}
+    image: kalos-web:${KALOS_IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      engine:
+        # Only orders container startup / log noise - the browser calls the
+        # engine independently of whether `web` itself is up, per the header
+        # note, so this is not a substitute for the engine's own healthcheck
+        # passing before real traffic arrives.
+        condition: service_healthy
+    ports:
+      - "${KALOS_WEB_PORT:-3000}:3000"
+
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    image: kalos-backup:${KALOS_IMAGE_TAG:-local}
+    restart: always
+    environment:
+      - KALOS_STATE_DIR=/home/kalos/.kalos
+      - BACKUP_DIR=/backups
+      - BACKUP_KEEP_DAYS=${BACKUP_KEEP_DAYS:-7}
+      - BACKUP_INTERVAL_SECONDS=${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      # Read-only: the backup sidecar only ever reads the live databases via
+      # `sqlite3 .backup` (see backup/backup.sh) - it has no business writing
+      # to the engine's own state.
+      - kalos-state:/home/kalos/.kalos:ro
+      # Host-mounted, OUTSIDE the compose volume set on purpose (matches the
+      # reference topology's `db-backup` pattern) - so backups survive even
+      # a `docker compose down -v` mistake against `kalos-state`. Must exist
+      # and be writable by uid 10001 before `docker compose up` - see
+      # RUNBOOK.md, "Deploy".
+      - ./backups:/backups
+    depends_on:
+      - engine
+    # No published port, no healthcheck - a background loop with nothing
+    # listening; its liveness is "did the last backup log line look right",
+    # which RUNBOOK.md's backup-restore drill checks explicitly rather than
+    # via a container healthcheck.
+
+volumes:
+  kalos-state:

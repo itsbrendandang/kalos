@@ -15,7 +15,8 @@ hand-rolled GP + EI.
 kalos/
   core/
     surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
-    optimize.py        qLogNEI acquisition + optimize_acqf -> next batch (in-flight runs as X_pending)
+    optimize.py        qLogNEI acquisition + optimize_acqf -> next batch (in-flight runs as X_pending,
+                       feasibility-gated in log space, optional outcome-constraint floor)
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
     evaluation.py      grouped CV Spearman (leakage-controlled, repeated partitions) + interval calibration + LOGO/top-k/group-mean baselines
     splits.py          group-aware CV + a leakage tripwire (assert_no_group_leakage)
@@ -34,6 +35,10 @@ kalos/
     adapter.py         BackendAdapter seam (local store today, http portal later)
   features/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
+  scale/
+    features.py        physics-informed scale features (P/V, vs, kLa, hydrostatic proxies; cited, fittable)
+    transfer.py        scale-up transfer as feature engineering over the Surrogate
+    evaluation.py      leave-one-scale-out with extrapolation direction reported separately
   domains/
     profile.py         torch-free ColumnRoles / DesignSpace + DomainProfile (declared roles, mixed spaces)
     bioprocess.py      the default bioprocess role-hint profile (legacy behavior)

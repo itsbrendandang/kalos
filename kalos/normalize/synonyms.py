@@ -57,6 +57,18 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "od": ("od", "od600", "optical_density"),
     "feed_rate": ("feed_rate", "feed", "feedrate"),
     "biomass": ("biomass", "biomass_conc", "dcw"),
+    # Added while reconciling ports/csv-orientation/NOTES.md's unit-inference
+    # table against this file: that table's "speed, rpm, agitation" and
+    # "pressure" patterns had no canonical-name entry here despite units.py
+    # now recognizing their unit tokens (rpm/bar). "volume, vol" is included
+    # as a NAME hint only - units.py deliberately does NOT register a bare
+    # "L"/"mL" unit token (a run sheet's "L" is commonly a vessel-size
+    # identifier like "5L", not a measurement; see units.py's module
+    # docstring), so a volume column's cell values pass through unconverted
+    # exactly as they did before this addition.
+    "agitation": ("agitation", "agitation_speed", "rpm", "stirrer_rpm"),
+    "pressure": ("pressure", "pressure_setpoint"),
+    "volume": ("volume", "reactor_volume", "vol"),
 }
 
 # --- role guessing (deterministic offline fallback) ------------------------ #

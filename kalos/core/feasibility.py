@@ -91,6 +91,49 @@ class FeasibilityClassifier:
         pos_idx = int(np.where(classes == 1)[0][0])
         return np.asarray(proba[:, pos_idx], dtype=float).reshape(-1)
 
+    @property
+    def fitted(self) -> bool:
+        """True iff `fit` produced a real sklearn pipeline, not the cold-start
+        fallback (see `fit`'s docstring for the fallback trigger).
+
+        A clean public accessor for the fallback/fitted distinction, so a caller
+        deciding whether to trust or use this classifier (e.g. gating acquisition
+        on it - see `kalos.portal.analysis`'s GATE POLICY) never has to reach
+        into the private `_fallback` flag to ask the question.
+        """
+        return not self._fallback and self._pipeline is not None
+
+    def torch_gate_params(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        """Return `(scaler_mean, scaler_scale, lr_coef, lr_intercept)`, the four
+        arrays/scalars needed to rebuild this fitted pipeline as a differentiable
+        torch module.
+
+        `Pipeline(StandardScaler(), LogisticRegression())` composes to an affine
+        map followed by a sigmoid: `p = sigmoid(((x - mean) / scale) @ coef +
+        intercept)`. This method exposes exactly that identity's four parameters
+        so a caller that needs the gate to be torch-differentiable (`optimize_acqf`'s
+        gradient-based multi-start search does, and this module deliberately does
+        not import torch itself - see the module docstring) can rebuild it as a
+        `torch.nn.Module` without reaching into the private `_pipeline` sklearn
+        internals directly. See `kalos.core.optimize._FeasibilityGate`, the only
+        current caller.
+
+        Only valid when `fitted` is True (raises `AssertionError` otherwise, since
+        there is no fitted pipeline to read parameters from) - callers are
+        expected to check `fitted` first, as `kalos.portal.analysis`'s GATE
+        POLICY does before ever calling this.
+        """
+        assert self.fitted and self._pipeline is not None, (
+            "torch_gate_params() requires a fitted classifier; check `.fitted` first"
+        )
+        scaler = self._pipeline.named_steps["scaler"]
+        clf = self._pipeline.named_steps["clf"]
+        mean = np.asarray(scaler.mean_, dtype=float).reshape(-1)
+        scale = np.asarray(scaler.scale_, dtype=float).reshape(-1)
+        coef = np.asarray(clf.coef_, dtype=float).reshape(-1)
+        intercept = float(np.asarray(clf.intercept_, dtype=float).reshape(-1)[0])
+        return mean, scale, coef, intercept
+
 
 def _classifier_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
     """Standard 10-bin expected calibration error for a binary classifier.

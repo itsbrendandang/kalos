@@ -1,0 +1,134 @@
+# syntax=docker/dockerfile:1
+#
+# kalos engine image - FastAPI/uvicorn portal (`python -m kalos.portal`,
+# kalos/portal/__main__.py), not Flask/Gunicorn. See docker-compose.yaml and
+# ../RUNBOOK.md for how this image is wired up and why.
+#
+# Multi-stage: a `builder` stage does the pip/compile work into a venv, and
+# the `runtime` stage copies only that venv plus the source tree needed to
+# import it - no compiler toolchain, no pip cache, ships in the final image.
+
+# ---------------------------------------------------------------------------
+# builder
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim AS builder
+
+# build-essential covers the rare sdist without a manylinux wheel for this
+# platform; discarded entirely once the `runtime` stage below only COPYs the
+# venv, not this stage's filesystem.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Only the inputs `pip install -e .` (well, a real install, not editable -
+# see below) actually needs: package metadata + the package itself. Not
+# uv.lock - pip does not read it, and kalos does not vendor a requirements
+# lock for pip today; this Dockerfile pins nothing beyond what pyproject.toml
+# pins, which is the same story a fresh `pip install kalos[ml,portal]` tells
+# an operator outside Docker.
+COPY pyproject.toml README.md ./
+COPY kalos ./kalos
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# CPU-only torch, installed FIRST and pinned to PyTorch's own CPU wheel
+# index. Left to its own devices, `pip install torch` resolves a CUDA build
+# (multiple GB heavier) even on a machine with no GPU, because PyPI's default
+# `torch` wheel bundles CUDA. This deployment target is CPU inference/fit
+# only - a GP fit + acqf optimize over a few hundred rows, not training - so
+# the CUDA build buys nothing and costs real image size and pull time.
+# botorch/gpytorch/fastapi/etc. are installed in a second pass from the
+# normal PyPI index; torch is already satisfied by then, so pip does not
+# re-resolve or replace it with a PyPI-default (CUDA) build.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir ".[ml,portal]"
+
+# ---------------------------------------------------------------------------
+# runtime
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+LABEL org.opencontainers.image.title="kalos-engine" \
+      org.opencontainers.image.description="Kalos BoTorch portal (FastAPI/uvicorn)"
+
+# Image-size reality, stated honestly rather than glossed over: the CPU-only
+# torch wheel alone is roughly 200-250MB compressed / 700-900MB installed;
+# with botorch + gpytorch + fastapi/uvicorn + numpy/pandas/scipy stacked on
+# top of a python:3.12-slim base, this image lands in the ~1.3-1.8GB range.
+# That is the honest floor for shipping a live BoTorch GP fit in a container
+# - `kalos.kit`'s torch-free core is far smaller, but that is not what
+# `python -m kalos.portal` serves (kalos/portal/app.py imports torch lazily
+# on first fit, per `_ensure_torch_threads`, but it is still a hard runtime
+# dependency of the `ml` extra this image installs). Shrinking below this
+# would mean dropping real functionality (the live GP fit), not just
+# trimming the image.
+
+# Fixed, non-privileged UID/GID rather than a name-only `useradd` default, so
+# the numeric owner of the state volume (mounted below) is stable and
+# predictable across image rebuilds and across the host filesystem.
+RUN groupadd --system --gid 10001 kalos \
+    && useradd --system --uid 10001 --gid kalos --home-dir /home/kalos --create-home kalos
+
+COPY --from=builder /opt/venv /opt/venv
+
+# KALOS_STATE_DIR is set to the literal `~/.kalos` for this container's user
+# ON PURPOSE, not to an arbitrary path like `/data/kalos-state` - and this is
+# not cosmetic. `KALOS_STATE_DIR` is only honored by campaign.py's
+# CampaignStore (portal.db) and app.py's `_LATEST` cache (latest/*.json).
+# kalos/store/sqlite_store.py's `SqliteStore.__init__` (backing
+# experiments.db) and kalos/runner/singleton.py's `DEFAULT_LOCK_PATH`
+# (runner.lock) both hardcode `Path.home() / ".kalos"` and are constructed
+# with no path argument from kalos/portal/experiments.py's `get_store()` /
+# `get_lock_path()` - i.e. they ignore KALOS_STATE_DIR entirely and always
+# resolve against `$HOME`. Pointing KALOS_STATE_DIR anywhere other than this
+# user's actual home directory would split state across two locations and
+# silently leave experiments.db and runner.lock outside the mounted volume
+# (and outside the backup sidecar's reach). Setting KALOS_STATE_DIR to the
+# same path that `~/.kalos` already resolves to keeps all four artifacts
+# (experiments.db, portal.db, runner.lock, latest/) under one directory,
+# which is also the one mount point docker-compose.yaml's volume targets.
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    KALOS_STATE_DIR=/home/kalos/.kalos
+
+# `KALOS_HOST` is deliberately NOT set here - kalos/portal/__main__.py
+# defaults it to 127.0.0.1 (loopback-only), which is the safe default for
+# "run this image standalone with no other configuration". docker-compose.yaml
+# overrides it to 0.0.0.0 explicitly, alongside the auth env that
+# `assert_safe_exposure` requires before it will accept a non-loopback bind
+# (kalos/portal/config.py). See RUNBOOK.md, "Security checklist".
+RUN mkdir -p /home/kalos/.kalos && chown -R kalos:kalos /home/kalos/.kalos
+
+USER kalos
+WORKDIR /home/kalos
+
+EXPOSE 8050
+
+# There is no dedicated /health or /healthz route in kalos/portal/app.py
+# (checked 2026-08-25: the registered GET routes are /, /fonts/..., and the
+# require_scope(READ)-gated /api/latest, /api/providers, /api/single,
+# /api/multi, plus the experiments/campaign routers under /api/experiments*
+# and /api/campaign* - none is a liveness probe). Per this task's brief, that
+# gap is NOT something to patch into the app from a deploy pack; it is flagged
+# in the deployment report as real, required wiring for whoever owns
+# kalos/portal/app.py next (a plain `@app.get("/healthz")` with no
+# `Depends(require_scope(...))`, mirroring how `/` is already unauthenticated,
+# would be the natural fix).
+#
+# Until that exists, `GET /` is the least-bad stand-in: it is the ONE route
+# that carries no `Depends(require_scope(...))` at all, so it returns 200
+# whether or not KALOS_AUTH_TOKENS is configured - the healthcheck does not
+# need a token and does not depend on this compose's auth posture to pass.
+# It also proves uvicorn is actually accepting and completing HTTP requests,
+# which a bare TCP-connect check would not (a connect can succeed while the
+# event loop is wedged). Plain stdlib urllib, not curl, so the runtime image
+# does not need an extra apt package just to answer its own healthcheck.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8050/', timeout=3).status == 200 else 1)"
+
+CMD ["python", "-m", "kalos.portal"]

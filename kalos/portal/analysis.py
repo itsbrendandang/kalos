@@ -95,7 +95,17 @@ _ID_HINT = BIOPROCESS_PROFILE.id_hint
 _GROUP_HINT = BIOPROCESS_PROFILE.group_hint
 
 
-def _annotate(batch: np.ndarray, mean, std, best: float, cols=None, design: DesignSpace | None = None) -> list:
+def _annotate(
+    batch: np.ndarray,
+    mean,
+    std,
+    best: float,
+    cols=None,
+    design: DesignSpace | None = None,
+    *,
+    p_feasible: np.ndarray | None = None,
+    constraint: tuple[str, np.ndarray, np.ndarray] | None = None,
+) -> list:
     """Attach predicted value, uncertainty, and an explore/exploit rationale to
     each proposed experiment. Explore = high model uncertainty (chosen to learn);
     exploit = high predicted value (chosen to win). Current human-in-the-loop BO
@@ -103,7 +113,19 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None, design: Desi
 
     When a `design` is given, each row also carries `recipe`: the full proposed
     experiment decoded to `{feature: value}`, with categorical dimensions decoded
-    back to their labels instead of raw integer codes."""
+    back to their labels instead of raw integer codes.
+
+    `p_feasible`, when given, is a length-`len(batch)` array and every row gets a
+    `p_feasible` key - `None` for a NaN entry, a rounded float otherwise. `None`
+    (the default, unchanged for the `kalos.portal.app` call site) omits the key
+    entirely rather than adding it with a placeholder value, so a caller that
+    never computed a feasibility probability is not told one exists.
+
+    `constraint`, when given, is `(column_name, pred_mean, pred_std)` - three
+    length-`len(batch)` arrays/name - and every row gets a
+    `pred_<column_name>` key of `{"mean": ..., "std": ...}`. `None` (the
+    default) omits the key entirely: it is only ever passed when PART 2's
+    constraint was actually applied."""
     mean = np.asarray(mean, float).reshape(-1)
     std = np.asarray(std, float).reshape(-1)
     thr = float(np.quantile(std, 2 / 3)) if len(std) > 2 else float(std.max() if len(std) else 0.0)
@@ -123,6 +145,15 @@ def _annotate(batch: np.ndarray, mean, std, best: float, cols=None, design: Desi
                        else [round(float(batch[i][j]), 3) for j in cols])
         if design is not None:
             row["recipe"] = dict(zip(design.names, design.decode_row(batch[i])))
+        if p_feasible is not None:
+            pf = float(p_feasible[i])
+            row["p_feasible"] = None if pf != pf else round(pf, 3)  # NaN -> null (ungated)
+        if constraint is not None:
+            cname, cmean, cstd = constraint
+            row[f"pred_{cname}"] = {
+                "mean": round(float(cmean[i]), 3),
+                "std": round(float(cstd[i]), 3),
+            }
         rows.append(row)
     return rows
 
@@ -224,6 +255,37 @@ GROUP_MEAN_BASELINE_MIN_GROUPS = 5
 # kalos.core.replicates) picks a small integer over a formula: below it, a
 # Spearman computed against so few independent group means would read as
 # confident nonsense, so the baseline declines rather than reports one.
+
+GATE_MIN_N_INFEASIBLE = 5
+# PART 1 (feasibility-gated proposals) POLICY constant: the sheet must have at
+# least this many non-producer rows before the acquisition is gated by
+# P(feasible) at all - "zero-inflated enough" to be the pathology BENCHMARK.md
+# documents, not a producer-only sheet with a couple of stray zeros.
+# `FeasibilityClassifier.fit` already refuses to fit sklearn below 3
+# minority-class examples (its own cold-start guard), but 3-4 examples give an
+# unstable decision boundary with no room to spare; 5 is the smallest count
+# that lets a 5-fold CV split (the fold count `feasibility_cv_report` below
+# uses) reserve at least one non-producer per held-out fold, which is the
+# regime the classifier and its CV AUC below both implicitly assume.
+
+# No separate GATE_MIN_FEASIBILITY_AUC constant is defined here. PART 1's gate
+# policy reuses `kalos.core.gates.GatesConfig.min_feasibility_auc` (0.65)
+# directly at the point it is used below, rather than duplicating that number
+# under a second name: it is already the bar this codebase uses to decide "is
+# this classifier's feasibility ranking trustworthy" for the promotion
+# verdict, and a second, separately-tunable ~0.6 floor living next to it would
+# fracture the single-number-single-meaning discipline
+# `RELIABILITY_SPEARMAN_FLOOR`'s comment above states for the reliability
+# verdict. A classifier too weak to trust for promotion is, by construction,
+# too weak to trust for gating acquisition - not by coincidence.
+
+CONSTRAINT_MIN_ROWS = 6
+# PART 2 (constrained proposals) POLICY constant: the constraint column needs
+# at least this many present values before a second `Surrogate` is fit on it.
+# Mirrors the >=6 row floor `_analyze` already requires to fit the TARGET
+# surrogate (see the `len(y) < 6` check above) - a GP fit on fewer points than
+# that is not a floor this module considers meaningful for the target, and the
+# constraint model is held to the identical bar rather than a laxer one.
 
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
@@ -459,6 +521,7 @@ def _analyze(
     roles: ColumnRoles | None = None,
     profile: DomainProfile = BIOPROCESS_PROFILE,
     pending: pd.DataFrame | Sequence[Mapping[str, Any]] | None = None,
+    constraint: Mapping[str, Any] | None = None,
 ) -> dict:
     """Run the engine on an arbitrary run sheet: pick the target (the value to
     maximize), use the process INPUTS as features (other measured outputs are
@@ -477,6 +540,19 @@ def _analyze(
     acquisition as in-flight points, so the proposed batch does not spend budget
     re-running an experiment currently in the incubator. Omit it (the default)
     and the proposal path is unchanged.
+
+    `constraint` requests a constrained single-objective proposal: maximize
+    `target` subject to a SECOND outcome column clearing a floor, e.g.
+    `{"column": "purity_pct", "floor": 95.0}`. This is per-run intent, not a
+    declared schema role (`ColumnRoles` is deliberately not the place - a run
+    can ask for a constraint on one upload and not the next, on the same
+    sheet). `None` (the default) leaves the proposal unconstrained. Whether
+    the constraint could actually be applied (column present, enough rows,
+    the constraint model fit) is reported in the response's `constraint`
+    block regardless of the outcome - a constraint that could not be honored
+    on this sheet falls back to an unconstrained proposal rather than
+    raising; see PART 2 below for the policy. Wiring this parameter through
+    the portal's HTTP surface is out of scope here.
 
     Deterministic: seeds torch + numpy up front so the same sheet gives the same
     proposals. Returns a per-column `provenance` report (what was kept/dropped and
@@ -497,10 +573,10 @@ def _analyze(
         producer_only_spearman,
         top_k_overlap,
     )
-    from kalos.core.feasibility import feasibility_cv_report
-    from kalos.core.gates import check_gates
+    from kalos.core.feasibility import FeasibilityClassifier, feasibility_cv_report, feasible_labels
+    from kalos.core.gates import GatesConfig, check_gates
     from kalos.core.optimize import MAX_MIXED_COMBOS, propose
-    from kalos.core.surrogate import Surrogate
+    from kalos.core.surrogate import FitError, Surrogate
 
     _seed_everything()
     df = _dedupe_columns(df.dropna(axis=1, how="all"))
@@ -528,6 +604,20 @@ def _analyze(
     target, cont_feats, cat_feats, gcol, declared = _resolve_columns(
         df, num, target, roles, profile
     )
+    # PART 2 leakage guard: the constraint column (e.g. "purity_pct") is
+    # normally already excluded from the feature set by `profile.outcome_hint`
+    # (the same mechanism that excludes the target itself), same as the
+    # comment at `_resolve_columns` describes. But an explicit `roles.features`
+    # list bypasses that hint entirely (see `_resolve_columns`'s declared-mode
+    # branch), so a caller who both declares the constraint column as a
+    # feature AND asks to constrain on it would otherwise leak that outcome
+    # into the model it is meant to be held out from. Stripped here
+    # unconditionally so the leakage rule holds regardless of how the column
+    # got into the feature list.
+    if constraint is not None:
+        _constraint_col_name = str(constraint["column"])
+        cont_feats = [c for c in cont_feats if str(c) != _constraint_col_name]
+        cat_feats = [c for c in cat_feats if str(c) != _constraint_col_name]
     if roles is None:
         outcomes = [c for c in num if profile.outcome_hint.search(str(c))]
         candidate_targets = outcomes or [target]
@@ -646,6 +736,69 @@ def _analyze(
     bounds = design.bounds()
     cat_dims = design.cat_dims or None
     cat_cardinalities = design.cat_cardinalities or None
+
+    # PART 2: constrained single-objective proposals. Fit a SECOND `Surrogate`
+    # over the constraint column, on the SAME design/bounds/cat_dims the target
+    # surrogate uses, so `propose` can hand both to a `ModelListGP` (see
+    # `kalos.core.optimize.propose`'s `constraint_surrogate` argument). This
+    # never crashes and never blocks the (unconstrained) proposal: a missing
+    # column, too few rows, or a `FitError` from an ill-conditioned constraint
+    # fit all fall back to reporting why, not raising.
+    #
+    # Fit on rows where the constraint value is PRESENT, which is not
+    # necessarily every row `X`/`y` cover - the constraint column can be
+    # sparser than the target (e.g. purity was only measured on a subset of
+    # runs). `X`'s rows are 1:1 with `keep_index` at this point (both were
+    # finalized before `X` was assembled above), so a boolean mask read off
+    # `df.loc[keep_index, constraint_col]` lines up with `X`'s rows directly.
+    constraint_surrogate: "Surrogate | None" = None
+    constraint_col: str | None = None
+    constraint_floor_val: float | None = None
+    constraint_applied = False
+    if constraint is None:
+        constraint_report: dict[str, Any] = {
+            "column": None, "floor": None, "n_rows_with_value": 0,
+            "applied": False, "reason": "no constraint requested",
+        }
+    else:
+        constraint_col = str(constraint["column"])
+        constraint_floor_val = float(constraint["floor"])
+        if constraint_col not in df.columns:
+            constraint_report = {
+                "column": constraint_col, "floor": constraint_floor_val,
+                "n_rows_with_value": 0, "applied": False,
+                "reason": f"constraint column {constraint_col!r} not found in the uploaded sheet",
+            }
+        else:
+            cy_all = pd.to_numeric(df.loc[keep_index, constraint_col], errors="coerce")
+            c_mask = cy_all.notna().to_numpy()
+            n_rows_with_value = int(c_mask.sum())
+            if n_rows_with_value < CONSTRAINT_MIN_ROWS:
+                constraint_report = {
+                    "column": constraint_col, "floor": constraint_floor_val,
+                    "n_rows_with_value": n_rows_with_value, "applied": False,
+                    "reason": (
+                        f"only {n_rows_with_value} rows have a numeric "
+                        f"{constraint_col!r} value; need at least {CONSTRAINT_MIN_ROWS} "
+                        "to fit a constraint model"
+                    ),
+                }
+            else:
+                Xc = X[c_mask]
+                yc = cy_all.to_numpy(float)[c_mask]
+                try:
+                    constraint_surrogate = Surrogate().fit(Xc, yc, bounds=bounds, cat_dims=cat_dims)
+                    constraint_applied = True
+                    constraint_report = {
+                        "column": constraint_col, "floor": constraint_floor_val,
+                        "n_rows_with_value": n_rows_with_value, "applied": True, "reason": None,
+                    }
+                except FitError as exc:
+                    constraint_report = {
+                        "column": constraint_col, "floor": constraint_floor_val,
+                        "n_rows_with_value": n_rows_with_value, "applied": False,
+                        "reason": f"constraint model could not be fit: {exc}",
+                    }
 
     # RECIPE identity, on the RAW values (NaN preserved) so rows missing
     # different components are never merged by the zero-fill. Built from the one
@@ -774,6 +927,68 @@ def _analyze(
     # computing it here costs essentially nothing next to the GP fits this
     # function already pays for.
     feas = feasibility_cv_report(X, y, groups=recipe_key)
+
+    # PART 1: feasibility-gated production proposals. `feas` above already
+    # cross-validates the classifier for the promotion verdict below; this
+    # section decides, from that same CV measurement plus a fresh full-data
+    # fit, whether the PROPOSAL acquisition itself should be gated by
+    # P(feasible) - a separate question from "is this classifier fit to
+    # promote" (the two verdicts can legitimately disagree: a promotable
+    # classifier on a producer-only sheet still should not gate, because there
+    # is nothing zero-inflated to gate against).
+    #
+    # GATE POLICY - all three required, each independently reported (never
+    # silent about why a run was not gated):
+    #
+    # (a) the classifier actually FIT on this sheet, not the cold-start
+    #     fallback (`FeasibilityClassifier.fitted`, a clean public accessor -
+    #     see its docstring) - gating on the fallback (a uniform P(feasible)=1)
+    #     would multiply every candidate's EI by 1 and change nothing while
+    #     still claiming to gate.
+    # (b) the sheet is zero-inflated enough: `n_infeasible >=
+    #     GATE_MIN_N_INFEASIBLE` (see that constant's comment above for the
+    #     5-row justification).
+    # (c) the CV feasibility AUC (`feas["auc"]`, reused rather than a second CV
+    #     run) clears `GatesConfig().min_feasibility_auc` (0.65) - the SAME bar
+    #     already used for the promotion verdict below (see
+    #     `GATE_MIN_N_INFEASIBLE`'s comment above for why no second number is
+    #     defined for this).
+    #
+    # When any condition fails, `gated=False` and `propose()` below is called
+    # exactly as it always was (no `feasibility_classifier` argument at all) -
+    # this is the no-regression guarantee: a producer-only or too-small sheet's
+    # proposed batch is byte-identical to before this change.
+    feas_clf = FeasibilityClassifier().fit(X, feasible_labels(y))
+    n_infeasible = int((feasible_labels(y) == 0).sum())
+    feas_auc = feas["auc"]
+    _gate_auc_floor = GatesConfig().min_feasibility_auc
+    _gate_fail_reasons: list[str] = []
+    if not feas_clf.fitted:
+        _gate_fail_reasons.append(
+            "feasibility classifier did not fit (cold-start fallback: too few "
+            "non-producer examples to train on)"
+        )
+    if n_infeasible < GATE_MIN_N_INFEASIBLE:
+        _gate_fail_reasons.append(
+            f"not zero-inflated enough: n_infeasible={n_infeasible} < {GATE_MIN_N_INFEASIBLE}"
+        )
+    _auc_ok = feas_auc == feas_auc and feas_auc >= _gate_auc_floor  # NaN-safe
+    if not _auc_ok:
+        _gate_fail_reasons.append(
+            "feasibility CV AUC not measurable on this sheet"
+            if feas_auc != feas_auc
+            else f"feasibility CV AUC too low to trust: auc={feas_auc:.3f} < {_gate_auc_floor}"
+        )
+    gated = feas_clf.fitted and n_infeasible >= GATE_MIN_N_INFEASIBLE and _auc_ok
+    gate_reason = (
+        "; ".join(_gate_fail_reasons)
+        if _gate_fail_reasons
+        else (
+            f"zero-inflated (n_infeasible={n_infeasible}) with a trustworthy "
+            f"feasibility classifier (auc={feas_auc:.3f} >= {_gate_auc_floor}); "
+            "gating acquisition by P(feasible)"
+        )
+    )
 
     # gate_stats assembles the four keys `check_gates` reads by name
     # (kalos/core/gates.py: surrogate_spearman, feasibility_auc, ece, brier).
@@ -1067,12 +1282,36 @@ def _analyze(
         cat_dims=cat_dims,
         cat_cardinalities=cat_cardinalities,
         pending=X_pending,
+        # PART 1: only ever passed when GATE POLICY (above) cleared all three
+        # conditions - `None` here is what keeps an ungated run's batch
+        # byte-identical to the pre-gating acquisition.
+        feasibility_classifier=feas_clf if gated else None,
+        # PART 2: only ever passed when the constraint model actually fit.
+        constraint_surrogate=constraint_surrogate if constraint_applied else None,
+        constraint_floor=constraint_floor_val if constraint_applied else None,
     )
     show = [d["name"] for d in drv[:4]]
     show_idx = [d["_idx"] for d in drv[:4]]  # carry the feature index, not a name lookup
     for d in drv:
         d.pop("_idx", None)  # internal-only; not part of the returned API surface
     p_mean, p_std = s.posterior(batch)
+
+    # PART 1 per-proposal P(feasible), read off the SAME classifier that gated
+    # (or did not gate) the batch above - `feas_clf` was fit on the full sheet
+    # regardless of `gated`, but its probability is only reported when the gate
+    # was actually active (see `_annotate`'s docstring for why the ungated case
+    # is `nan` here rather than a value nobody asked to trust).
+    p_feasible_arr = (
+        feas_clf.predict_proba(batch) if gated else np.full(len(batch), np.nan)
+    )
+    # PART 2 predicted constraint value +/- sd for each proposed recipe, read
+    # off the constraint surrogate before it is released below - `None` (both
+    # here and in `_annotate`) unless the constraint was actually applied.
+    constraint_pred: tuple[str, np.ndarray, np.ndarray] | None = None
+    if constraint_applied and constraint_surrogate is not None:
+        c_mean, c_std = constraint_surrogate.posterior(batch)
+        assert constraint_col is not None  # constraint_applied implies this was set
+        constraint_pred = (constraint_col, c_mean, c_std)
 
     # Response SHAPES, read off this same fitted GP before it is released. This is
     # what closes the Spearman blind spot: a titer peaking at pH 7.0 gives a rank
@@ -1108,12 +1347,14 @@ def _analyze(
         rho_floor=RELIABILITY_SPEARMAN_FLOOR,
     ).to_dict()
 
-    # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
+    # Release the fitted GP(s) (hold torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
-    # break) as soon as its last use is done, rather than waiting on `_analyze`
-    # to return. Keeps a long-lived process (the portal, the `--watch` poller)
-    # from accumulating fit memory across repeated analyses.
+    # break) as soon as their last use is done, rather than waiting on
+    # `_analyze` to return. Keeps a long-lived process (the portal, the
+    # `--watch` poller) from accumulating fit memory across repeated analyses.
     del s
+    if constraint_surrogate is not None:
+        del constraint_surrogate
     gc.collect()
 
     # per-column provenance: what was kept as a feature, used as the target, or
@@ -1199,6 +1440,23 @@ def _analyze(
         # above where `promotion` is assembled for why this must never change
         # what the API accepts).
         "promotion": promotion,
+        # PART 1: whether/why the proposal acquisition was gated by P(feasible)
+        # (see the GATE POLICY block above `promotion` is assembled near, for
+        # the full three-condition reasoning). `threshold` is the label
+        # threshold `feasible_labels` used to define "feasible" (strictly > 0
+        # here, its own default), not the AUC/n_infeasible policy floors -
+        # reported so a consumer never has to hardcode what "feasible" meant.
+        "proposal_gating": {
+            "gated": bool(gated),
+            "reason": gate_reason,
+            "n_infeasible": n_infeasible,
+            "feasibility_auc": None if feas_auc != feas_auc else round(float(feas_auc), 3),
+            "threshold": 0.0,
+        },
+        # PART 2: whether/why the requested constraint (if any) was applied to
+        # the proposal below. Always present (even with no `constraint`
+        # argument) so a consumer never has to special-case its absence.
+        "constraint": constraint_report,
         # Leave-one-group-out, top-k overlap, and the group-mean baseline floor
         # - three evaluation-hygiene checks that ask harder or narrower
         # questions than the pooled grouped-CV Spearman above. Each is `None`
@@ -1214,9 +1472,17 @@ def _analyze(
         # batch. Closes the interior-optimum blind spot in the rank drivers.
         "gp_shapes": gp_shapes,
         "proposal_features": show,
-        "proposals": _annotate(batch, p_mean, p_std, incumbent, cols=show_idx, design=design),
+        "proposals": _annotate(
+            batch, p_mean, p_std, incumbent, cols=show_idx, design=design,
+            p_feasible=p_feasible_arr, constraint=constraint_pred,
+        ),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],
         "provenance": provenance,
+        # Orientation pre-pass fact from the upload path (kalos/portal/uploads.py):
+        # present when the sheet was confidently detected as transposed and
+        # normalized before analysis, so the client can see the frame they sent is
+        # not byte-for-byte the frame that was modeled. None for a standard sheet.
+        "orientation": df.attrs.get("kalos_orientation"),
         "validation": report_dict(validation),
         # Features whose search range was narrowed because some observed cells
         # were physically impossible. Reported, never silent: the client needs to
