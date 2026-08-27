@@ -11,6 +11,7 @@ follow-up). Per-tenant isolation of the campaign store is the next slice.
 """
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any
 
@@ -144,12 +145,21 @@ async def reanalyze_campaign(
         log.warning("reanalyze rejected: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+    # Runs still in the incubator. They have no outcome to fold, so they never
+    # reach `df`; passed separately they keep the next batch from re-proposing an
+    # experiment already underway.
+    awaiting = store.awaiting_recipes(tenant=tenant)
+
     if df.empty:
         log.warning("reanalyze rejected: campaign has no base rows to analyze")
         return JSONResponse({"error": "the campaign has no data to analyze"}, status_code=400)
 
     try:
-        result = await run_in_threadpool(_analyze, df, target, profile=BIOPROCESS_PROFILE)
+        result = await run_in_threadpool(
+            functools.partial(
+                _analyze, df, target, profile=BIOPROCESS_PROFILE, pending=awaiting
+            )
+        )
     except Exception:  # noqa: BLE001 - normalized to a generic 400, same as /api/run
         # Full traceback logged server-side; the client only ever sees a
         # generic message, matching /api/run's catch-all in kalos/portal/app.py.

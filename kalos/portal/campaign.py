@@ -426,6 +426,30 @@ class CampaignStore:
                 raise CampaignError("no measured runs to fold; log at least one result first")
             return pd.DataFrame(folded), target, state.get("generation")
 
+    def awaiting_recipes(self, *, tenant: str = "default") -> list[dict[str, Any]]:
+        """The recipes that have been STARTED but not yet measured, as plain dicts.
+
+        These are the runs currently in the incubator: proposed, dispensed, and
+        waiting on an assay. They carry no outcome, so they cannot join the fit —
+        but the next proposal must know they are taken, or the loop spends part of
+        its budget re-running an experiment already in progress. The re-analyze
+        route hands these to `_analyze` as its `pending` block.
+
+        Read outside the plan/commit transaction on purpose. A run started in the
+        gap simply is not in this list, which costs the acquisition one in-flight
+        point of information and nothing else — there is no state to corrupt.
+        Returns `[]` when there is no campaign or nothing is awaiting.
+        """
+        with self._lock:
+            state = self._read_locked(tenant)
+            if state is None:
+                return []
+            return [
+                dict(run["recipe"])
+                for run in state["pending"]
+                if run["result"] is None and isinstance(run.get("recipe"), dict)
+            ]
+
     def commit_fold(self, generation: str | None, *, tenant: str = "default") -> dict[str, Any]:
         """Make the fold planned by `plan_fold` durable, but ONLY if the
         campaign has not changed since (its `generation` still matches).

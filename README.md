@@ -15,7 +15,7 @@ hand-rolled GP + EI.
 kalos/
   core/
     surrogate.py       BoTorch SingleTaskGP (input-normalized, output-standardized)
-    optimize.py        qLogEI acquisition + optimize_acqf -> next batch
+    optimize.py        qLogNEI acquisition + optimize_acqf -> next batch (in-flight runs as X_pending)
     multiobjective.py  qLogNEHVI for two+ objectives (titer AND purity) + Pareto front
     evaluation.py      grouped cross-validated Spearman (leakage-controlled)
     splits.py          group-aware CV + a leakage tripwire (assert_no_group_leakage)
@@ -81,8 +81,16 @@ dataset. A campaign is one target plus a growing dataset of (recipe -> measured
 outcome) rows; `POST /api/campaign/reanalyze` folds logged results into that
 dataset and re-runs the same leakage-controlled `_analyze`, so each round stays
 as honest as the first (grouped-CV reliability, conformal bands, "not modeled"
-callouts). It adds no new engine capability. See `docs/CAMPAIGN_LOOP.md` for the
-full contract.
+callouts).
+
+Runs that were started but have not been measured yet are handed to the
+acquisition as in-flight points (`X_pending`). They have no outcome, so they
+never join the fit; but without them a mid-round re-proposal treats a recipe
+currently in the incubator as unexplored and proposes it again. On a 4-factor
+design at `q=5` over 10 seeds, a blind re-proposal repeated a mean of 2.1 of its
+5 recipes against work already running; with the pending block it repeats none
+(`python -m kalos.bench --pending`). See `docs/CAMPAIGN_LOOP.md` for the full
+contract.
 
 ## Uploading a run sheet (`POST /api/run`)
 
