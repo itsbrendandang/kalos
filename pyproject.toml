@@ -31,6 +31,21 @@ portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"
 # The torch-free deterministic core (units/synonyms/plan/apply) and the
 # offline fallback in llm.py need none of this.
 normalize = ["anthropic>=0.40"]
+# The deterministic PDF table-extraction tier of `kalos.ingest`
+# (kalos/ingest/pdf.py). `pdfplumber` alone, not `camelot-py[cv]` (the other
+# table extractor the ported reference pipeline offered): camelot needs a
+# system Ghostscript binary (`gs`) that no Python packaging tool can install,
+# and `camelot-py[cv]` additionally pulls in `opencv-python` on top of that -
+# a materially heavier, more fragile dependency for capability this package
+# does not use (the port's own OCR/figure path was an unimplemented stub).
+# `pdfplumber`'s full install closure (pdfplumber + pdfminer.six + pypdfium2
+# + Pillow + cryptography + its transitives) measured ~35 MB installed in a
+# throwaway venv - real, but self-contained pure-`pip`/no-system-binary, and
+# it is the ONLY table extractor `extraction_pipeline.py` actually exercised
+# outside of camelot (see `kalos/ingest/pdf.py`'s module docstring). Nothing
+# in `kalos.ingest` needs `pdfplumber` to IMPORT - only to run extraction -
+# so this stays an optional extra, never a base dependency.
+pdf = ["pdfplumber>=0.11"]
 # `httpx` is the transport `starlette.testclient.TestClient` (used across the
 # portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
 # a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every

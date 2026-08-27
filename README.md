@@ -49,7 +49,12 @@ kalos/
     checks.py          the eleven data-quality checks (units, bounds, duplicates, missingness, informative missingness, outliers, provenance, replicates, controls, constants, constant-within-group)
     runner.py          validate_frame: runs every check, never raises, + apply_unit_conversions
     report.py          Finding / UnitConversion / ValidationReport, JSON-safe serialization
+  ingest/
+    schema.py          hierarchical extraction schema + bridge to the validation gate's tidy frame
+    pdf.py             deterministic PDF table extraction (optional extras: pip install kalos[pdf])
+    llm.py             schema-constrained Ollama assist; deterministic result stands on any failure
   normalize/
+    workbook.py        multi-sheet Excel classifier + id-joined merge (demotes, never guesses)
     units.py           the canonical unit registry: parse "34.6 C", convert to a base unit
     synonyms.py        deterministic header -> canonical column mapping
     llm.py             optional LLM-assisted mapping (needs ANTHROPIC_API_KEY; offline fallback always works)

@@ -1638,6 +1638,10 @@ def _analyze(
         # normalized before analysis, so the client can see the frame they sent is
         # not byte-for-byte the frame that was modeled. None for a standard sheet.
         "orientation": df.attrs.get("kalos_orientation"),
+        # Workbook merge fact from the upload path: present when a multi-sheet
+        # Excel was classified and merged (which sheets joined, which were
+        # excluded and why, collision renames). None for single-sheet uploads.
+        "workbook": df.attrs.get("kalos_workbook"),
         "validation": report_dict(validation),
         # Features whose search range was narrowed because some observed cells
         # were physically impossible. Reported, never silent: the client needs to

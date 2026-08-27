@@ -2,6 +2,60 @@
 
 Newest first.
 
+## 2026-08-27 (wave 3: the ingestion tiers arrive, and a second negative result)
+
+### Fixed - multi-sheet Excel was silently dropping every sheet after the first
+
+`pd.read_excel` with no `sheet_name` reads sheet 0; every other sheet of an
+uploaded workbook was discarded with no error, warning, or trace. Now a
+tier-2 deterministic classifier (`kalos/normalize/workbook.py`) identifies
+the run-level sheet (id-shaped column, widest per-run coverage - reusing the
+orientation pre-pass's id conventions), left-joins mergeable per-topic
+sheets by the shared id, and demotes rather than guesses: repeated-id
+time-series sheets, free-text notes, empty sheets, and ambiguous cases are
+excluded WITH REASONS, carried in provenance and surfaced as `workbook` in
+the response. A "mergeable" sheet whose join would duplicate rows demotes
+instead of exploding the row count.
+
+Security property made explicit and tested: the 2M-cell zip-bomb cap was
+per-sheet - safe only while one sheet was ever read. It now binds on the SUM
+across sheets, checked from declared dimensions before anything
+materializes; a many-small-sheets bomb is rejected.
+
+### Added - tier 3: PDF extraction, behind kalos[pdf]
+
+`kalos/ingest/`: the graduated PDF tier - pdfplumber table extraction
+(deterministic first), a hierarchical extraction schema bridged to the
+validation gate's tidy-frame format, and an LLM assist that only activates
+under KALOS_LLM_PROVIDER=ollama, sending the REAL JSON Schema in Ollama's
+structured-output `format` field, hand-validated on return, deterministic
+result standing on any failure. The ~35 MB dependency closure stays out of
+the core install (`pip install kalos[pdf]`); without it, importing works and
+extraction raises one informative error. Two graduation fixes over the
+vetted port, both flagged by its own PROVENANCE: fabricated 0.0 placeholder
+measurements became optional fields plus a real summary-table parser, and
+hardcoded document version/approval defaults became None. camelot dropped
+for cause (system Ghostscript dependency; its path in the port was a stub).
+
+### Evidence recorded - TabPFN v2: the second clean negative result
+
+Benchmarked against the plain SingleTaskGP across 9 (n, d) cells x 5 seeds:
+the GP wins 6 outright, ties 2 inside one std, and TabPFN's one "win" is a
+cell where both models are below chance. Cost is disqualifying on its own:
+23-39x slower per fit+predict, with a single call exceeding the whole 2s
+analyze budget at n=100, d=25. Not wired; no dependency added; the
+re-runnable record lives at kalos/bench/tabpfn_experiment.py (tests skip
+cleanly where tabpfn is absent). Practical friction recorded: the current
+release gates its checkpoint behind an interactive HF license login (the
+trial used the older public-checkpoint release), and the license is
+Llama-style attribution, not plain permissive.
+
+### kalos-web (PRs #25-#27, merged/open in that repo)
+
+Honesty-field parity, the server-side auth proxy (one front door), and the
+alternative-scale panel with its log-units calibration scoped apart from the
+raw card.
+
 ## 2026-08-25 (wave 2: acted-on diagnostics, one front door, and a vindication)
 
 Five agents plus orchestrator integration; every number below is from a

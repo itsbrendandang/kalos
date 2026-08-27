@@ -15,6 +15,7 @@ import zipfile
 import pandas as pd
 
 from kalos.normalize.orientation import detect_orientation
+from kalos.normalize.workbook import analyze_workbook, merge_workbook
 
 log = logging.getLogger("kalos.portal")
 
@@ -91,6 +92,12 @@ def _parse_dimension_ref(ref: str) -> tuple[int, int] | None:
 def _reject_oversized_xlsx_via_openpyxl(raw: bytes) -> None:
     """Fallback guard for the rare sheet with no `<dimension>` tag: open read-only
     with openpyxl and check its computed `max_row` / `max_column` instead.
+
+    The cell-count cap is enforced on the SUM of `rows * cols` across every
+    worksheet, not any one sheet alone: kalos now reads every sheet of a
+    multi-sheet workbook (see `_apply_workbook_prepass`), so a workbook whose
+    individual sheets each sit just under the cap but whose total does not
+    must still be rejected before that total is ever materialized.
     """
     import openpyxl
 
@@ -100,12 +107,14 @@ def _reject_oversized_xlsx_via_openpyxl(raw: bytes) -> None:
         log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
         raise UploadRejected(_ERR_PARSE) from exc
     try:
+        total_cells = 0
         for ws in wb.worksheets:
             cols = ws.max_column or 0
             rows = ws.max_row or 0
             if cols > MAX_COLUMNS:
                 raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-            if rows * cols > MAX_XLSX_CELLS:
+            total_cells += rows * cols
+            if total_cells > MAX_XLSX_CELLS:
                 raise UploadRejected(_ERR_TOO_LARGE)
     finally:
         wb.close()
@@ -123,6 +132,14 @@ def _reject_oversized_xlsx(raw: bytes) -> None:
     falls back to opening it read-only with openpyxl and using its computed
     `max_row` / `max_column`. A corrupt or unreadable zip raises
     `UploadRejected` (client error).
+
+    The cell-count cap (`MAX_XLSX_CELLS`) is enforced on the SUM of
+    `rows * cols` across every sheet in the workbook, not any one sheet
+    alone - kalos now reads every sheet (see `_apply_workbook_prepass`), so
+    N sheets each declaring cells just under the cap could otherwise combine
+    into a materialized frame far over it. The column cap (`MAX_COLUMNS`)
+    stays a PER-SHEET check: it bounds one sheet's own width, independent of
+    how many sheets the workbook has.
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -139,6 +156,7 @@ def _reject_oversized_xlsx(raw: bytes) -> None:
             return
 
         needs_fallback = False
+        total_cells = 0
         for name in sheet_names:
             with zf.open(name) as sheet_file:
                 head = sheet_file.read(_DIMENSION_SCAN_BYTES)
@@ -153,7 +171,8 @@ def _reject_oversized_xlsx(raw: bytes) -> None:
             rows, cols = parsed
             if cols > MAX_COLUMNS:
                 raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-            if rows * cols > MAX_XLSX_CELLS:
+            total_cells += rows * cols
+            if total_cells > MAX_XLSX_CELLS:
                 raise UploadRejected(_ERR_TOO_LARGE)
 
     if needs_fallback:
@@ -188,6 +207,63 @@ def _apply_orientation_prepass(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _apply_workbook_prepass(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Tier-2 deterministic pre-pass (`kalos.normalize.workbook`) for a
+    multi-sheet xlsx upload: classify every sheet (run-level / mergeable /
+    unmergeable) and left-join the mergeable sheets onto the run-level sheet
+    by their shared run/batch id column, BEFORE anything downstream (the
+    validation gate, analysis) ever sees more than one frame.
+
+    Ordering: the tier-1 orientation pre-pass (`_apply_orientation_prepass`)
+    runs on EACH sheet individually FIRST, then the workbook classifier/merge
+    runs on the (now orientation-normalized) sheets - never the other way
+    around, and never once on the already-merged frame. Workbook
+    classification needs each sheet already in standard orientation (rows =
+    runs, one row per run, a run id running DOWN a column) to find a shared
+    id column at all: a still-transposed per-topic sheet's "id" values run
+    ACROSS its column headers, not down a column, so classifying it before
+    fixing orientation would misclassify it (typically as unmergeable, for
+    the wrong reason) rather than recognizing it as mergeable once flipped.
+    Running orientation once on the final MERGED frame instead would be too
+    late for the same reason - the per-sheet transpose has to happen before
+    the per-sheet id column can be found and joined on - and would also be
+    ambiguous about which of the several original sheets a single verdict
+    was even describing.
+
+    Never guesses: when `analyze_workbook` cannot confidently pick a
+    run-level sheet (`WorkbookReport.run_level_sheet is None` - no shared id
+    column at all, or a tie between candidates), this degrades to exactly
+    what an upload of just the workbook's first sheet meant before this
+    tier existed - `kalos`'s pre-wiring behavior - rather than rejecting the
+    upload or guessing a merge. The ambiguity itself is still recorded, on
+    `df.attrs["kalos_workbook"]`, so it is visible to a downstream
+    provenance report even though no merge happened.
+    """
+    oriented = {name: _apply_orientation_prepass(df) for name, df in sheets.items()}
+    report = analyze_workbook(oriented)
+
+    if report.run_level_sheet is None:
+        first_name = next(iter(oriented))
+        out = oriented[first_name]
+        out.attrs["kalos_workbook"] = {
+            "merged": False,
+            "reason": "ambiguous workbook: no sheet was confidently classified as the run-level sheet",
+            "sheets": {
+                name: {"role": c.role, "reason": c.reason} for name, c in report.classifications.items()
+            },
+        }
+        return out
+
+    merged, provenance = merge_workbook(report, max_columns=MAX_COLUMNS)
+    merged.attrs["kalos_orientation"] = oriented[report.run_level_sheet].attrs.get("kalos_orientation")
+    merged.attrs["kalos_workbook"] = {
+        "merged": True,
+        "sheet_orientation": {name: df.attrs.get("kalos_orientation") for name, df in oriented.items()},
+        **provenance,
+    }
+    return merged
+
+
 def _parse_upload(raw: bytes) -> pd.DataFrame:
     """Turn raw upload bytes into a bounded dataframe, or raise `UploadRejected`.
 
@@ -210,19 +286,38 @@ def _parse_upload(raw: bytes) -> pd.DataFrame:
         # InvalidFileException, ValueError) is a client error, not a server one.
         _reject_oversized_xlsx(raw)
         try:
-            df = pd.read_excel(io.BytesIO(raw))
+            # sheet_name=None reads EVERY sheet (a dict of name -> DataFrame, in
+            # workbook order), not just the first - `pd.read_excel`'s default
+            # (`sheet_name=0`) silently dropped every sheet but the first, which
+            # is wrong for a multi-sheet batch record (a run-level sheet plus
+            # per-topic sheets - see `kalos/normalize/workbook.py`).
+            parsed = pd.read_excel(io.BytesIO(raw), sheet_name=None)
         except Exception as exc:  # noqa: BLE001 - normalized to a generic 400 below
             log.warning("rejected an unreadable xlsx upload: %s", type(exc).__name__)
             raise UploadRejected(_ERR_PARSE) from exc
-        rows, cols = df.shape
+        if not parsed:
+            raise UploadRejected(_ERR_PARSE)
         # Belt-and-suspenders: re-check the materialized shape. The pre-read guard
-        # uses the sheet's declared dimensions; this catches a mismatch and the
-        # column ceiling on the actual parsed frame.
-        if cols > MAX_COLUMNS:
-            raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
-        if rows * cols > MAX_XLSX_CELLS:
+        # uses each sheet's declared dimensions; this catches a mismatch and the
+        # column ceiling on the actual parsed frame. The cell cap binds on the SUM
+        # across every sheet (see `_reject_oversized_xlsx`'s docstring) - reading
+        # multiple sheets must never let a workbook slip past the guard that a
+        # single-sheet read already enforced.
+        total_cells = 0
+        for sheet_df in parsed.values():
+            rows, cols = sheet_df.shape
+            if cols > MAX_COLUMNS:
+                raise UploadRejected(_ERR_TOO_MANY_COLUMNS)
+            total_cells += rows * cols
+        if total_cells > MAX_XLSX_CELLS:
             raise UploadRejected(_ERR_TOO_LARGE)
-        return _apply_orientation_prepass(df)
+        if len(parsed) == 1:
+            # Single-sheet xlsx: byte-identical to kalos's pre-wiring behavior -
+            # the same single frame, through the same orientation pre-pass, with
+            # the multi-sheet workbook tier never running at all.
+            (df,) = parsed.values()
+            return _apply_orientation_prepass(df)
+        return _apply_workbook_prepass(parsed)
 
     # Otherwise treat as text/CSV. A binary blob that is neither a zip nor valid
     # tabular text will not yield usable numeric columns and is rejected downstream
