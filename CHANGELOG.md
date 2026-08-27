@@ -2,6 +2,38 @@
 
 Newest first.
 
+## 2026-08-09 (GP-native response shapes)
+
+### Added - `kalos/core/gp_shape.py`: interior optima and feature relevance from the GP that proposes
+
+`kalos.core.drivers` reports a signed Spearman rho, which is univariate and monotonic, so it is structurally blind to the shape bioprocess responses usually have. A simulated titer peaking at pH 7.0 gives rho = +0.164 - below the trust floor - so the driver panel reports `significant: false` for the single most important variable on the sheet, and the sign of rho points the process the wrong way.
+
+The same sheet now also returns:
+
+```
+GP SHAPES  swept_at=incumbent
+  pH        rel=0.663 rho=+0.164 interior_optimum  opt=7.000  missed_by_spearman=True
+  Methanol  rel=0.299 rho=+0.768 monotonic_up      opt=-      missed_by_spearman=False
+  noise     rel=0.038 rho=+0.002 flat              opt=-      missed_by_spearman=False
+```
+
+The optimum is recovered at exactly 7.000, and both views ship side by side so a scientist sees the rank correlation and the shape together rather than having to trust one.
+
+**Read off the surrogate the engine already fits, not a second model.** Three things follow, and each was a problem with the gradient-boosted-tree prototype this replaces (parked on `feat/xgboost-drivers`, which segfaults: xgboost and torch each carry an OpenMP runtime and the second into a parallel region crashes the process, uncatchably):
+
+- **One authority.** The shapes describe the same posterior that produced `proposals`, so the report cannot rank features differently from the model being optimized.
+- **Uncertainty is free.** `Surrogate.posterior` returns a mean AND a standard deviation, so an interior optimum is claimed only when the peak clears the better endpoint by at least `PEAK_SD_MULTIPLE` combined posterior sds. `peak_gain` and `peak_separation_sd` are both reported so a stricter bar can be applied without re-running. A point-predicting tree cannot make this check at all.
+- **Relevance is free.** The Matern kernel is fitted with ARD, one lengthscale per dimension. A short lengthscale means the response moves fast along that axis, which is per-feature relevance already paid for during the fit.
+
+**Swept at the incumbent, not the medians.** Sweeping one feature means fixing the rest, and the usual choice - column medians - is a recipe that may never have been run, putting the whole profile where the GP has no data and reporting the shape of its prior. The sweep is taken around the best observed row instead: a real recipe, near data, and the question a scientist is actually asking. `swept_at` names this in the response rather than leaving it implied.
+
+**Gated on out-of-fold skill, which the negative control forced.** Posterior separation alone is NOT sufficient: on a pure-noise target the GP fits small wiggles, and near the training data its posterior sd is tiny, so a meaningless bend scores a large separation ratio. The first version confidently claimed interior optima on noise. The shapes are now conditioned on `cv_spearman`, the same out-of-fold measurement and `RELIABILITY_SPEARMAN_FLOOR` the reliability verdict already uses, so a model that has not shown it can predict held-out runs reports no shapes at all. When no skill measure is supplied the report says so in `unmodeled` rather than implying the shapes were validated.
+
+Also: the 0.20 floor was a bare literal in two places in `analysis.py` and is now the single `RELIABILITY_SPEARMAN_FLOOR`, so the verdict and the shapes can never be held to different bars.
+
+`tests/test_gp_shape.py` (+15): the headline interior optimum where Spearman is blind, ARD ranking the real driver above noise, monotonic features not flagged, an ignored feature reported `flat` rather than as a trend, no interior claim on a monotonic response, the noise-target refusal, refusing an unfitted surrogate (it must describe the deployed model, never fit its own), mismatched names, a constant column, determinism, and strict-JSON safety.
+
+Suite: 402 passed, 1 skipped. ruff and mypy clean.
 ## 2026-08-09 (driver multiplicity + stated coverage)
 
 ### Fixed - the driver panel manufactured false process insights

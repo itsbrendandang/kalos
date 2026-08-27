@@ -32,6 +32,16 @@ _DEV_SALT = "kalos"
 _warned_default_salt = False
 
 
+def salt_configured() -> bool:
+    """Whether a real salt is provisioned, rather than the dev fallback.
+
+    Exposed so deployment checks can refuse to publish pseudonyms that are
+    dictionary-attackable, without those checks having to know the variable's
+    name or duplicate the fallback logic.
+    """
+    return bool(os.environ.get(_ENV_SALT_VAR))
+
+
 def default_salt() -> str:
     """Return the anonymization salt: `KALOS_ANON_SALT` if set, else the dev salt.
 
@@ -112,6 +122,7 @@ class Anonymizer:
 __all__ = [
     "Anonymizer",
     "_hash",
+    "salt_configured",
     "default_salt",
     "DROP_EXACT",
     "DROP_SUBSTR",

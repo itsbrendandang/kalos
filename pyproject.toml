@@ -50,6 +50,14 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["kalos*"]
 
+# The portal serves two non-Python assets straight off the package directory:
+# `index.html` (read at import in kalos/portal/app.py) and the vendored Satoshi
+# brand face it references. Without this they are left out of the wheel
+# entirely, and `python -m kalos.portal` from an installed package dies at
+# import on a missing index.html. Source checkouts never noticed.
+[tool.setuptools.package-data]
+"kalos.portal" = ["index.html", "fonts/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

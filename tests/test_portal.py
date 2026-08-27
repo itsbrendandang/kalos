@@ -40,7 +40,26 @@ def test_analyze_excludes_outputs_and_reports_honest_cv():
     rel = out["reliability"]
     assert rel["spearman_floor"] == 0.20
     assert rel["clears_floor"] == (out["cv_spearman"] >= 0.20)
-    assert set(rel) == {"spearman", "ci95", "spearman_floor", "clears_floor", "ci_excludes_zero", "unmodeled"}
+    # An EXACT set on purpose: the reliability block is the client-facing trust
+    # verdict, so a field appearing here should be a deliberate act. The producer_*
+    # group was added when the pooled Spearman was shown to be satisfiable by
+    # separating zeros from non-zeros - a feasibility classifier rather than a
+    # ranking of recipes - so the producer-only ranking is reported beside it.
+    # Note `clears_floor` still keys off the POOLED score alone: tightening the
+    # gate changes which uploads the API accepts and is a product decision, not a
+    # side effect of adding a measurement.
+    assert set(rel) == {
+        "spearman",
+        "ci95",
+        "spearman_floor",
+        "clears_floor",
+        "ci_excludes_zero",
+        "unmodeled",
+        "producer_spearman",
+        "producer_clears_floor",
+        "n_producers",
+        "producer_threshold",
+    }
     assert "scale-up transfer" in rel["unmodeled"]
 
 

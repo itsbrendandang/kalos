@@ -16,6 +16,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from kalos.portal import app as portal_module  # noqa: E402
+from kalos.portal import campaign as campaign_module  # noqa: E402
 from kalos.portal.app import app  # noqa: E402
 from kalos.portal.campaign import CampaignStore, get_campaign_store  # noqa: E402
 
@@ -51,6 +52,12 @@ def client(store, tmp_path, monkeypatch):
     monkeypatch.setattr(portal_module, "_STATE_DIR", tmp_path)
     monkeypatch.setattr(portal_module, "_LATEST_DIR", tmp_path / "latest")
     monkeypatch.setattr(portal_module, "_LATEST", {})
+    # The upload path calls `get_campaign_store()` directly rather than through
+    # DI, and that singleton is cached for the whole process — so overriding the
+    # dependency alone leaves `/api/run` seeding whichever store was built
+    # first. Pin the module global at this test's store too, or tests that
+    # upload both pollute each other and escape the tmp_path sandbox.
+    monkeypatch.setattr(campaign_module, "_STORE", store)
     app.dependency_overrides[get_campaign_store] = lambda: store
     try:
         yield TestClient(app)
@@ -396,3 +403,82 @@ def test_commit_fold_aborts_when_campaign_reseeded_underneath(store):
     assert state["round"] == 0
     assert len(state["base_rows"]) == len(fresh)
     assert state["pending"] == []
+
+
+# --- analysis/campaign coherence (analysis_in_sync) ------------------------- #
+#
+# `/api/latest` and the campaign are SEPARATE persisted resources. Nothing used
+# to tie them together, so they could describe two different run sheets while
+# both looked valid — `/results` reporting one `best` and `/decide` another.
+# `_save_latest` now stamps the campaign generation it was published alongside,
+# and `GET /api/campaign` reports whether that stamp still matches.
+
+def _upload(client, df):
+    return client.post(
+        "/api/run",
+        files={"file": ("runs.csv", df.to_csv(index=False), "text/csv")},
+        data={"target": "lipase_titer"},
+    )
+
+
+def test_upload_leaves_the_analysis_and_campaign_in_sync(client):
+    assert _upload(client, _tiny_df(n=10)).status_code == 200
+
+    body = client.get("/api/campaign").json()
+    assert body["has_campaign"] is True
+    assert body["analysis_in_sync"] is True
+
+
+def test_analysis_is_flagged_out_of_sync_when_seeding_failed(store, client, monkeypatch):
+    """The upload path seeds the campaign best-effort: a seeding failure must
+    never fail the upload (kalos/portal/app.py). That is exactly how the two
+    resources drift apart — `/api/latest` gets the new analysis, the campaign
+    keeps the old one, and both look valid. The stamp makes it visible."""
+    store.seed(_tiny_df(n=10, seed=1), "lipase_titer", ["Methanol", "pH"])
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("seeding blew up")
+
+    monkeypatch.setattr(store, "seed", _boom)
+    assert _upload(client, _tiny_df(n=12, seed=2)).status_code == 200
+
+    body = client.get("/api/campaign").json()
+    assert body["has_campaign"] is True
+    assert body["analysis_in_sync"] is False
+
+
+def test_a_campaign_seeded_after_the_analysis_is_out_of_sync(store, client):
+    """The real-world shape of the bug: the campaign is re-seeded from a
+    different run sheet while `/api/latest` still serves the older analysis."""
+    assert _upload(client, _tiny_df(n=10)).status_code == 200
+    assert client.get("/api/campaign").json()["analysis_in_sync"] is True
+
+    store.seed(_tiny_df(n=14, seed=7), "lipase_titer", ["Methanol", "pH"])
+
+    assert client.get("/api/campaign").json()["analysis_in_sync"] is False
+
+
+def test_an_unstamped_legacy_analysis_reads_as_out_of_sync(store, client):
+    """An analysis persisted before the stamp existed carries no generation, so
+    it cannot be shown to describe the campaign's dataset. Unverifiable is
+    reported as out-of-sync, not quietly as fine — the next upload re-stamps."""
+    assert _upload(client, _tiny_df(n=10)).status_code == 200
+    latest = portal_module._load_latest("default")
+    assert latest is not None
+    latest.pop("campaign_generation")
+
+    assert client.get("/api/campaign").json()["analysis_in_sync"] is False
+
+
+def test_reanalyze_republishes_a_matching_stamp(store, client):
+    """Closing the loop keeps the two resources tied: `commit_fold` mints a new
+    generation and the analysis published alongside it carries that stamp."""
+    assert _upload(client, _tiny_df(n=10)).status_code == 200
+    started = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "measured"},
+    ]}).json()["started"]
+    client.post("/api/campaign/result", json={"id": started[0]["id"], "value": 6.0})
+
+    assert client.post("/api/campaign/reanalyze").status_code == 200
+    assert client.get("/api/campaign").json()["analysis_in_sync"] is True

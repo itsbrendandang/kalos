@@ -235,8 +235,9 @@ class CampaignStore:
 
     def seed(
         self, df: pd.DataFrame, target: str, features: list[str], *, tenant: str = "default"
-    ) -> None:
-        """Start a FRESH campaign, overwriting any existing one.
+    ) -> str:
+        """Start a FRESH campaign, overwriting any existing one. Returns the
+        `generation` token minted for the new campaign.
 
         Called after every successful `/api/run` upload: a new upload is a
         new base dataset, so any in-flight pending runs from a previous
@@ -244,6 +245,11 @@ class CampaignStore:
         dataset. `target`/`features` come from the analysis result
         (`result["target"]`, `result["proposal_features"]`), never guessed
         from column names — see docs/CAMPAIGN_LOOP.md, "Seeding".
+
+        The caller stamps the analysis it publishes to `/api/latest` with the
+        returned generation, which is what lets `summary()` report whether the
+        two separately-persisted resources still describe the same run sheet
+        (docs/CAMPAIGN_LOOP.md, "Analysis/campaign coherence").
         """
         from kalos.portal.serialization import _json_safe_records  # local: avoids a cycle at import time
 
@@ -261,13 +267,16 @@ class CampaignStore:
                 "updated_at": time.time(),
             }
             self._write_locked(tenant, state)
+            return str(state["generation"])
 
     def get(self, *, tenant: str = "default") -> dict[str, Any] | None:
         """The raw campaign state for `tenant`, or None if none seeded yet."""
         with self._lock:
             return self._read_locked(tenant)
 
-    def summary(self, *, tenant: str = "default") -> dict[str, Any]:
+    def summary(
+        self, *, tenant: str = "default", analysis_generation: str | None = None
+    ) -> dict[str, Any]:
         """The `GET /api/campaign` response: `{"has_campaign": False}` before
         any upload has ever seeded a campaign, else the full summary
         (docs/CAMPAIGN_LOOP.md, "GET /api/campaign response").
@@ -276,6 +285,15 @@ class CampaignStore:
         far, never a prediction (see "Honesty constraints" in the design
         doc) — and is None when there is no base data yet or the target
         column carries no finite numeric value.
+
+        `analysis_generation` is the stamp the caller read off `/api/latest`
+        (`_save_latest`). `analysis_in_sync` is True only when it matches this
+        campaign's live generation — i.e. the analysis on `/api/latest` and this
+        campaign provably describe the same run sheet. A missing or stale stamp
+        reads as False: an analysis that cannot be shown to match is reported
+        as out of sync rather than assumed fine, because the failure it guards
+        against (two valid-looking resources, two different `best` values) is
+        silent by nature.
         """
         with self._lock:
             state = self._read_locked(tenant)
@@ -302,6 +320,10 @@ class CampaignStore:
             "pending": pending,
             "n_awaiting": n_awaiting,
             "n_measured": len(pending) - n_awaiting,
+            "analysis_in_sync": (
+                analysis_generation is not None
+                and analysis_generation == state.get("generation")
+            ),
         }
 
     def start(

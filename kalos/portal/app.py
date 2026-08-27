@@ -33,13 +33,18 @@ import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
 from kalos.portal.auth import READ, WRITE, Principal, get_authenticator, require_scope
-from kalos.portal.config import cors_config, log_security_posture
+from kalos.portal.config import (
+    cors_config,
+    is_local_client,
+    log_security_posture,
+    open_access_explicitly_allowed,
+)
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
@@ -83,10 +88,53 @@ app = FastAPI(title="Kalos Engine API")
 
 # CORS policy: an explicit allowlist when `KALOS_CORS_ORIGINS` is set (production),
 # else the permissive localhost default (dev/pilot). See kalos.portal.config.
+# Refuse REMOTE callers while running unauthenticated.
+#
+# With no tokens provisioned every request resolves to an anonymous read+write
+# principal on the `default` tenant (kalos.portal.auth), so an open portal that is
+# reachable off-box publishes uploads, analyses and campaign mutation to anyone who
+# can route to it. Until now that was guarded by a startup warning only.
+#
+# This is enforced on the PEER ADDRESS rather than on the bind host on purpose. A
+# bind-time check lives in `kalos/portal/__main__.py`, but it can be sidestepped
+# entirely by launching `uvicorn kalos.portal.app:app --host 0.0.0.0`, which is
+# exactly what a real deployment does. The peer address is the actual threat model
+# and cannot be avoided by choosing a different entrypoint.
+#
+# Local development is untouched: loopback callers are always served, so open mode
+# still works on a bench machine and in tests. Auth is re-read per request
+# (deliberately, for rotation without a restart), so provisioning tokens lifts this
+# immediately with no restart either.
+@app.middleware("http")
+async def _refuse_open_remote_access(request, call_next):
+    if not is_local_client(request.client.host if request.client else None):
+        if not get_authenticator().enforces() and not open_access_explicitly_allowed():
+            log.warning(
+                "refused a remote request to an unauthenticated portal from %s %s",
+                request.client.host if request.client else "unknown",
+                request.url.path,
+            )
+            # 503 rather than 401: the caller has no credential to supply and
+            # nothing they can send will help. This is a server posture problem,
+            # and saying so points the operator at the fix instead of sending the
+            # client hunting for a token that does not exist.
+            return JSONResponse(
+                {
+                    "error": (
+                        "This kalos portal is running without authentication and "
+                        "therefore only serves local requests. The operator should "
+                        "set KALOS_AUTH_TOKENS_FILE to enable remote access."
+                    )
+                },
+                status_code=503,
+            )
+    return await call_next(request)
+
+
 app.add_middleware(CORSMiddleware, **cors_config())
 
 # Log the effective security posture (auth + CORS) once at import/startup.
-log_security_posture(auth_enforced=get_authenticator().is_configured())
+log_security_posture(auth_enforced=get_authenticator().enforces())
 
 _HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)
@@ -146,9 +194,28 @@ def _load_latest(tenant: str = "default") -> dict | None:
         return _LATEST.get(tenant)
 
 
-def _save_latest(result: dict, dataset: str, *, tenant: str = "default") -> None:
+def _save_latest(
+    result: dict, dataset: str, *, tenant: str = "default", campaign_generation: str | None = None
+) -> None:
+    """Publish `result` as this tenant's `/api/latest`.
+
+    `campaign_generation` is the campaign this analysis describes. The campaign
+    and `_LATEST` are separate resources with independent locks and independent
+    persistence, so nothing else ties them together: without the stamp the two
+    can describe different run sheets while both look valid, which is how
+    `/results` and `/decide` came to report different bests off the same portal.
+    `CampaignStore.summary()` compares this stamp against the live campaign to
+    report `analysis_in_sync` (docs/CAMPAIGN_LOOP.md, "Analysis/campaign
+    coherence"). `None` means the analysis is not tied to any campaign, which
+    reads as out-of-sync rather than as fine.
+    """
     with _LATEST_LOCK:
-        state = {**result, "dataset": dataset, "updated": time.time()}
+        state = {
+            **result,
+            "dataset": dataset,
+            "updated": time.time(),
+            "campaign_generation": campaign_generation,
+        }
         _LATEST[tenant] = state
         try:
             path = _latest_path(tenant)
@@ -182,6 +249,23 @@ def providers(principal: Principal = Depends(require_scope(READ))) -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _HTML
+
+
+@app.get("/fonts/Satoshi-Variable.woff2")
+def satoshi_font() -> FileResponse:
+    """Serve the one brand typeface the portal page needs.
+
+    Satoshi is the kalos brand face (DESIGN.md) and is not on Google Fonts, so
+    it ships vendored beside index.html under the Fontshare license in
+    `fonts/SATOSHI-LICENSE.txt`. Served as a single explicit route rather than
+    a StaticFiles mount so the portal never exposes a browsable directory.
+    Immutable + long max-age: the filename changes if the font ever does.
+    """
+    return FileResponse(
+        Path(__file__).parent / "fonts" / "Satoshi-Variable.woff2",
+        media_type="font/woff2",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/api/single")
@@ -289,18 +373,24 @@ def _run_uploaded_sync(
         result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
     else:
         result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
-    _save_latest(result, filename, tenant=tenant)
+    generation: str | None = None
     try:
         # A fresh upload starts a fresh campaign (docs/CAMPAIGN_LOOP.md,
         # "Seeding") for THIS tenant. Best-effort: a seeding failure must never
         # break the upload response the client is waiting on.
         from kalos.portal.campaign import get_campaign_store
 
-        get_campaign_store().seed(
+        generation = get_campaign_store().seed(
             df, result["target"], result["proposal_features"], tenant=tenant
         )
     except Exception:  # noqa: BLE001 - seeding must never fail the upload
         log.exception("failed to seed the campaign from an uploaded run sheet")
+    # Seed BEFORE publishing so the analysis can carry the generation it was
+    # seeded alongside. The two resources take their locks sequentially (never
+    # nested), so the order is free of deadlock either way. If seeding failed,
+    # the stamp is None and the campaign reports itself out of sync with
+    # /api/latest instead of the two silently describing different run sheets.
+    _save_latest(result, filename, tenant=tenant, campaign_generation=generation)
     return result
 
 

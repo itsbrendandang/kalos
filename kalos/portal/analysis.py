@@ -16,9 +16,15 @@ import numpy as np
 import pandas as pd
 
 from kalos.core.drivers import benjamini_hochberg, bootstrap_spearman, spearman_driver_matrix
+from kalos.core.evaluation import producer_only_spearman
 from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import q_from_residuals
-from kalos.core.replicates import aggregate_replicates, noise_report
+from kalos.core.gp_shape import gp_shape_report
+from kalos.core.replicates import (
+    aggregate_replicates,
+    heteroscedasticity_report,
+    noise_report,
+)
 from kalos.core.splits import row_hash_groups
 from kalos.data.anonymizer import _hash
 from kalos.domains import (
@@ -149,6 +155,12 @@ CONFORMAL_ALPHA = 0.1
 # "90%" on another; a stated coverage that is wrong on screen is an overclaim,
 # not a hedge, so the engine now ships the number it actually computed.
 
+RELIABILITY_SPEARMAN_FLOOR = 0.20
+# The one out-of-fold Spearman floor this module uses, for the reliability verdict
+# AND for gating the GP shape report. It was previously a bare 0.20 literal in two
+# places here; a single name means the verdict and the shapes can never be held to
+# different bars, and a future change to the bar cannot move one without the other.
+
 
 def _seed_everything(seed: int = ANALYZE_SEED) -> None:
     """Seed torch + numpy so one upload yields one deterministic set of proposals."""
@@ -276,7 +288,11 @@ def _resolve_columns(
 
 
 def _noise_block(
-    nr: dict, best_single: float, best_reproducible: float | None, replicate_aware: bool
+    nr: dict,
+    best_single: float,
+    best_reproducible: float | None,
+    replicate_aware: bool,
+    het: dict | None = None,
 ) -> dict:
     """The `noise` report for the analysis result: replicate structure + the
     honest signal-to-noise picture (BENCHMARK.md, "the real lever is assay noise").
@@ -290,8 +306,12 @@ def _noise_block(
     on that reproducible objective with the measured noise floor fed to the GP.
     NaN stats (too few recipes / no replicates to estimate them) serialize as null.
     """
-    def _num(x: float | None, nd: int = 4) -> float | None:
-        if x is None or not np.isfinite(x):
+    def _num(x: object, nd: int = 4) -> float | None:
+        """Round to `nd` places, or None for anything that is not a finite number.
+        NaN and inf both become None so the response stays strict-JSON safe."""
+        if not isinstance(x, (int, float)) or isinstance(x, bool):
+            return None
+        if not np.isfinite(float(x)):
             return None
         return round(float(x), nd)
 
@@ -306,6 +326,22 @@ def _noise_block(
         "signal_sd": _num(np.sqrt(signal_var) if np.isfinite(signal_var) else None),
         "best_single": _num(best_single),
         "best_reproducible": _num(best_reproducible),
+        # Whether the homoscedastic assumption behind `noise_sd` actually holds on
+        # this sheet. A DIAGNOSTIC: nothing above is transformed, because changing
+        # the target's scale would change every number in this response. When
+        # `suggests_transform` is true, `icc` here is understating real signal.
+        "scale": None
+        if het is None
+        else {
+            "variance_mean_rho": _num(het.get("variance_mean_rho"), 3),
+            "homoscedastic": het.get("homoscedastic"),
+            "icc_raw": _num(het.get("icc_raw"), 3),
+            "icc_log": _num(het.get("icc_log"), 3),
+            "icc_gain": _num(het.get("icc_gain"), 3),
+            "log_offset": _num(het.get("log_offset"), 6),
+            "suggests_transform": bool(het.get("suggests_transform")),
+            "reason": het.get("reason"),
+        },
     }
 
 
@@ -527,17 +563,29 @@ def _analyze(
     cat_dims = design.cat_dims or None
     cat_cardinalities = design.cat_cardinalities or None
 
+    # RECIPE identity, on the RAW values (NaN preserved) so rows missing
+    # different components are never merged by the zero-fill. Built from the one
+    # leakage-checked, deterministic grouper; categorical labels join the key so
+    # identical recipes stay one replicate group.
+    #
+    # This is computed ALWAYS and kept SEPARATE from the CV group below, because
+    # the two answer different questions and conflating them is a bug in either
+    # direction. A declared group column is a LEAKAGE BARRIER and is deliberately
+    # coarser than a recipe - every run sharing a medium lot goes in one fold, but
+    # those runs are not replicates of each other. Using it as a recipe key would
+    # collapse genuinely different recipes into one and fabricate within-recipe
+    # variance; using a recipe key as the CV group would let a lot straddle folds.
+    recipe_gf = Xc_raw.copy()
+    for c in kept_cats:
+        recipe_gf[c] = df.loc[keep_index, c].fillna("").astype(str)
+    recipe_key = row_hash_groups(recipe_gf)
+
     if gcol:
         groups = df.loc[keep_index, gcol].astype(str).tolist()
     else:
-        # group on the RAW values (NaN preserved) so rows missing different
-        # components are not merged into one replicate group by the zero-fill —
-        # via the one leakage-checked, deterministic grouper. Categorical labels
-        # join the grouping key so identical recipes stay one replicate group.
-        gf = Xc_raw.copy()
-        for c in kept_cats:
-            gf[c] = df.loc[keep_index, c].fillna("").astype(str)
-        groups = row_hash_groups(gf)
+        # No declared barrier, so the recipe itself is the safest CV group: two
+        # replicates of one recipe must never straddle a fold.
+        groups = recipe_key
 
     # honest grouped cross-validation: pooled out-of-fold predictions + a
     # group-level bootstrap CI, all through the single leakage-checked splitter.
@@ -555,13 +603,45 @@ def _analyze(
     # spearman floor mirrors GatesConfig.min_spearman (kalos/core/gates.py); we do
     # NOT assert feasibility or calibration gates, which are not measured here.
     ci95 = None if rho != rho else [round(rep["ci95"][0], 3), round(rep["ci95"][1], 3)]
+
+    # PRODUCER-ONLY ranking. The pooled `rho` above is taken over every held-out
+    # row, producers and non-producers together, so a model can score well on it
+    # by separating zeros from non-zeros - a feasibility classifier, not a ranking
+    # of recipes. The client's question is "which of my producing recipes is
+    # best", and BENCHMARK.md shows the two can diverge badly: on the real media
+    # DoE the pooled score looked like 0.37-0.52 while feasibility was never the
+    # bottleneck, so most of that agreement was the easy half of the problem.
+    #
+    # The threshold is 0.0, meaning "any non-zero measurement", which is a PROXY.
+    # The assay LOD is the correct value - below it a reading is censored rather
+    # than zero - and is not available until an SOP supplies it.
+    prod = producer_only_spearman(oof_a, oof_p)
     reliability = {
         "spearman": None if rho != rho else round(rho, 3),
         "ci95": ci95,
-        "spearman_floor": 0.20,
-        "clears_floor": bool(rho == rho and rho >= 0.20),
+        "spearman_floor": RELIABILITY_SPEARMAN_FLOOR,
+        "clears_floor": bool(rho == rho and rho >= RELIABILITY_SPEARMAN_FLOOR),
+        # Reported alongside, not folded into `clears_floor`: making the gate
+        # stricter changes which uploads the API accepts, which is a product
+        # decision rather than a bug fix. Surfaced so the divergence is visible
+        # and the gate can be tightened deliberately.
+        "producer_spearman": None if prod["spearman"] != prod["spearman"] else round(float(prod["spearman"]), 3),
+        "producer_clears_floor": bool(
+            prod["evaluable"] and float(prod["spearman"]) >= RELIABILITY_SPEARMAN_FLOOR
+        ),
+        "n_producers": int(prod["n_producers"]),
+        "producer_threshold": float(prod["threshold"]),
         "ci_excludes_zero": bool(ci95 is not None and ci95[0] > 0),
-        "unmodeled": ["feasibility probability", "calibration (ECE)", "scale-up transfer"],
+        "unmodeled": [
+            "feasibility probability",
+            "calibration (ECE)",
+            "scale-up transfer",
+            *(
+                []
+                if prod["evaluable"]
+                else ["producer ranking (too few producing runs to score it separately)"]
+            ),
+        ],
     }
 
     # signed drivers, each with a bootstrap 95% CI so the client can tell a real
@@ -636,13 +716,17 @@ def _analyze(
     # raw rows - they are already replicate-grouped for leakage and describe the
     # as-measured signal; only the proposed batch switches to the reproducible
     # objective.
-    nr = noise_report(X, y)
+    nr = noise_report(X, y, groups=recipe_key)
+    # Is the homoscedastic assumption behind that noise floor actually true? A
+    # diagnostic only: nothing is transformed here, because silently changing the
+    # target's scale would change every number the engine reports.
+    het = heteroscedasticity_report(X, y, groups=recipe_key)
     best_single = float(y.max())
     best_reproducible: float | None = None
     replicate_aware = False
     incumbent = best_single
     if nr["n_replicated"] >= 1:
-        Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y)
+        Xf, yf, _yvar_g, n_reps_g = aggregate_replicates(X, y, groups=recipe_key)
         best_reproducible = float(yf.max())
         sigma2 = nr["noise_var"]
         # Only swap in the reproducible objective when there are enough distinct
@@ -663,6 +747,31 @@ def _analyze(
     for d in drv:
         d.pop("_idx", None)  # internal-only; not part of the returned API surface
     p_mean, p_std = s.posterior(batch)
+
+    # Response SHAPES, read off this same fitted GP before it is released. This is
+    # what closes the Spearman blind spot: a titer peaking at pH 7.0 gives a rank
+    # correlation near zero, so the driver panel reports "no signal" for the most
+    # important variable on the sheet, and the rho sign points the wrong way.
+    #
+    # Deliberately read from THIS surrogate rather than from a second model. The
+    # shapes then describe the posterior that actually produced `proposals`, the
+    # posterior's own standard deviation gates the interior-optimum claim, and ARD
+    # lengthscales supply per-feature relevance already paid for during the fit.
+    # Conditioned on `rho` (the out-of-fold Spearman the reliability verdict
+    # already uses), so a model that cannot predict held-out runs reports no
+    # shapes at all rather than describing the shape of its own overfitting.
+    #
+    # Continuous features only, matching the driver panel: a swept axis has to be
+    # a measurement, not an integer category code.
+    gp_shapes = gp_shape_report(
+        s,
+        Xc_zf.to_numpy(float) if cont_feats else np.empty((len(y), 0)),
+        y,
+        feature_names=[str(c) for c in cont_feats],
+        cv_spearman=None if rho != rho else float(rho),
+        rho_floor=RELIABILITY_SPEARMAN_FLOOR,
+    ).to_dict()
+
     # Release the fitted GP (holds torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
     # break) as soon as its last use is done, rather than waiting on `_analyze`
@@ -728,8 +837,11 @@ def _analyze(
         },
         "reliability": reliability,
         "best": round(best_single, 4),
-        "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware),
+        "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware, het),
         "drivers": drv,
+        # Response shape per feature, read off the same GP that proposed the
+        # batch. Closes the interior-optimum blind spot in the rank drivers.
+        "gp_shapes": gp_shapes,
         "proposal_features": show,
         "proposals": _annotate(batch, p_mean, p_std, incumbent, cols=show_idx, design=design),
         "oof": [[round(a, 4), round(p, 4)] for a, p in zip(oof_a, oof_p)],

@@ -137,7 +137,30 @@ class Authenticator:
         return data
 
     def is_configured(self) -> bool:
+        """Whether an auth config is PRESENT. Not the same as whether it enforces.
+
+        See `enforces` - a config that parses to an empty token list is present but
+        grants everyone the anonymous principal. Prefer `enforces` for any security
+        decision.
+        """
         return self._load_raw_config() is not None
+
+    def enforces(self) -> bool:
+        """Whether authentication is ACTUALLY enforced: at least one usable token.
+
+        `is_configured` is not a safe proxy for this, and the difference is a real
+        misconfiguration rather than a hypothetical. With `KALOS_AUTH_TOKENS=[]` -
+        which a config template rendering an empty array, or a tokens file
+        containing `[]`, produces easily - `is_configured` returns True while
+        `principal_for` falls back to the anonymous read+write principal, because
+        it keys off whether any RECORD parsed. The deployment looks locked down and
+        is wide open.
+
+        Every security decision (the bind refusal, the remote-request guard, the
+        startup posture line) keys off this method so the answer matches what
+        `principal_for` will actually do.
+        """
+        return bool(self._load_records())
 
     def principal_for(self, authorization: str | None) -> Principal:
         """The `Principal` for a request's `Authorization` header.
