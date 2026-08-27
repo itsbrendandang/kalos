@@ -20,6 +20,13 @@ tests for usage). Three modules:
 """
 from __future__ import annotations
 
+from .candidates import (
+    DEFAULT_FIDELITY_FEATURE,
+    DEFAULT_PHYSICS_MEAN_FEATURES,
+    MultiFidelitySurrogate,
+    PhysicsMeanSurrogate,
+    ScaleCandidateModel,
+)
 from .evaluation import leave_one_scale_out_report
 from .features import (
     DEFAULT_GEOMETRY,
@@ -59,4 +66,9 @@ __all__ = [
     "build_feature_matrix",
     "ScaleUpTransferModel",
     "leave_one_scale_out_report",
+    "ScaleCandidateModel",
+    "DEFAULT_PHYSICS_MEAN_FEATURES",
+    "PhysicsMeanSurrogate",
+    "DEFAULT_FIDELITY_FEATURE",
+    "MultiFidelitySurrogate",
 ]

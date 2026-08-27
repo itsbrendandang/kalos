@@ -76,8 +76,13 @@ services:
       # kalos-web almost never is. Must match the ORIGIN the browser loads
       # kalos-web from (see .env.example).
       - KALOS_CORS_ORIGINS=${KALOS_CORS_ORIGINS}
-      # State dir - see Dockerfile.engine's comment for why this is the
-      # container's literal $HOME/.kalos and not an arbitrary path.
+      # State dir - genuinely honored everywhere now (CampaignStore,
+      # SqliteStore, SingletonLock, and app.py's `_LATEST` cache all read
+      # this at call time; see Dockerfile.engine's comment). Pointed at this
+      # user's actual $HOME/.kalos rather than an arbitrary path purely for
+      # simplicity - it needs no separate `mkdir`/`chown` beyond the
+      # container's own home directory setup, and it is the one mount point
+      # docker-compose.yaml's volume below targets.
       - KALOS_STATE_DIR=/home/kalos/.kalos
       # Optional external-provider credentials (kalos/providers/, all
       # keyless-by-default - see kalos/.env.example in the engine repo for
@@ -97,11 +102,13 @@ services:
       # Named volume: survives container recreation (rebuild, image update).
       # Mounted at the engine's actual $HOME/.kalos - see Dockerfile.engine.
       - kalos-state:/home/kalos/.kalos
-    ports:
-      # The one place a container port is published for this service -
-      # required because the browser calls it directly (see header note),
-      # not because it should be casually more open than that.
-      - "${KALOS_ENGINE_PORT:-8050}:8050"
+    # No published port (wave-2 change): the browser no longer calls the
+    # engine directly. kalos-web's server-side proxy
+    # (app/api/engine/[...path]/route.ts) reaches it over the compose-internal
+    # network at http://engine:8050 and attaches the bearer token there. One
+    # front door instead of two. To restore the direct-browser escape hatch
+    # (dev only), re-add "${KALOS_ENGINE_PORT:-8050}:8050" here and set
+    # NEXT_PUBLIC_API_URL.
     # HEALTHCHECK is baked into the image (Dockerfile.engine) - no override
     # needed here; compose reads the image-level healthcheck for
     # `condition: service_healthy` below.
@@ -111,22 +118,27 @@ services:
       context: ../../kalos-web
       dockerfile: ../kalos/deploy/Dockerfile.web
       args:
-        # Baked into the client bundle at BUILD time, not read at container
-        # start - see Dockerfile.web's long comment on this. Must be the URL
-        # the BROWSER can reach the engine at, i.e. normally
-        # http://<host>:${KALOS_ENGINE_PORT} or, once a TLS-terminating proxy
-        # sits in front (out of scope for v0 - see RUNBOOK.md), the proxy's
-        # public engine URL.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        # ESCAPE HATCH ONLY (wave-2): leave unset for the default posture,
+        # where the browser calls same-origin /api/engine and kalos-web's
+        # server proxies onward with auth. Set it (baked into the client
+        # bundle at BUILD time) only to force the old direct-browser mode
+        # against an open dev engine.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
         NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-}
     image: kalos-web:${KALOS_IMAGE_TAG:-local}
     restart: unless-stopped
+    environment:
+      # Read server-side, at request time, by app/api/engine/[...path]/route.ts
+      # - never baked into the client bundle, unlike the build args above.
+      # KALOS_ENGINE_TOKEN is the plaintext counterpart of one
+      # KALOS_AUTH_TOKENS entry; see RUNBOOK.md "Auth between web and engine".
+      - KALOS_ENGINE_URL=http://engine:8050
+      - KALOS_ENGINE_TOKEN=${KALOS_ENGINE_TOKEN}
     depends_on:
       engine:
-        # Only orders container startup / log noise - the browser calls the
-        # engine independently of whether `web` itself is up, per the header
-        # note, so this is not a substitute for the engine's own healthcheck
-        # passing before real traffic arrives.
+        # Orders startup AND matters functionally now: every browser call is
+        # proxied through `web` to the engine, so the engine being healthy
+        # before `web` accepts traffic is the correct ordering.
         condition: service_healthy
     ports:
       - "${KALOS_WEB_PORT:-3000}:3000"

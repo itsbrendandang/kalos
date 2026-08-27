@@ -75,22 +75,22 @@ RUN groupadd --system --gid 10001 kalos \
 
 COPY --from=builder /opt/venv /opt/venv
 
-# KALOS_STATE_DIR is set to the literal `~/.kalos` for this container's user
-# ON PURPOSE, not to an arbitrary path like `/data/kalos-state` - and this is
-# not cosmetic. `KALOS_STATE_DIR` is only honored by campaign.py's
-# CampaignStore (portal.db) and app.py's `_LATEST` cache (latest/*.json).
-# kalos/store/sqlite_store.py's `SqliteStore.__init__` (backing
-# experiments.db) and kalos/runner/singleton.py's `DEFAULT_LOCK_PATH`
-# (runner.lock) both hardcode `Path.home() / ".kalos"` and are constructed
-# with no path argument from kalos/portal/experiments.py's `get_store()` /
-# `get_lock_path()` - i.e. they ignore KALOS_STATE_DIR entirely and always
-# resolve against `$HOME`. Pointing KALOS_STATE_DIR anywhere other than this
-# user's actual home directory would split state across two locations and
-# silently leave experiments.db and runner.lock outside the mounted volume
-# (and outside the backup sidecar's reach). Setting KALOS_STATE_DIR to the
-# same path that `~/.kalos` already resolves to keeps all four artifacts
-# (experiments.db, portal.db, runner.lock, latest/) under one directory,
-# which is also the one mount point docker-compose.yaml's volume targets.
+# KALOS_STATE_DIR is set to the literal `~/.kalos` for this container's user.
+# It is now genuinely honored everywhere that persists state: campaign.py's
+# CampaignStore (portal.db), app.py's `_LATEST` cache (latest/*.json),
+# kalos/store/sqlite_store.py's `SqliteStore` (experiments.db), and
+# kalos/runner/singleton.py's `SingletonLock` (runner.lock) all read
+# KALOS_STATE_DIR at construction time, falling back to `Path.home() /
+# ".kalos"` only when it is unset - the same convention, same default, in
+# all four places (wave-2 fix; previously the store and lock hardcoded
+# `Path.home() / ".kalos"` and ignored the env var, a split-brain where half
+# the state followed it and half did not). This container could therefore
+# now point KALOS_STATE_DIR at an arbitrary path and every artifact would
+# follow it together. It is still pinned to this user's actual `$HOME/.kalos`
+# for simplicity: no extra directory to create or `chown` beyond the
+# container's own home setup, and it stays the one mount point
+# docker-compose.yaml's `kalos-state` volume targets (experiments.db,
+# portal.db, runner.lock, latest/ - all four artifacts, one directory).
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -109,26 +109,21 @@ WORKDIR /home/kalos
 
 EXPOSE 8050
 
-# There is no dedicated /health or /healthz route in kalos/portal/app.py
-# (checked 2026-08-25: the registered GET routes are /, /fonts/..., and the
-# require_scope(READ)-gated /api/latest, /api/providers, /api/single,
-# /api/multi, plus the experiments/campaign routers under /api/experiments*
-# and /api/campaign* - none is a liveness probe). Per this task's brief, that
-# gap is NOT something to patch into the app from a deploy pack; it is flagged
-# in the deployment report as real, required wiring for whoever owns
-# kalos/portal/app.py next (a plain `@app.get("/healthz")` with no
-# `Depends(require_scope(...))`, mirroring how `/` is already unauthenticated,
-# would be the natural fix).
-#
-# Until that exists, `GET /` is the least-bad stand-in: it is the ONE route
-# that carries no `Depends(require_scope(...))` at all, so it returns 200
-# whether or not KALOS_AUTH_TOKENS is configured - the healthcheck does not
-# need a token and does not depend on this compose's auth posture to pass.
-# It also proves uvicorn is actually accepting and completing HTTP requests,
-# which a bare TCP-connect check would not (a connect can succeed while the
-# event loop is wedged). Plain stdlib urllib, not curl, so the runtime image
-# does not need an extra apt package just to answer its own healthcheck.
+# kalos/portal/app.py now has a dedicated GET /healthz route (wave-2 fix; a
+# previous pass of this deploy pack flagged its absence and used `GET /` as a
+# stand-in - see git history for that reasoning if it is ever needed again).
+# It carries no `Depends(require_scope(...))`, the same pattern `/` already
+# used, so it returns 200 whether or not KALOS_AUTH_TOKENS is configured - the
+# healthcheck does not need a token and does not depend on this compose's auth
+# posture to pass. Unlike `/`, it does not render the full portal page: the
+# response is a fixed, tiny `{"status": "ok"}`, and the route never touches
+# the database, so a briefly locked/slow SQLite file cannot fail liveness and
+# trigger a restart loop that would not actually fix anything. It still proves
+# uvicorn is actually accepting and completing HTTP requests, which a bare
+# TCP-connect check would not (a connect can succeed while the event loop is
+# wedged). Plain stdlib urllib, not curl, so the runtime image does not need
+# an extra apt package just to answer its own healthcheck.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8050/', timeout=3).status == 200 else 1)"
+    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8050/healthz', timeout=3).status == 200 else 1)"
 
 CMD ["python", "-m", "kalos.portal"]

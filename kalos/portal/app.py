@@ -60,6 +60,7 @@ from kalos.portal.uploads import (
     _parse_upload,
 )
 from kalos.providers import provider_status
+from kalos.store import SqliteStore
 
 log = logging.getLogger("kalos.portal")
 
@@ -249,6 +250,49 @@ def providers(principal: Principal = Depends(require_scope(READ))) -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _HTML
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Liveness probe for a deploy healthcheck (deploy/Dockerfile.engine).
+
+    Unauthenticated BY DESIGN, and safe to leave that way: no
+    `Depends(require_scope(...))`, the same pattern `/` above already uses.
+    The response is fixed to exactly `{"status": "ok"}` - no tenant data, no
+    config echo, no store contents, nothing beyond "this process is up and
+    answering HTTP requests". `engine_version` is deliberately NOT included:
+    verified by reading every route in this module that `kalos.__version__`
+    is not exposed anywhere unauthenticated today (not `/`'s index.html, not
+    any other public route), so this stays the minimal liveness fact rather
+    than becoming the first place the version leaves the process without a
+    token.
+
+    Must never touch the database - that is what `/readyz` is for. A
+    liveness probe that can block on a locked/slow SQLite file would make an
+    orchestrator restart a perfectly healthy process because the DB, not the
+    process, was briefly unavailable.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz(store: SqliteStore = Depends(get_store)) -> JSONResponse:
+    """Readiness probe: unlike `/healthz`, this DOES touch the database - on
+    purpose, to answer "can this instance actually serve requests that need
+    the store", not just "is the process up".
+
+    Read-only: `store.list()` is a plain SELECT, never a write, so a
+    readiness check can never itself be the thing that corrupts or contends
+    for the store it is checking. Degrades to a 503 with a `reason` on any
+    failure (missing/corrupt/locked database file) instead of raising, so an
+    orchestrator's readiness probe always gets a normal HTTP response rather
+    than a stack trace.
+    """
+    try:
+        store.list()
+    except Exception as exc:  # noqa: BLE001 - any store failure means "not ready", not a 500
+        return JSONResponse({"status": "unavailable", "reason": str(exc)}, status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/fonts/Satoshi-Variable.woff2")

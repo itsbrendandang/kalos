@@ -52,16 +52,29 @@ def test_compose_declares_expected_services():
     assert set(services) == {"engine", "web", "backup"}
 
 
-def test_compose_publishes_only_the_two_front_doors():
-    """Only `engine` and `web` should publish a host port - `backup` has
-    nothing listening and should stay unreachable from outside the compose
-    network, matching the reference topology's "only the edge services
+def test_compose_publishes_only_the_web_front_door():
+    """Exactly ONE host port: `web`. Wave 2 removed the engine's published
+    port - the browser calls same-origin /api/engine and kalos-web's SERVER
+    proxies to the engine over the compose-internal network with the bearer
+    token attached, so publishing the engine would reopen the unauthenticated
+    surface the proxy exists to close. `backup` has nothing listening and
+    stays unreachable, per the reference topology's "only the edge services
     publish a port" pattern (deployment-reference.md)."""
     doc = _load_compose()
     services = doc["services"]
-    assert "ports" in services["engine"]
+    assert "ports" not in services["engine"]
     assert "ports" in services["web"]
     assert "ports" not in services["backup"]
+
+
+def test_compose_web_carries_the_proxy_env():
+    """The proxy needs both server-side vars; a compose without them ships a
+    web container whose every engine call 401s or 502s."""
+    doc = _load_compose()
+    env = doc["services"]["web"].get("environment", [])
+    joined = " ".join(env) if isinstance(env, list) else " ".join(f"{k}={v}" for k, v in env.items())
+    assert "KALOS_ENGINE_URL" in joined
+    assert "KALOS_ENGINE_TOKEN" in joined
 
 
 def test_compose_engine_has_no_replicas_override():

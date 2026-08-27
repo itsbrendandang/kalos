@@ -35,10 +35,13 @@
 set -eu
 
 # Default matches Dockerfile.engine's KALOS_STATE_DIR (/home/kalos/.kalos) -
-# see that file's comment for why it is the engine's actual $HOME/.kalos and
-# not an arbitrary path: SqliteStore (experiments.db) and the runner lock
-# ignore KALOS_STATE_DIR and always resolve against $HOME, so this must be
-# the same directory or those two artifacts fall outside the backup's reach.
+# see that file's comment for the current state: SqliteStore
+# (experiments.db), the runner lock, CampaignStore (portal.db), and the
+# `_LATEST` cache all now read KALOS_STATE_DIR at call time, so this only
+# needs to track whatever the engine container is actually configured with,
+# not hardcode a path those modules ignore. The literal default here still
+# matches the engine's, so the two stay in step even if someone runs this
+# script with no KALOS_STATE_DIR set at all.
 STATE_DIR="${KALOS_STATE_DIR:-/home/kalos/.kalos}"
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-7}"

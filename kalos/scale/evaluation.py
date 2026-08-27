@@ -51,7 +51,7 @@ that scale-dependent physics is unlearnable from real data.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -62,6 +62,7 @@ from sklearn.metrics import mean_absolute_error
 from kalos.core.evaluation import logo_report
 from kalos.core.surrogate import Surrogate
 
+from .candidates import ScaleCandidateModel
 from .transfer import DEFAULT_SCALE_FEATURE_CONFIG, ScaleFeatureConfig, build_feature_matrix
 
 _MIN_SPEARMAN_N = 3
@@ -161,9 +162,37 @@ def leave_one_scale_out_report(
     *,
     config: ScaleFeatureConfig = DEFAULT_SCALE_FEATURE_CONFIG,
     bounds: NDArray[np.float64] | None = None,
+    model_factory: Callable[[list[str]], ScaleCandidateModel] | None = None,
+    model_label: str = "v0_surrogate",
 ) -> dict:
     """Leave-one-scale-out evaluation of the physics-feature GP against two
     naive baselines. See the module docstring for what each field means.
+
+    `model_factory` (optional): swaps which model is fit in every fold,
+    for comparing v0 (`kalos.core.surrogate.Surrogate`, the default when
+    `model_factory` is omitted - IDENTICAL to this function's behavior
+    before `model_factory` existed) against the candidates in
+    `kalos.scale.candidates` under this SAME harness (same splits, same
+    naive baselines, same direction buckets). Called once per held-out
+    scale as `model_factory(names)` (`names` is this fold's feature-name
+    list, `build_feature_matrix`'s output - the same list every fold gets,
+    since the feature set does not change across scales), and the returned
+    object must satisfy `kalos.scale.candidates.ScaleCandidateModel` (the
+    same `fit`/`posterior` shape `Surrogate` already has). `model_label` is
+    carried into the returned report's `"model"` field for a caller
+    building a comparison table across runs.
+
+    WHY `pooled_logo` CHANGES SHAPE WHEN `model_factory` IS PASSED.
+    `kalos.core.evaluation.logo_report` hardcodes `Surrogate` internally
+    (editing it to accept an arbitrary model is a `kalos/core` change, out
+    of scope here) - so it is only a genuine INDEPENDENT cross-check of the
+    per-scale loop below when that loop is also using `Surrogate`, i.e. the
+    default `model_factory=None` path (unchanged from before this
+    parameter existed). When a custom `model_factory` is given, `pooled_logo`
+    is instead assembled from this function's OWN pooled predictions - not
+    a second, independently-coded computation - and carries an explicit
+    `"independent_crosscheck": False` (`True` for the default path) so a
+    caller cannot mistake one for the other.
 
     Rows with a non-finite feature, target, or `scale_L` are dropped up
     front (`n_rows_dropped`), matching `ScaleUpTransferModel.fit`'s
@@ -220,7 +249,10 @@ def leave_one_scale_out_report(
 
     unique_scales = np.unique(scale)
 
-    pooled_logo = logo_report(X, y, scale, bounds=box)
+    # Only a genuine independent cross-check (a second, differently-coded
+    # computation of the same pooled number) when this loop is ALSO fitting
+    # `Surrogate` - see this function's `model_factory` docstring section.
+    pooled_logo: dict | None = logo_report(X, y, scale, bounds=box) if model_factory is None else None
 
     per_scale: list[dict] = []
     all_pred: list[float] = []
@@ -239,8 +271,14 @@ def leave_one_scale_out_report(
 
         direction = _direction(float(s), scale[train_mask])
 
-        surrogate = Surrogate().fit(X[train_mask], y[train_mask], bounds=box)
-        mean, _std = surrogate.posterior(X[test_mask], observation_noise=True)
+        # `box` is only `None` when `X` is empty (see its assignment above),
+        # in which case `unique_scales` is empty too and this loop body
+        # never runs - narrowing for the type checker, not a new runtime
+        # guard.
+        assert box is not None
+        model = model_factory(names) if model_factory is not None else Surrogate()
+        model.fit(X[train_mask], y[train_mask], bounds=box)
+        mean, _std = model.posterior(X[test_mask], observation_noise=True)
 
         naive_mean_val = _naive_carry_small_scale_mean(y[train_mask], scale[train_mask])
         naive_mean_pred = np.full(n_test, naive_mean_val)
@@ -273,7 +311,23 @@ def leave_one_scale_out_report(
 
     overall = _bucket_metrics(pred_arr, actual_arr, naive_mean_arr, naive_nn_arr)
 
+    if pooled_logo is not None:
+        # The default (`model_factory=None`) path: a genuine second,
+        # independently-coded computation of the pooled number.
+        pooled_logo = {**pooled_logo, "independent_crosscheck": True}
+    else:
+        # A custom `model_factory`: `logo_report` cannot be reused (it
+        # hardcodes `Surrogate`), so this is the SAME per-scale loop's own
+        # pooled arrays, not an independent cross-check - flagged as such.
+        pooled_logo = {
+            "spearman": _spearman(pred_arr, actual_arr),
+            "n_groups": int(len(unique_scales)),
+            "n_oof": int(len(pred_arr)),
+            "independent_crosscheck": False,
+        }
+
     return {
+        "model": model_label,
         "feature_names": names,
         "n_rows_used": int(len(X)),
         "n_rows_dropped": n_dropped,

@@ -37,7 +37,8 @@ kalos/
     protein.py         ESM-2 embeddings (transformers, MPS) + KmerEmbedder stand-in
   scale/
     features.py        physics-informed scale features (P/V, vs, kLa, hydrostatic proxies; cited, fittable)
-    transfer.py        scale-up transfer as feature engineering over the Surrogate
+    transfer.py        scale-up transfer over the Surrogate (+ opt-in physics_mean / multi_fidelity candidates)
+    candidates.py      the evidence-attached alternates (physics-informed mean, scale-as-fidelity)
     evaluation.py      leave-one-scale-out with extrapolation direction reported separately
   domains/
     profile.py         torch-free ColumnRoles / DesignSpace + DomainProfile (declared roles, mixed spaces)

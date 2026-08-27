@@ -2,6 +2,71 @@
 
 Newest first.
 
+## 2026-08-25 (wave 2: acted-on diagnostics, one front door, and a vindication)
+
+Five agents plus orchestrator integration; every number below is from a
+reported run or a locked regression test.
+
+### The finding of the wave - ScaleBridge v0 was vindicated, not fixed
+
+Wave 1 reported v0 ranking upward-extrapolated runs backwards (Spearman -0.7)
+and framed it as "regressing toward a scale-adjusted mean". The mandatory
+rank-crossing check told a different story: the real dataset shows NO
+detectable recipe-x-scale interaction (F(3,47)=0.917, p=0.44), the exact
+permutation p-value for rho=-0.7 at n=5 is 0.233 (noise), and on a harder
+synthetic with a PLANTED rank crossing, all three candidates - including
+unmodified v0 - recover it (Spearman ~0.88, and v0 with the best MAE). The
+precise conclusion: v0's extrapolation ranking is UNMEASURED at this power,
+not demonstrated-bad. No candidate promoted; `physics_mean` (physics-informed
+mean function) and `multi_fidelity` (scale as a fidelity dimension,
+SingleTaskMultiFidelityGP verified against installed botorch) ship as
+documented opt-in alternates on ScaleUpTransferModel, evidence attached.
+
+### Added - the heteroscedasticity diagnosis is finally acted on
+
+`alternative_scale`: when (and only when) the noise report's
+`suggests_transform` fires, a second labeled evaluation runs on
+log(y + offset) - the exact transform icc_log already uses, NOT literal
+log1p, which the report's own history records as wrong at titer scale - and
+reports log-scale CV, calibration, and ICC beside the raw numbers.
+Proposals and every other number stay on the raw scale; the block is proven
+purely additive by a deep-equality test, and it is computed LAST so its GP
+fit cannot advance the shared seeded RNG before the proposal path consumes
+it (running it earlier would have silently changed proposed batches whenever
+the diagnostic fired). Measured cost ~0.12s, only when triggered.
+
+### Fixed - state-path split-brain and the missing health surface
+
+SqliteStore and the runner lock now honor KALOS_STATE_DIR (call-time reads,
+matching campaign.py's convention; unset env is byte-identical to before).
+/healthz returns exactly {"status": "ok"} unauthenticated - verified the
+version string is NOT otherwise public, so it is not leaked here - and
+/readyz does a read-only store probe, 503-with-reason on failure. Deploy
+healthchecks now hit /healthz; the stale "engine ignores KALOS_STATE_DIR"
+comments are gone.
+
+### Changed - one front door
+
+With kalos-web's server-side proxy (kalos-web #26) attaching the bearer
+token, the compose no longer publishes the engine's port at all: the browser
+calls same-origin /api/engine, the web SERVER forwards over the internal
+network. KALOS_ENGINE_URL/KALOS_ENGINE_TOKEN are runtime env on the web
+service (never in the client bundle); the runbook's known-gap bullet is
+replaced with setup instructions. Direct-browser mode survives as an
+explicit dev escape hatch.
+
+### Evidence recorded - MAP-SAAS: a clean negative result
+
+The trial the research memo motivated ran in full
+(kalos/bench/saas_experiment.py, 8 (n, d) cells x 5 seeds, both models fed
+the same known noise): SAAS never beats the plain SingleTaskGP outside its
+own noise floor, costs 1.9-19x the fit time, and proposes worse in 6 of 8
+cells - including at kalos's actual low-d operating point. NOT wired;
+surrogate.py untouched by construction. Banked for any future revisit:
+gp_shape's lengthscale reader would silently read 1 of SAAS's 4 additive
+kernels (wrong relevance ranking), and SAAS's constructor draws from the
+global RNG outside propose()'s seed fork.
+
 ## 2026-08-25 (wave 1: the engine practices what its benchmark proved)
 
 Six parallel agents; every measured claim below is from a locked regression
