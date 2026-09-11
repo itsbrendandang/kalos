@@ -2,6 +2,52 @@
 
 Newest first.
 
+## 2026-09-10 (the deploy pack meets reality)
+
+The wave-2 deploy pack was written and config-tested but its images were never
+built (disk-deferred). Building and actually running them surfaced three real
+production defects - each invisible to every unit and CI gate, each now fixed
+with a regression test.
+
+### Fixed - set-but-empty env crashed the boot
+
+Compose/k8s templates pass `KALOS_MAX_UPLOAD_MB=${KALOS_MAX_UPLOAD_MB:-}`,
+which arrives SET BUT EMPTY - `os.environ.get`'s default never applies and
+`float("")` killed the engine at import, on the very first container start.
+The sizing knobs (upload MB, fit rows, torch threads) now treat empty as
+unset, the same convention kalos/providers/ always followed.
+
+### Fixed - one analysis at a time, honestly (kalos/portal/busy.py)
+
+`_analyze` is CPU-bound for tens of seconds and `run_in_threadpool` work
+cannot be cancelled: a client that gives up (a proxy timeout, a closed tab)
+orphans a thread that keeps computing. With no admission control, every retry
+contended with the ghosts of its predecessors - measured as 598% engine CPU
+with ZERO connected clients. A single analysis slot now guards /api/run and
+campaign reanalyze: the second request gets HTTP 503 + Retry-After (answered
+in 0.1s in the live test), and the slot is released by the WORKER THREAD when
+the fit truly finishes, so an orphan keeps holding it and the 503 stays a
+true statement about the machine.
+
+### Fixed - the torch thread pin is pathological in the container
+
+The bare-metal default (pin intra-op threads to 4) took the demo analyze from
+47s to over 600s on the image's linux-aarch64 torch/OpenBLAS build - a >12x
+slowdown from the pin itself, isolated by timing the identical computation
+pinned vs unpinned in the same container. `KALOS_TORCH_THREADS=0` now means
+"do not pin" and the compose passes it by default; bare metal keeps the tuned
+4. (The old code floored 0 to a 1-thread pin - the worst possible reading.)
+
+### Changed - Dockerfile layering, and the verified numbers
+
+Torch (the 700-900 MB layer) now installs before any source COPY, so a
+one-line engine change rebuilds in ~40s instead of re-downloading torch -
+found the first time the image needed a real fix. Verified footprint: engine
+1.82 GB (inside its own honest 1.3-1.8 GB estimate), web 314 MB, first
+authed proxied analyze ~19s warm. kalos-web's proxy timeout became
+env-tunable (`KALOS_ENGINE_TIMEOUT_MS`, default 120s) after the 30s guess
+502'd a cold container fit mid-computation.
+
 ## 2026-08-25 (wave 2: acted-on diagnostics, one front door, and a vindication)
 
 Five agents plus orchestrator integration; every number below is from a
