@@ -36,6 +36,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
+
 from kalos.domains import BIOPROCESS_PROFILE, GENERIC_PROFILE, ColumnRoles
 from kalos.portal.analysis import _analyze, _annotate
 from kalos.portal.auth import READ, WRITE, Principal, get_authenticator, require_scope
@@ -69,7 +71,21 @@ log = logging.getLogger("kalos.portal")
 # optimize_acqf) to a worker thread so concurrent uploads do not serialize on the
 # event loop. Cap the torch intra-op thread count so several concurrent fits do
 # not oversubscribe the CPU and thrash. Override with KALOS_TORCH_THREADS.
-_TORCH_THREADS = int(os.environ.get("KALOS_TORCH_THREADS", str(min(4, os.cpu_count() or 1))))
+# Empty-string-tolerant like the sizing knobs in uploads.py (see the comment
+# there): a compose/k8s template passing `KALOS_TORCH_THREADS=` must mean
+# "use the default", not crash the import.
+#
+# KALOS_TORCH_THREADS=0 means DO NOT PIN - leave torch's own default. Not
+# hypothetical tuning surface: on the linux-aarch64 torch build inside the
+# reference container, the 4-thread pin took the demo analyze from 47s
+# (unpinned) to over 600s - a >12x pathological slowdown from the pin
+# interacting with that build's OpenBLAS threading, measured 2026-09-10 on
+# the first real compose deployment. The 4-thread default is kept for bare
+# metal (where it was tuned and behaves); containers, which already isolate
+# CPU, should set 0 - deploy/docker-compose.yaml now does.
+_TORCH_THREADS = int(
+    os.environ.get("KALOS_TORCH_THREADS", "").strip() or str(min(4, os.cpu_count() or 1))
+)
 _torch_threads_configured = False
 
 
@@ -80,9 +96,14 @@ def _ensure_torch_threads() -> None:
     global _torch_threads_configured
     if _torch_threads_configured:
         return
+    if _TORCH_THREADS <= 0:
+        # 0 (or negative) = do not pin at all; torch keeps its own default.
+        # See the KALOS_TORCH_THREADS comment above for the measured reason.
+        _torch_threads_configured = True
+        return
     import torch
 
-    torch.set_num_threads(max(1, _TORCH_THREADS))
+    torch.set_num_threads(_TORCH_THREADS)
     _torch_threads_configured = True
 
 app = FastAPI(title="Kalos Engine API")
@@ -454,13 +475,24 @@ async def run_uploaded(
     try:
         # Offload the CPU-bound parse + fit + save to a worker thread so this
         # single-worker service does not block the event loop (and every other
-        # request, including GET /api/latest) while a GP fit runs.
+        # request, including GET /api/latest) while a GP fit runs - under the
+        # single analysis slot (kalos/portal/busy.py): a second upload while
+        # one is fitting gets an honest 503, and a disconnected client's
+        # orphaned fit keeps the slot until it truly finishes.
         result = await run_in_threadpool(
-            functools.partial(
-                _run_uploaded_sync, raw, target or None, anonymize, filename, roles, tenant=tenant
+            run_exclusively(
+                functools.partial(
+                    _run_uploaded_sync, raw, target or None, anonymize, filename, roles, tenant=tenant
+                )
             )
         )
         return JSONResponse(result)
+    except AnalysisBusy as busy:
+        return JSONResponse(
+            {"error": str(busy)},
+            status_code=503,
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+        )
     except UploadRejected as rej:
         # A guard tripped: the message is already generic and safe to return.
         log.warning("upload rejected: %s", rej)

@@ -419,3 +419,63 @@ def test_feature_constant_on_target_rows_is_flagged_not_pinned():
     ph_idx = out["proposal_features"].index("pH")
     for prop in out["proposals"]:
         assert box_lo - 1e-6 <= prop["vals"][ph_idx] <= box_hi + 1e-6
+
+
+def test_sizing_env_knobs_treat_empty_string_as_unset():
+    """Compose and k8s templates pass `KALOS_MAX_UPLOAD_MB=${KALOS_MAX_UPLOAD_MB:-}`,
+    which arrives SET BUT EMPTY - os.environ.get's default never applies, and
+    float("") crashed the engine at import on the first real container boot
+    (deploy pack, 2026-09-10). The engine's own stated convention (providers/)
+    is unset == empty; the sizing knobs now follow it.
+
+    SUBPROCESS on purpose, twice over: the bug was an import-time crash, so a
+    fresh interpreter with the empty env is the faithful reproduction - and an
+    in-process `importlib.reload` variant of this test poisoned class identity
+    for the rest of the suite (analysis raised the pre-reload UploadRejected
+    while app's except clause held the post-reload one, so a row-cap rejection
+    fell through to the generic parse error). Reload-based tests are banned in
+    this import graph; this comment is the tombstone."""
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, "KALOS_MAX_UPLOAD_MB": "", "KALOS_MAX_FIT_ROWS": "",
+           "KALOS_TORCH_THREADS": ""}
+    code = (
+        "from kalos.portal import uploads;"
+        "assert uploads._MAX_UPLOAD_MB == 25.0, uploads._MAX_UPLOAD_MB;"
+        "assert uploads.MAX_FIT_ROWS == 2000, uploads.MAX_FIT_ROWS;"
+        "import kalos.portal.app as a;"
+        "assert a._TORCH_THREADS >= 1;"
+        "print('ok')"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
+def test_torch_threads_zero_means_do_not_pin():
+    """KALOS_TORCH_THREADS=0 must leave torch's own default untouched - the
+    containerized deployment depends on it: the 4-thread pin measured a >12x
+    pathological slowdown (47s -> 600s+) on the image's linux-aarch64
+    torch/OpenBLAS build (2026-09-10). A 0 that accidentally pinned to 1
+    (the old max(1, n) floor) would be the worst of all worlds. Subprocess for
+    the same isolation reasons as the test above."""
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, "KALOS_TORCH_THREADS": "0"}
+    code = (
+        "import torch; before = torch.get_num_threads();"
+        "import kalos.portal.app as a;"
+        "assert a._TORCH_THREADS == 0, a._TORCH_THREADS;"
+        "a._ensure_torch_threads();"
+        "assert torch.get_num_threads() == before, (before, torch.get_num_threads());"
+        "print('ok')"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
