@@ -20,6 +20,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
+
 from kalos.portal.auth import READ, WRITE, Principal, require_scope
 from kalos.portal.campaign import CampaignError, CampaignStore, get_campaign_store
 
@@ -155,10 +157,21 @@ async def reanalyze_campaign(
         return JSONResponse({"error": "the campaign has no data to analyze"}, status_code=400)
 
     try:
+        # Same single analysis slot /api/run holds (kalos/portal/busy.py): a
+        # reanalyze racing an upload - or another reanalyze - gets an honest
+        # 503 instead of contending for the CPU with an unfinished fit.
         result = await run_in_threadpool(
-            functools.partial(
-                _analyze, df, target, profile=BIOPROCESS_PROFILE, pending=awaiting
+            run_exclusively(
+                functools.partial(
+                    _analyze, df, target, profile=BIOPROCESS_PROFILE, pending=awaiting
+                )
             )
+        )
+    except AnalysisBusy as busy:
+        return JSONResponse(
+            {"error": str(busy)},
+            status_code=503,
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         )
     except Exception:  # noqa: BLE001 - normalized to a generic 400, same as /api/run
         # Full traceback logged server-side; the client only ever sees a
