@@ -97,7 +97,11 @@ services:
       # Sizing knobs, all with working defaults - only takes effect if set.
       - KALOS_MAX_UPLOAD_MB=${KALOS_MAX_UPLOAD_MB:-}
       - KALOS_MAX_FIT_ROWS=${KALOS_MAX_FIT_ROWS:-}
-      - KALOS_TORCH_THREADS=${KALOS_TORCH_THREADS:-}
+      # 0 = do not pin torch's thread count. The bare-metal default (pin 4)
+      # is PATHOLOGICAL on this image's linux-aarch64 torch/OpenBLAS build:
+      # measured 47s (unpinned) vs 600s+ (pinned 4) for the same analyze on
+      # the reference deployment, 2026-09-10. The container already bounds CPU.
+      - KALOS_TORCH_THREADS=${KALOS_TORCH_THREADS:-0}
     volumes:
       # Named volume: survives container recreation (rebuild, image update).
       # Mounted at the engine's actual $HOME/.kalos - see Dockerfile.engine.
@@ -134,6 +138,11 @@ services:
       # KALOS_AUTH_TOKENS entry; see RUNBOOK.md "Auth between web and engine".
       - KALOS_ENGINE_URL=http://engine:8050
       - KALOS_ENGINE_TOKEN=${KALOS_ENGINE_TOKEN}
+      # Proxy timeout for engine calls, ms. Default (unset/empty) is 120s -
+      # sized for a COLD containerized GP fit, measured on the first real
+      # compose run where the original 30s guess 502'd mid-analysis. The
+      # route's parser treats empty as unset, so this :-} passthrough is safe.
+      - KALOS_ENGINE_TIMEOUT_MS=${KALOS_ENGINE_TIMEOUT_MS:-}
     depends_on:
       engine:
         # Orders startup AND matters functionally now: every browser call is
