@@ -256,6 +256,41 @@ def test_reanalyze_folds_measured_runs_and_keeps_awaiting(store, client):
     assert latest["dataset"] == "campaign round 1"
 
 
+def test_reanalyze_with_a_declared_group_column_and_no_value_in_the_folded_row(store, client):
+    """Regression test for a bug found live (2026-09-16 production test cycle,
+    not caught by any of the 791 unit tests that existed before it): a base
+    sheet with a declared group column (here `batch`, matching
+    BIOPROCESS_PROFILE.group_hint) makes `_analyze` build its LOGO groups from
+    that column. A folded campaign run has no value for `batch` - it is not a
+    proposable numeric feature, so every real campaign result hits this - and
+    `kalos/portal/analysis.py`'s `groups = df.loc[keep_index, gcol].astype(str)`
+    used to leave that missing value as a bare float under pandas 3.x's
+    string-backed dtype (older pandas stringified it to "nan"; every other
+    `.astype(str)` cast in that file already guards with `.fillna("")` for
+    exactly this reason, this one call site did not). `np.unique` then raised
+    `TypeError: '<' not supported between instances of 'float' and 'str'`,
+    which the reanalyze route's catch-all turned into a generic 400 - so this
+    asserts 200, not the specific exception, since a regression would surface
+    as exactly that swallowed 400."""
+    n = 8
+    df = pd.DataFrame({
+        "Methanol": np.linspace(0.5, 3.5, n),
+        "pH": np.linspace(5.2, 6.8, n),
+        "batch": ["A"] * (n // 2) + ["B"] * (n // 2),
+        "lipase_titer": np.linspace(2.0, 5.0, n),
+    })
+    store.seed(df, "lipase_titer", ["Methanol", "pH"])
+    started = client.post("/api/campaign/start", json={"recipes": [
+        {"recipe": {"Methanol": 2.0, "pH": 6.0}, "pred": 5.1, "std": 0.4,
+         "mode": "explore", "reason": "test"},
+    ]}).json()["started"]
+    client.post("/api/campaign/result", json={"id": started[0]["id"], "value": 4.2})
+
+    resp = client.post("/api/campaign/reanalyze")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["campaign"]["n_base"] == n + 1
+
+
 def test_reanalyze_without_a_campaign_returns_400(client):
     resp = client.post("/api/campaign/reanalyze")
     assert resp.status_code == 400

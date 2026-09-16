@@ -2,6 +2,31 @@
 
 Newest first.
 
+## 2026-09-16 (production test cycle finds a pandas 3.x regression)
+
+The first full production test cycle against the merged deploy pack - a cold
+`docker compose` rebuild, then a real upload/campaign-start/log-result/
+reanalyze loop through the one published front door - found a fourth
+container-only-in-spirit defect: real, but invisible to the 791+ tests that
+existed before it because none of them exercised a dataset with a declared
+group column through the campaign loop.
+
+### Fixed - reanalyze crashed on any dataset with a declared group column
+
+`kalos/portal/analysis.py`'s LOGO grouping built `groups` from
+`df.loc[keep_index, gcol].astype(str)`. A folded campaign run has no value
+for a declared group column (e.g. `medium_base`) - it is not a proposable
+numeric feature - so that column always carries a missing value after a
+fold. Every other `.astype(str)` cast in that file already guards with
+`.fillna("")` for exactly this reason; this one call site did not, and
+pandas 3.x's default string-backed dtype stopped silently stringifying NaN
+to "nan" the way older pandas did - the gap used to be masked, now it raises
+`TypeError: '<' not supported between instances of 'float' and 'str'` inside
+`np.unique`, which the reanalyze route's catch-all turned into a generic
+400. Fixed with the same `.fillna("")` convention already used nearby, plus
+a regression test that seeds a dataset with a declared group column and
+reanalyzes after logging a result.
+
 ## 2026-09-10 (the deploy pack meets reality)
 
 The wave-2 deploy pack was written and config-tested but its images were never
