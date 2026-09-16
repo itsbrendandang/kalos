@@ -19,7 +19,12 @@ from kalos.normalize.orientation import detect_orientation
 log = logging.getLogger("kalos.portal")
 
 # --- upload safety limits ---------------------------------------------------- #
-_MAX_UPLOAD_MB = float(os.environ.get("KALOS_MAX_UPLOAD_MB", "25"))
+# `or` (not the .get default) so a SET-BUT-EMPTY var falls back too: compose
+# and k8s templates pass `KALOS_MAX_UPLOAD_MB=${KALOS_MAX_UPLOAD_MB:-}`, which
+# arrives as "" - .get's default never applies and float("") crashed the boot
+# (found on the first real container run). Same unset==empty convention
+# kalos/providers/ already follows for every credential var.
+_MAX_UPLOAD_MB = float(os.environ.get("KALOS_MAX_UPLOAD_MB", "").strip() or "25")
 MAX_UPLOAD_BYTES = int(_MAX_UPLOAD_MB * 1024 * 1024)
 MAX_CSV_ROWS = 100_000       # rows read from a CSV/TSV upload
 MAX_COLUMNS = 512            # columns allowed in any upload (CSV or xlsx)
@@ -32,7 +37,7 @@ _ZIP_MAGIC = b"PK\x03\x04"   # xlsx/xls-as-zip start-of-file marker
 # targets the small-sample bioprocess regime (N <= a couple thousand), so we
 # reject an over-cap fit set rather than silently subsampling (which would be
 # invisible, non-deterministic data loss). Override with KALOS_MAX_FIT_ROWS.
-MAX_FIT_ROWS = int(os.environ.get("KALOS_MAX_FIT_ROWS", "2000"))
+MAX_FIT_ROWS = int(os.environ.get("KALOS_MAX_FIT_ROWS", "").strip() or "2000")
 
 # Generic, non-leaking messages. We never echo the parser error, a column name,
 # or a cell value back to an unauthenticated caller.

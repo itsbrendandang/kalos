@@ -12,6 +12,33 @@ This is a v0 pack: builds are unverified (no image has actually been built
 out of scope, delegated to a host-level reverse proxy placed in front of
 both published ports. Nothing here does TLS itself.
 
+
+## Verified quickstart (first real deployment, 2026-09-10)
+
+The whole stack, from a clean machine with Docker running:
+
+```
+cd kalos/deploy
+cp .env.example .env        # fill in KALOS_AUTH_TOKENS, KALOS_ENGINE_TOKEN, KALOS_ANON_SALT
+docker compose up -d --build
+```
+
+Then open http://localhost:3000 - the ONLY published port. Verified numbers
+from the reference run (M-series Mac, Docker VM 11 CPU / 8 GB): engine image
+1.82 GB, web 314 MB; first analyze on the 160-run demo sheet completed through
+the authed proxy in ~19s; a concurrent second upload got the honest 503 busy
+answer in 0.1s.
+
+Env knobs that exist because this deployment found the need for them:
+- `KALOS_ENGINE_TIMEOUT_MS` (web) - proxy timeout for engine calls, default
+  120000. The original 30s guess 502'd mid-fit on a cold container.
+- `KALOS_TORCH_THREADS` (engine) - the compose passes 0 (= do not pin) by
+  default: the bare-metal 4-thread pin measured a >12x pathological slowdown
+  (47s -> 600s+) on this image's linux-aarch64 torch/OpenBLAS build.
+- One analysis at a time is enforced engine-side (HTTP 503 + Retry-After when
+  busy; kalos/portal/busy.py): a client that gives up cannot stack orphaned
+  fits against its own retry.
+
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose version`, not the standalone

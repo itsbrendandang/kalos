@@ -28,9 +28,6 @@ WORKDIR /build
 # lock for pip today; this Dockerfile pins nothing beyond what pyproject.toml
 # pins, which is the same story a fresh `pip install kalos[ml,portal]` tells
 # an operator outside Docker.
-COPY pyproject.toml README.md ./
-COPY kalos ./kalos
-
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -43,9 +40,19 @@ ENV PATH="/opt/venv/bin:$PATH"
 # botorch/gpytorch/fastapi/etc. are installed in a second pass from the
 # normal PyPI index; torch is already satisfied by then, so pip does not
 # re-resolve or replace it with a PyPI-default (CUDA) build.
+# Torch installs BEFORE any source COPY on purpose: it depends on nothing in
+# this repo, and it is the 700-900MB layer. With the COPYs above it (the first
+# build of this file), every one-line source edit invalidated the torch layer
+# and re-downloaded the wheel - found the first time the image was rebuilt for
+# a real fix. Now a source change only reruns the (much smaller) package
+# install below.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir ".[ml,portal]"
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+COPY pyproject.toml README.md ./
+COPY kalos ./kalos
+
+RUN pip install --no-cache-dir ".[ml,portal]"
 
 # ---------------------------------------------------------------------------
 # runtime
