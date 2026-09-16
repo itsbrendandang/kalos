@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # kalos's Python dependencies live in pyproject.toml at the repo root -
+  # there is no requirements lock for pip to track, so this watches
+  # pyproject.toml's own pins (torch, botorch, fastapi, etc.).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keeps the actions pinned in .github/workflows/*.yml (checkout,
+  # setup-python) current without a human remembering to check.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

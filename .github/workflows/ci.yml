@@ -16,3 +16,58 @@ jobs:
       - run: ruff check kalos/ tests/ examples/
       - run: mypy   # config in pyproject [tool.mypy]
       - run: python -m pytest -q   # ESM-2 test skipped unless KALOS_TEST_ESM is set
+
+  docker-build:
+    runs-on: ubuntu-latest
+    # This job exists because the 2026-09-10 deploy pack session found three
+    # container-only defects (a boot crash from an empty env var, a proxy
+    # timeout, a torch-thread pathology) that 791 passing unit tests never
+    # caught - none of them run inside the actual image. `docker build` alone
+    # only catches broken Dockerfile syntax/layering; the boot-crash class of
+    # bug only shows up once the container actually starts, hence the
+    # `docker run` + /healthz poll below rather than stopping at the build.
+    #
+    # kalos-web's image (deploy/Dockerfile.web) is deliberately NOT built
+    # here: its build context is the sibling kalos-web repo
+    # (docker-compose.yaml's `context: ../../kalos-web`), which this
+    # single-repo checkout does not have, and pulling it in would need a
+    # cross-repo PAT stored as a secret - a deliberate call to make, not a
+    # silent side effect of a CI hardening pass.
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/Dockerfile.engine -t kalos-engine:ci .
+      # Default image config binds loopback-only and needs no auth (see
+      # Dockerfile.engine's KALOS_HOST comment) - that bind is unreachable
+      # from outside the container, so publishing a port would just hang.
+      # KALOS_HOST=0.0.0.0 here reproduces the compose deployment's actual
+      # posture, which means it also has to satisfy `assert_safe_exposure`
+      # (kalos/portal/config.py) the same way compose does: the values below
+      # are throwaway, CI-only dummies, not real credentials.
+      - name: Boot the image and wait for it to report healthy
+        run: |
+          docker run -d --name kalos-engine-ci -p 8050:8050 \
+            -e KALOS_HOST=0.0.0.0 \
+            -e KALOS_AUTH_TOKENS='[{"token_sha256":"ci-smoke-test-only","subject":"ci","tenant":"ci","scopes":["read"]}]' \
+            -e KALOS_ANON_SALT=ci-smoke-test-salt \
+            -e KALOS_CORS_ORIGINS=http://localhost:3000 \
+            kalos-engine:ci
+          # Poll the image's own HEALTHCHECK (deploy/Dockerfile.engine polls
+          # /healthz via stdlib urllib) rather than curling the port directly:
+          # tried that locally first and it failed with "Connection reset by
+          # peer" during the ~15-20s torch import on boot - curl's own
+          # --retry-connrefused does not cover a mid-boot reset, only a
+          # refused connection, so it is not a safe substitute here.
+          for _ in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' kalos-engine-ci)"
+            [ "$health" = "healthy" ] && exit 0
+            [ "$health" = "unhealthy" ] && { echo "container reported unhealthy"; exit 1; }
+            sleep 2
+          done
+          echo "timed out waiting for healthy status"
+          exit 1
+      - name: Dump container logs
+        if: always()
+        run: docker logs kalos-engine-ci || true
+      - name: Stop the container
+        if: always()
+        run: docker stop kalos-engine-ci || true
