@@ -35,6 +35,8 @@ To regenerate a readout, upload the same sheet again; the page prints the SHA-25
 2. **Ladder backtest.** For each scale whose smaller scales give at least 2 distinct scales and 4 rows, fit on the smaller scales only and predict that scale (`leave_one_scale_out_report(..., include_oof=True, held_out_scales=[k])`).
    The one-scale first rung is skipped and listed.
    Every rung uses the same explicit bounds as the final model, so the backtest evaluates the model that produces the number.
+   Those bounds span the training scales and the target, so the same sheet can backtest differently for different targets: on the demo sheet the 10 L rung's MAE is 0.126 for a 7,500 L target and 0.603 for a 40,000 L target.
+   For a fixed sheet and target the readout is deterministic.
 3. **Decision.**
    The reference step ratio is the largest step ratio among rungs whose own MAE beats both naive baselines.
    - *Prediction issued*: the pooled ladder MAE beats both baselines, there are at least 10 ladder residuals, the target ratio is at most 2x the reference, and every process parameter is inside the trained range.
