@@ -31,6 +31,7 @@ from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
 from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
 from kalos.scale.readout import NUMBER, NUMBER_WITH_WARNING, REFUSAL, TargetSpec, build_readout
+from kalos.scale.readout import format_liters_plain as _format_liters_plain
 
 log = logging.getLogger("kalos.portal")
 
@@ -125,18 +126,17 @@ def _parse_target(raw: str) -> tuple[TargetSpec, str, list[str], dict[str, float
 #   - physics assumption: up to 4 significant digits.
 _FMT_METRIC = "{:.3f}"
 _FMT_RATIO = "{:.2f}x"
-_FMT_SIG4 = "{:.4g}"
 
 
 def _fmt_sig4(value: float) -> str:
     """Up to 4 significant digits, never scientific notation: plant scales
     reach 10^4-10^5 L, and "4e+04 L" is not something to put in front of a
     process lead. Magnitudes of 10^4 and above print as grouped integers
-    ("40,000"); smaller values keep `{:.4g}` ("0.3333", "7.2", "1000")."""
-    v = float(value)
-    if abs(v) >= 1e4:
-        return f"{v:,.0f}"
-    return _FMT_SIG4.format(v)
+    ("40,000"); smaller values keep `{:.4g}` ("0.3333", "7.2", "1000").
+    Delegates to `kalos.scale.readout.format_liters_plain` so a data-plan
+    liters figure (computed in that module) and every other rendered scale
+    figure on this page always agree."""
+    return _format_liters_plain(value)
 
 
 def _kv(label: str, value: Any, *, mono: bool = False) -> str:
@@ -218,7 +218,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
             f'<td>{_fmt_sig4(r["scale_L"])} L</td><td>{_FMT_RATIO.format(r["step_ratio"])}</td><td>{r["n"]}</td>'
             f'<td>{_FMT_METRIC.format(r["mae"])}</td><td>{_FMT_METRIC.format(r["naive_mean_mae"])}</td>'
             f'<td>{_FMT_METRIC.format(r["naive_nn_mae"])}</td>'
-            f'<td>{"yes" if r["beats_both"] else "no"}</td>'
+            f'<td>{"too few to judge" if r["too_few_to_judge"] else ("yes" if r["beats_both"] else "no")}</td>'
             "</tr>"
             for r in rungs
         )
@@ -233,7 +233,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
         items = "".join(
             f'<li>scale {_fmt_sig4(s["scale_L"])} L skipped: {_esc(s["reason"])}</li>' for s in skipped
         )
-        parts.append(f'<p class="muted">Skipped rungs:</p><ul class="reasons">{items}</ul>')
+        parts.append(f'<p class="muted">Skipped rungs:</p><ul class="skipped-reasons">{items}</ul>')
     return "".join(parts)
 
 
@@ -256,7 +256,7 @@ def _ratio_section(readout: dict[str, Any]) -> str:
 
 def _baseline_section(readout: dict[str, Any]) -> str:
     comparison = readout.get("baseline_comparison")
-    if comparison is None:
+    if comparison is None or comparison["n_residuals"] == 0:
         return ""
     return (
         "<h2>Baseline comparison (pooled ladder residuals)</h2>"
@@ -266,6 +266,19 @@ def _baseline_section(readout: dict[str, Any]) -> str:
         + _kv("beats both baselines", "yes" if comparison["pooled_beats_both"] else "no")
         + _kv("pooled residuals (n)", comparison["n_residuals"])
     )
+
+
+def _data_plan_section(readout: dict[str, Any]) -> str:
+    """"What it would take": plain, specific lines computed in
+    `kalos.scale.readout._build_data_plan` (residual shortfall, no
+    licensing rung, ratio too far from the reference) - rendered whenever
+    `build_readout` populated `data_plan` (REFUSAL and NUMBER_WITH_WARNING;
+    empty otherwise)."""
+    plan = readout.get("data_plan") or []
+    if not plan:
+        return ""
+    items = "".join(f"<li>{_esc(p)}</li>" for p in plan)
+    return f'<h2>What it would take</h2><ul class="data-plan">{items}</ul>'
 
 
 def _physics_section(readout: dict[str, Any]) -> str:
@@ -360,6 +373,7 @@ def render_readout_html(readout: dict[str, Any]) -> str:
             _rungs_table(readout),
             _ratio_section(readout),
             _baseline_section(readout),
+            _data_plan_section(readout),
             _physics_section(readout),
             _provenance_section(readout),
         )
