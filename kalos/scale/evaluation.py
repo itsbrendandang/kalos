@@ -39,15 +39,25 @@ module answers the harder one directly:
       same".
 
 HONESTY CLAUSE. This module does not assert that the physics-feature GP beats
-either naive baseline. `beats_naive_mean_baseline` on the returned report
-says whether it measurably did, on whatever data was passed in. Run against
-the real synthetic dataset (see this package's tests for how), v0 did NOT
-clearly beat the naive baselines on `extrapolate_up` - the one bucket that is
-actually the product claim - even though it does beat them, sometimes
-substantially, on `interpolate`. See this repo's final report for the
-measured numbers; this is a finding about the evaluation harness and the
-current feature set on a dataset with SIMULATED scale effects, not a claim
-that scale-dependent physics is unlearnable from real data.
+either naive baseline. `beats_naive_mean`/`beats_naive_nn` on the returned
+report say whether it measurably did, on whatever data was passed in. Run
+against the real `mab-scaleup-synthetic` dataset (see this package's tests
+for how, and `docs/SCALE_EVIDENCE.md` for the exact command and measured
+numbers): v0 DOES measurably beat both naive baselines on `extrapolate_up`
+MAE (0.53 vs naive_mean 1.51 / naive_nn 1.38, at n=5 - the 2000 L bucket) -
+the one bucket that is actually the product claim - and beats them, often by
+more, on `interpolate` and pooled across all scales too. What is NOT
+demonstrated is v0's RANKING at that same `extrapolate_up` bucket: Spearman
+is -0.7 at n=5, and the exact permutation-null p-value for that statistic is
+0.233 - indistinguishable from chance. Ranking at the target scale is
+therefore UNMEASURED, not demonstrated bad, at this n; five points is simply
+too few for a rank correlation to be a measurement. See
+`docs/SCALE_EVIDENCE.md` for the full reproduction and the known limitation
+(the `extrapolate_up` bucket is always exactly the single largest trained
+scale's own replicates, so its n cannot exceed how many runs were made at
+that scale); this is a finding about the evaluation harness and the current
+feature set on the synthetic mab-scaleup dataset with modest replication at the largest scale, not a
+claim that scale-dependent ranking is unlearnable in general.
 """
 from __future__ import annotations
 
