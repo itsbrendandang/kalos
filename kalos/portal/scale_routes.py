@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
 from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
-from kalos.scale.readout import NUMBER, NUMBER_WITH_WARNING, TargetSpec, build_readout
+from kalos.scale.readout import NUMBER, NUMBER_WITH_WARNING, REFUSAL, TargetSpec, build_readout
 
 log = logging.getLogger("kalos.portal")
 
@@ -117,46 +117,84 @@ def _parse_target(raw: str) -> tuple[TargetSpec, str, list[str], dict[str, float
 
 # --- HTML rendering ----------------------------------------------------------- #
 
+# Rendering-only formatting rules (not part of the data contract in
+# `kalos.scale.readout` - the result dict keeps full-precision floats;
+# these format specs are applied only when building the page):
+#   - MAE / baseline / prediction / interval bound: fixed 3 decimals.
+#   - step ratio: fixed 2 decimals, "x" suffix.
+#   - physics assumption: up to 4 significant digits.
+_FMT_METRIC = "{:.3f}"
+_FMT_RATIO = "{:.2f}x"
+_FMT_SIG4 = "{:.4g}"
+
+
+def _kv(label: str, value: Any, *, mono: bool = False) -> str:
+    cls = "kv kv-hash" if mono else "kv"
+    return f'<div class="{cls}"><span class="k">{_esc(label)}</span><span class="v">{_esc(value)}</span></div>'
+
 
 def _target_inputs_section(readout: dict[str, Any]) -> str:
     inputs = readout["target_inputs"]
     rows = [
-        ("Target scale", f"{inputs['scale_L']:g} L"),
-        ("Agitation", f"{inputs['agitation_rpm']:g} rpm"),
-        ("Airflow", f"{inputs['airflow_L_per_min']:g} L/min"),
+        ("Target scale", f"{_FMT_SIG4.format(inputs['scale_L'])} L"),
+        ("Agitation", f"{_FMT_SIG4.format(inputs['agitation_rpm'])} rpm"),
+        ("Airflow", f"{_FMT_SIG4.format(inputs['airflow_L_per_min'])} L/min"),
     ]
     for name, value in inputs["process_params"].items():
-        rows.append((_esc(name), f"{value:g}"))
-    kvs = "".join(f'<div class="kv"><span class="k">{k}</span><span class="v">{v}</span></div>' for k, v in rows)
+        rows.append((name, _FMT_SIG4.format(value)))
+    kvs = "".join(_kv(k, v) for k, v in rows)
     return f'<h2>Target inputs</h2><div class="grid">{kvs}</div>'
+
+
+def _prediction_labels(readout: dict[str, Any]) -> tuple[str, str]:
+    """`(prediction_label, interval_label)` - named after the target column,
+    tagged with its resolved unit when the normalize plan found one, and the
+    target scale, per the coordinator's "name the prediction" request."""
+    target_column = readout.get("target_column") or "target"
+    unit = (readout.get("provenance") or {}).get("target_column_unit")
+    unit_part = f" ({unit})" if unit else ""
+    scale = readout["target_inputs"]["scale_L"]
+    subject = f"{target_column}{unit_part} at {_FMT_SIG4.format(scale)} L"
+    return f"Predicted {subject}", f"Interval ({readout['interval_label']}) for {subject}"
 
 
 def _prediction_section(readout: dict[str, Any]) -> str:
     if readout["prediction"] is None:
         return ""
     lo, hi = readout["interval"]
+    prediction_label, interval_label = _prediction_labels(readout)
     return (
         "<h2>Prediction</h2>"
-        f'<div class="kv"><span class="k">Predicted value</span><span class="v">{readout["prediction"]:.4g}</span></div>'
-        f'<div class="kv"><span class="k">Interval ({_esc(readout["interval_label"])})</span>'
-        f'<span class="v">[{lo:.4g}, {hi:.4g}]</span></div>'
+        + _kv(prediction_label, _FMT_METRIC.format(readout["prediction"]))
+        + _kv(interval_label, f"[{_FMT_METRIC.format(lo)}, {_FMT_METRIC.format(hi)}]")
     )
+
+
+_BANNER_CSS = {NUMBER: "banner-number", NUMBER_WITH_WARNING: "banner-warning", REFUSAL: "banner-refusal"}
 
 
 def _decision_banner(readout: dict[str, Any]) -> str:
     decision = readout["decision"]
-    css = {"NUMBER": "banner-number", "NUMBER_WITH_WARNING": "banner-warning", "REFUSAL": "banner-refusal"}
-    label = {
-        NUMBER: "NUMBER",
-        NUMBER_WITH_WARNING: "NUMBER, WITH WARNING",
-        "REFUSAL": "REFUSAL",
-    }.get(decision, _esc(decision))
-    banner = f'<div class="banner {css.get(decision, "banner-refusal")}">{label}</div>'
     reasons = readout.get("reasons") or []
-    if reasons:
-        items = "".join(f"<li>{_esc(r)}</li>" for r in reasons)
-        banner += f'<ul class="reasons">{items}</ul>'
-    return banner
+    extra = ""
+    if decision == NUMBER_WITH_WARNING:
+        headline = "Prediction issued with warnings"
+        if reasons:
+            items = "".join(f"<li>{_esc(r)}</li>" for r in reasons)
+            extra = f'<ul class="reasons">{items}</ul>'
+    elif decision == REFUSAL:
+        joined = "; ".join(reasons) if reasons else "no reason given"
+        headline = f"No prediction: {_esc(joined)}"
+    else:
+        headline = "Prediction issued"
+    css = _BANNER_CSS.get(decision, "banner-refusal")
+    return (
+        f'<div class="banner {css}">'
+        f'<span class="banner-headline">{headline}</span>'
+        f'<span class="banner-machine">{_esc(decision)}</span>'
+        "</div>"
+        f"{extra}"
+    )
 
 
 def _rungs_table(readout: dict[str, Any]) -> str:
@@ -166,8 +204,9 @@ def _rungs_table(readout: dict[str, Any]) -> str:
     if rungs:
         rows = "".join(
             "<tr>"
-            f'<td>{r["scale_L"]:g} L</td><td>{r["step_ratio"]:.2f}x</td><td>{r["n"]}</td>'
-            f'<td>{r["mae"]:.4g}</td><td>{r["naive_mean_mae"]:.4g}</td><td>{r["naive_nn_mae"]:.4g}</td>'
+            f'<td>{_FMT_SIG4.format(r["scale_L"])} L</td><td>{_FMT_RATIO.format(r["step_ratio"])}</td><td>{r["n"]}</td>'
+            f'<td>{_FMT_METRIC.format(r["mae"])}</td><td>{_FMT_METRIC.format(r["naive_mean_mae"])}</td>'
+            f'<td>{_FMT_METRIC.format(r["naive_nn_mae"])}</td>'
             f'<td>{"yes" if r["beats_both"] else "no"}</td>'
             "</tr>"
             for r in rungs
@@ -180,7 +219,9 @@ def _rungs_table(readout: dict[str, Any]) -> str:
     else:
         parts.append('<p class="muted">No rungs were evaluated.</p>')
     if skipped:
-        items = "".join(f'<li>scale {s["scale_L"]:g} L skipped: {_esc(s["reason"])}</li>' for s in skipped)
+        items = "".join(
+            f'<li>scale {_FMT_SIG4.format(s["scale_L"])} L skipped: {_esc(s["reason"])}</li>' for s in skipped
+        )
         parts.append(f'<p class="muted">Skipped rungs:</p><ul class="reasons">{items}</ul>')
     return "".join(parts)
 
@@ -188,17 +229,17 @@ def _rungs_table(readout: dict[str, Any]) -> str:
 def _ratio_section(readout: dict[str, Any]) -> str:
     reference = readout.get("reference_ratio")
     requested = readout.get("requested_ratio")
-    reference_str = f"{reference:.2f}x" if reference is not None else "n/a (no rung beat both baselines)"
-    requested_str = f"{requested:.2f}x" if requested is not None else "n/a"
+    reference_str = _FMT_RATIO.format(reference) if reference is not None else "n/a (no rung beat both baselines)"
+    requested_str = _FMT_RATIO.format(requested) if requested is not None else "n/a"
     out_of_range = readout.get("out_of_range_params") or []
     extra = ""
     if out_of_range:
         extra = f'<p class="muted">Out-of-range process parameter(s): {_esc(", ".join(out_of_range))}</p>'
     return (
         "<h2>Step ratio</h2>"
-        f'<div class="kv"><span class="k">Reference (backtested) ratio</span><span class="v">{reference_str}</span></div>'
-        f'<div class="kv"><span class="k">Requested (target) ratio</span><span class="v">{requested_str}</span></div>'
-        f"{extra}"
+        + _kv("Reference (backtested) ratio", reference_str)
+        + _kv("Requested (target) ratio", requested_str)
+        + extra
     )
 
 
@@ -208,41 +249,82 @@ def _baseline_section(readout: dict[str, Any]) -> str:
         return ""
     return (
         "<h2>Baseline comparison (pooled ladder residuals)</h2>"
-        f'<div class="kv"><span class="k">Model MAE</span><span class="v">{comparison["pooled_mae"]:.4g}</span></div>'
-        f'<div class="kv"><span class="k">naive_mean MAE</span><span class="v">{comparison["pooled_naive_mean_mae"]:.4g}</span></div>'
-        f'<div class="kv"><span class="k">naive_nn MAE</span><span class="v">{comparison["pooled_naive_nn_mae"]:.4g}</span></div>'
-        f'<div class="kv"><span class="k">beats both baselines</span><span class="v">{"yes" if comparison["pooled_beats_both"] else "no"}</span></div>'
-        f'<div class="kv"><span class="k">pooled residuals (n)</span><span class="v">{comparison["n_residuals"]}</span></div>'
+        + _kv("Model MAE", _FMT_METRIC.format(comparison["pooled_mae"]))
+        + _kv("naive_mean MAE", _FMT_METRIC.format(comparison["pooled_naive_mean_mae"]))
+        + _kv("naive_nn MAE", _FMT_METRIC.format(comparison["pooled_naive_nn_mae"]))
+        + _kv("beats both baselines", "yes" if comparison["pooled_beats_both"] else "no")
+        + _kv("pooled residuals (n)", comparison["n_residuals"])
     )
 
 
 def _physics_section(readout: dict[str, Any]) -> str:
     assumptions = readout.get("physics_assumptions") or {}
     rows = "".join(
-        f'<div class="kv"><span class="k">{_esc(name)} ({_esc(info["source"])})</span>'
-        f'<span class="v">{_esc(info["value"])}</span></div>'
+        _kv(f"{name} ({info['source']})", _FMT_SIG4.format(info["value"]))
         for name, info in sorted(assumptions.items())
     )
     return f'<h2>Physics assumptions</h2><div class="grid">{rows}</div>'
 
 
+def _format_const_value(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, float):
+        return str(value)
+    return _FMT_SIG4.format(value)
+
+
+def _constants_table(constants: dict[str, Any], *, per_row: int = 4) -> str:
+    """The decision-table constants as one compact multi-column table
+    (name/value pairs packed `per_row` to a row), not one dt/dd pair per
+    line - this is what keeps page 1 to a single page."""
+    items = sorted(constants.items())
+    rows = []
+    for i in range(0, len(items), per_row):
+        cells = "".join(
+            f'<td class="name">{_esc(name)}</td><td class="value">{_esc(_format_const_value(value))}</td>'
+            for name, value in items[i : i + per_row]
+        )
+        rows.append(f"<tr>{cells}</tr>")
+    return f'<table class="const-table"><tbody>{"".join(rows)}</tbody></table>'
+
+
 def _provenance_section(readout: dict[str, Any]) -> str:
+    """Page-1 provenance: full hashes on their own compact monospace lines,
+    a one-line pin for the normalize plan (column count + its own hash -
+    the full plan JSON lives in the page-2 appendix), and the constants as
+    one compact table."""
     p = readout.get("provenance") or {}
     constants = p.get("constants") or {}
-    const_rows = "".join(f"<dt>{_esc(k)}</dt><dd>{_esc(v)}</dd>" for k, v in sorted(constants.items()))
+    rows = (
+        _kv("kalos git SHA", p.get("kalos_git_sha"), mono=True)
+        + _kv("candidate", p.get("candidate"))
+        + _kv("alpha", p.get("alpha"))
+        + _kv("seed", p.get("seed"))
+        + _kv("resolved scale_L unit", p.get("resolved_scale_unit"))
+    )
+    plan_pin = f"{p.get('normalize_plan_n_columns')} columns, SHA-256 {p.get('normalize_plan_sha256')}"
+    hash_rows = (
+        _kv("raw upload SHA-256", p.get("raw_upload_sha256"), mono=True)
+        + _kv("normalized frame SHA-256", p.get("normalized_frame_sha256"), mono=True)
+        + _kv("normalize plan", plan_pin, mono=True)
+    )
     return (
         "<h2>Provenance</h2>"
-        '<dl class="provenance">'
-        f"<dt>kalos git SHA</dt><dd class=\"mono\">{_esc(p.get('kalos_git_sha'))}</dd>"
-        f"<dt>candidate</dt><dd>{_esc(p.get('candidate'))}</dd>"
-        f"<dt>raw upload SHA-256</dt><dd class=\"mono\">{_esc(p.get('raw_upload_sha256'))}</dd>"
-        f"<dt>normalized frame SHA-256</dt><dd class=\"mono\">{_esc(p.get('normalized_frame_sha256'))}</dd>"
-        f"<dt>alpha</dt><dd>{_esc(p.get('alpha'))}</dd>"
-        f"<dt>seed</dt><dd>{_esc(p.get('seed'))}</dd>"
-        f"<dt>resolved scale_L unit</dt><dd>{_esc(p.get('resolved_scale_unit'))}</dd>"
-        f"<dt>normalize plan (JSON)</dt><dd class=\"mono\">{_esc(p.get('normalize_plan_json'))}</dd>"
-        f"{const_rows}"
-        "</dl>"
+        f'<div class="grid">{rows}</div>'
+        f"{hash_rows}"
+        f"{_constants_table(constants)}"
+    )
+
+
+def _provenance_appendix(readout: dict[str, Any]) -> str:
+    """Page 2: the full normalize plan JSON - the only thing NOT required
+    to fit on page 1 (page 1 already pins its hash and column count in
+    `_provenance_section`)."""
+    plan_json = (readout.get("provenance") or {}).get("normalize_plan_json") or ""
+    return (
+        '<section class="appendix">'
+        "<h2>Provenance appendix: normalize plan (full JSON)</h2>"
+        f'<div class="plan-json">{_esc(plan_json)}</div>'
+        "</section>"
     )
 
 
@@ -251,19 +333,30 @@ def render_readout_html(readout: dict[str, Any]) -> str:
     HTML page (see `kalos/portal/templates/readout.html` for the skeleton
     and print CSS). Every user-supplied string is HTML-escaped via `_esc`
     before it reaches the page.
+
+    Page 1 holds everything except the raw normalize-plan JSON, which is
+    the one section moved to a page-2 "Provenance appendix" (`break-before:
+    page` in the template's print CSS) - page 1 still pins that JSON's
+    identity via its SHA-256 and column count in `_provenance_section`.
     """
-    sections = [
-        _decision_banner(readout),
-        _prediction_section(readout),
-        _target_inputs_section(readout),
-        _rungs_table(readout),
-        _ratio_section(readout),
-        _baseline_section(readout),
-        _physics_section(readout),
-        _provenance_section(readout),
-    ]
-    body = "".join(s for s in sections if s)
-    return _TEMPLATE.substitute(body=body, intended_use=_esc(INTENDED_USE_STATEMENT))
+    page1 = "".join(
+        s
+        for s in (
+            _decision_banner(readout),
+            _prediction_section(readout),
+            _target_inputs_section(readout),
+            _rungs_table(readout),
+            _ratio_section(readout),
+            _baseline_section(readout),
+            _physics_section(readout),
+            _provenance_section(readout),
+        )
+        if s
+    )
+    intended_use = f'<p class="intended-use">{_esc(INTENDED_USE_STATEMENT)}</p>'
+    body = page1 + intended_use + _provenance_appendix(readout)
+    generated_at = _esc(readout.get("generated_at_utc", ""))
+    return _TEMPLATE.substitute(body=body, generated_at=generated_at)
 
 
 # --- route -------------------------------------------------------------------- #

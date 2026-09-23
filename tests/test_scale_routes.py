@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -205,3 +210,116 @@ def test_readout_creates_no_new_files_on_disk(client, tmp_path):
     assert r.status_code == 200
     after = set(tmp_path.iterdir())
     assert after == before
+
+
+# --------------------------------------------------------------------------- #
+# one page, number formatting, human decision banners, timestamp
+# --------------------------------------------------------------------------- #
+
+
+_DECIMAL_RE = re.compile(r"\d+\.(\d+)")
+
+
+def test_no_rendered_number_has_more_than_4_decimal_places(client):
+    tc, _store = client
+    r = _post(tc, target_json=_target_json())
+    assert r.status_code == 200
+    offenders = [m.group(0) for m in _DECIMAL_RE.finditer(r.text) if len(m.group(1)) > 4]
+    assert offenders == []
+
+
+def test_generated_at_timestamp_in_header(client):
+    tc, _store = client
+    r = _post(tc, target_json=_target_json())
+    assert r.status_code == 200
+    assert "Generated" in r.text
+    assert "UTC" in r.text
+
+
+def test_number_banner_is_human_and_machine_readable(client):
+    tc, _store = client
+    r = _post(tc, target_json=_target_json())
+    assert r.status_code == 200
+    assert "Prediction issued" in r.text
+    assert "banner-number" in r.text
+    assert "NUMBER" in r.text
+
+
+def test_number_with_warning_banner_lists_the_warning(client):
+    tc, _store = client
+    r = _post(
+        tc,
+        target_json=_target_json(process_params={"ph_setpoint": 9.0, "temperature_C": 37.0}),
+    )
+    assert r.status_code == 200, r.text
+    assert "Prediction issued with warnings" in r.text
+    assert "banner-warning" in r.text
+    assert "NUMBER_WITH_WARNING" in r.text
+    assert "ph_setpoint" in r.text  # the out-of-range param is named
+
+
+def test_refusal_banner_names_the_reason(client):
+    tc, _store = client
+    # ratio ~17x: past REFUSE_RATIO_MULT (5x) of the ~3.33x reference, but
+    # still under the gate's 20x hard cap - a decide()-level refusal, not a
+    # gate failure, so this is 200 HTML, not 422.
+    r = _post(tc, target_json=_target_json(scale_L=5000.0 * 17.0))
+    assert r.status_code == 200, r.text
+    assert "No prediction:" in r.text
+    assert "banner-refusal" in r.text
+    assert "REFUSAL" in r.text
+
+
+def test_page_one_is_a_single_printed_page():
+    """Every section except the raw normalize-plan JSON must fit on page 1
+    (the appendix is allowed to push the total to 2 pages). Renders the
+    actual page through the same tool used to spot-check the demo readout
+    (bun + gstack-render.ts), so this is a real print-layout check, not an
+    approximation of one."""
+    from kalos.portal.scale_routes import render_readout_html
+    from kalos.scale.readout import TargetSpec, build_readout
+
+    pdftotext = shutil.which("pdftotext")
+    pdfinfo = shutil.which("pdfinfo")
+    bun = shutil.which("bun")
+    render_script = Path.home() / ".claude" / "skills" / "gstack" / "bin" / "gstack-render.ts"
+    if not (pdftotext and pdfinfo and bun and render_script.exists()):
+        pytest.skip("pdftotext/pdfinfo/bun/gstack-render.ts not available in this environment")
+
+    df = pd.read_csv(_DEMO_CSV)
+    target = TargetSpec(
+        scale_L=7500.0,
+        agitation_rpm=150.0,
+        airflow_L_per_min=300.0,
+        process_params={"ph_setpoint": 7.2, "temperature_C": 37.0},
+    )
+    readout = build_readout(df, "titer_g_per_L", ["ph_setpoint", "temperature_C"], target)
+    html_page = render_readout_html(readout)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        html_path = Path(tmp_dir) / "readout.html"
+        pdf_path = Path(tmp_dir) / "readout.pdf"
+        html_path.write_text(html_page, encoding="utf-8")
+
+        subprocess.run(
+            [bun, "run", str(render_script), str(html_path), "--pdf", str(pdf_path)],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        page1 = subprocess.run(
+            [pdftotext, "-layout", "-f", "1", "-l", "1", str(pdf_path), "-"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        info = subprocess.run([pdfinfo, str(pdf_path)], capture_output=True, text=True, check=True).stdout
+
+    # everything except the raw plan JSON must be on page 1
+    assert "Development decision support only" in page1
+    assert "BASELINE COMPARISON" in page1.upper()
+    assert "PHYSICS ASSUMPTIONS" in page1.upper()
+    assert '"columns":' not in page1  # the raw plan JSON stays off page 1
+
+    pages = next(int(line.split(":")[1]) for line in info.splitlines() if line.startswith("Pages:"))
+    assert pages <= 2
