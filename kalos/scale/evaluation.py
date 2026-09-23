@@ -164,6 +164,8 @@ def leave_one_scale_out_report(
     bounds: NDArray[np.float64] | None = None,
     model_factory: Callable[[list[str]], ScaleCandidateModel] | None = None,
     model_label: str = "v0_surrogate",
+    include_oof: bool = False,
+    held_out_scales: Sequence[float] | None = None,
 ) -> dict:
     """Leave-one-scale-out evaluation of the physics-feature GP against two
     naive baselines. See the module docstring for what each field means.
@@ -204,12 +206,46 @@ def leave_one_scale_out_report(
     box for every fold" contract, so the reported number describes one fixed
     model, not a different input transform per fold.
 
+    `include_oof` (default `False`, so the default call path is unchanged):
+    when `True`, the returned dict gains an `"oof"` key with the per-row
+    arrays this function already computes inside the fold loop below - the
+    same `scale_L`, `actual`, `pred`, `naive_mean_pred`, `naive_nn_pred`, and
+    `direction` values that get aggregated into `per_scale`/`by_direction`/
+    `overall`, but kept at row granularity (as plain, JSON-serializable
+    lists) for a caller that needs the residuals themselves, e.g. a
+    split-conformal interval calibrated on them.
+
+    `held_out_scales` (default `None`, so the default call path is
+    unchanged): when given, only the listed scales become held-out folds -
+    every other distinct scale in `df` is used only as training data for
+    those folds, never itself held out. Matched against `scale_L` with the
+    SAME 6-decimal rounding convention this function already groups scales
+    by (see the comment above `unique_scales`'s assignment), so a value in
+    `held_out_scales` that is not one of the rounded scales present in `df`
+    simply evaluates no fold. This exists so a caller that only needs one or
+    two folds (e.g. a ladder backtest re-running this function on data
+    truncated at each scale, which only wants that scale's own fold) does
+    not pay for every fold on every call.
+
+    WHY `pooled_logo` IS SKIPPED WHEN `held_out_scales` IS SET. `pooled_logo`
+    (both the `logo_report` cross-check and this function's own from-scratch
+    pooled reconstruction) is a pooled number ACROSS EVERY SCALE'S FOLD -
+    restricting which folds run makes that pooled number describe a
+    different, smaller evaluation than "pooled LOGO" is supposed to mean, so
+    rather than silently reporting a partial pooled number under the same
+    key, `pooled_logo` is `None` and the returned dict carries a
+    `"pooled_logo_skipped"` string explaining why. `overall` and
+    `by_direction` are NOT skipped: they pool only the folds that actually
+    ran, which is exactly what a caller restricting folds on purpose wants.
+
     Returns a dict:
       - `feature_names`, `n_rows_used`, `n_rows_dropped`, `n_scales`
       - `pooled_logo`: the headline pooled Spearman from
         `kalos.core.evaluation.logo_report` (cross-check against the
         from-scratch per-scale loop below - both consume the same X/y/groups
-        and should agree on the pooled number).
+        and should agree on the pooled number). `None` when `held_out_scales`
+        restricts which folds run (see above); `"pooled_logo_skipped"` is
+        then present with the reason.
       - `per_scale`: one dict per held-out scale L with `scale_L`, `n`,
         `direction`, `mae`, `spearman`, `naive_mean_mae`, `naive_nn_mae`.
       - `by_direction`: `{"extrapolate_up": {...} | None, "extrapolate_down":
@@ -219,6 +255,9 @@ def leave_one_scale_out_report(
         `mae`, `spearman`, `naive_mean_mae`, `naive_mean_spearman`,
         `naive_nn_mae`, `naive_nn_spearman`, `beats_naive_mean`,
         `beats_naive_nn`.
+      - `oof` (only when `include_oof=True`): per-row lists `scale_L`,
+        `actual`, `pred`, `naive_mean_pred`, `naive_nn_pred`, `direction`,
+        one entry per evaluated held-out row, in fold order.
 
     A held-out scale is skipped (mirrors `kalos.core.evaluation._oof`'s fold
     guard) if fewer than 4 rows remain to train on, or it has no rows itself
@@ -248,11 +287,29 @@ def leave_one_scale_out_report(
         box = np.asarray(bounds, dtype=float)
 
     unique_scales = np.unique(scale)
+    if held_out_scales is not None:
+        # Restrict which scales become folds, matching scales by the SAME
+        # rounded-to-6-decimals convention as `unique_scales` itself (see
+        # the comment above) so a caller passing a raw, un-rounded scale
+        # value still matches. `X`/`y`/`scale`/`box` stay UNRESTRICTED - a
+        # restricted fold's train set and normalization box are identical
+        # to what the same fold would use in an unrestricted call.
+        requested = set(np.round(np.asarray(list(held_out_scales), dtype=float), 6).tolist())
+        unique_scales = np.array(sorted(set(unique_scales.tolist()) & requested))
 
     # Only a genuine independent cross-check (a second, differently-coded
     # computation of the same pooled number) when this loop is ALSO fitting
     # `Surrogate` - see this function's `model_factory` docstring section.
-    pooled_logo: dict | None = logo_report(X, y, scale, bounds=box) if model_factory is None else None
+    # Skipped entirely when `held_out_scales` restricts which folds run: see
+    # the "WHY `pooled_logo` IS SKIPPED" docstring section above.
+    pooled_logo: dict | None = (
+        logo_report(X, y, scale, bounds=box) if model_factory is None and held_out_scales is None else None
+    )
+    pooled_logo_skipped: str | None = (
+        "held_out_scales restricts folds; pooled LOGO would require every fold"
+        if held_out_scales is not None
+        else None
+    )
 
     per_scale: list[dict] = []
     all_pred: list[float] = []
@@ -260,6 +317,7 @@ def leave_one_scale_out_report(
     all_naive_mean: list[float] = []
     all_naive_nn: list[float] = []
     all_direction: list[str] = []
+    all_scale_l: list[float] = []
 
     for s in unique_scales:
         test_mask = scale == s
@@ -293,6 +351,7 @@ def leave_one_scale_out_report(
         all_naive_mean.extend(naive_mean_pred.tolist())
         all_naive_nn.extend(naive_nn_pred.tolist())
         all_direction.extend([direction] * n_test)
+        all_scale_l.extend([float(s)] * n_test)
 
     pred_arr = np.asarray(all_pred)
     actual_arr = np.asarray(all_actual)
@@ -311,7 +370,12 @@ def leave_one_scale_out_report(
 
     overall = _bucket_metrics(pred_arr, actual_arr, naive_mean_arr, naive_nn_arr)
 
-    if pooled_logo is not None:
+    if held_out_scales is not None:
+        # `pooled_logo_skipped` (set above) already explains why: a pooled
+        # number over a deliberately restricted fold set is not "pooled
+        # LOGO" in the sense the rest of this module means it.
+        pooled_logo = None
+    elif pooled_logo is not None:
         # The default (`model_factory=None`) path: a genuine second,
         # independently-coded computation of the pooled number.
         pooled_logo = {**pooled_logo, "independent_crosscheck": True}
@@ -326,7 +390,7 @@ def leave_one_scale_out_report(
             "independent_crosscheck": False,
         }
 
-    return {
+    report = {
         "model": model_label,
         "feature_names": names,
         "n_rows_used": int(len(X)),
@@ -337,6 +401,18 @@ def leave_one_scale_out_report(
         "by_direction": by_direction,
         "overall": overall,
     }
+    if pooled_logo_skipped is not None:
+        report["pooled_logo_skipped"] = pooled_logo_skipped
+    if include_oof:
+        report["oof"] = {
+            "scale_L": all_scale_l,
+            "actual": all_actual,
+            "pred": all_pred,
+            "naive_mean_pred": all_naive_mean,
+            "naive_nn_pred": all_naive_nn,
+            "direction": all_direction,
+        }
+    return report
 
 
 __all__ = ["leave_one_scale_out_report"]
