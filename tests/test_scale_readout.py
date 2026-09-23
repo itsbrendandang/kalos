@@ -424,3 +424,12 @@ def test_gate_failure_short_circuits_before_any_fit():
     assert out["gate"]["failed_check"] == "target_not_interpolation"
     assert out["prediction"] is None
     assert out["interval"] is None
+
+
+def test_provenance_carries_engine_version_like_api_run():
+    """Parity with `/api/run`'s audit fields: the readout names the kalos
+    package version that produced it."""
+    from kalos import __version__
+
+    out = ro.build_readout(_demo_sheet(), TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=7500.0))
+    assert out["provenance"]["engine_version"] == __version__

@@ -295,7 +295,8 @@ def _provenance_section(readout: dict[str, Any]) -> str:
     p = readout.get("provenance") or {}
     constants = p.get("constants") or {}
     rows = (
-        _kv("kalos git SHA", p.get("kalos_git_sha"), mono=True)
+        _kv("engine version", p.get("engine_version"))
+        + _kv("kalos git SHA", p.get("kalos_git_sha"), mono=True)
         + _kv("candidate", p.get("candidate"))
         + _kv("alpha", p.get("alpha"))
         + _kv("seed", p.get("seed"))

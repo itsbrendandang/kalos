@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from kalos import __version__ as ENGINE_VERSION
 from kalos.core.conformal import conformal_interval, q_from_residuals
 from kalos.normalize import NormalizationPlan, apply_plan, offline_plan
 from kalos.normalize.units import base_unit_label, canonical_suffix
@@ -712,6 +713,7 @@ def build_readout(
     gate_result = gate(working_df, target_column, process_columns, target, config=working_config)
 
     provenance: dict[str, Any] = {
+        "engine_version": ENGINE_VERSION,
         "kalos_git_sha": _git_sha(),
         "candidate": candidate,
         "raw_upload_sha256": hashlib.sha256(raw_bytes).hexdigest() if raw_bytes is not None else None,
