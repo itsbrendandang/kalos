@@ -150,6 +150,19 @@ batch). Because the sheet comes from an external client, the upload path is guar
   columns in the response. Feature and target names are kept as-is (the owner UI legitimately shows
   drivers like "Methanol").
 
+## The Scale-Up Readout (`POST /api/scale/readout`)
+
+Upload a multi-scale run sheet and a target scale; get back one printable page that either issues a
+predicted level at the target scale with an approximate-coverage interval, or refuses and says why.
+Before it predicts, kalos backtests itself on your own scale ladder (fit on the smaller scales,
+predict the next one up) and only issues a number when that backtest beats two naive baselines and
+the requested step up is within 2x of a step it has already won (warning up to 5x, refusal beyond).
+Nothing is stored server-side; the page prints the SHA-256 of the upload, the engine version, every
+threshold, and the full normalize plan. It predicts a level, not a ranking of recipes at scale.
+Development decision support only; not a GMP or regulatory record. Contract, gate checks and the
+decision table: `docs/SCALE_READOUT.md`. The evidence behind the scale model: `docs/SCALE_EVIDENCE.md`.
+A synthetic 9-scale demo sheet ships in `examples/synthetic_scaleup/`.
+
 ## Install / run
 
 The core install is **torch-free**: `numpy` / `pandas` / `scikit-learn` / `scipy`
