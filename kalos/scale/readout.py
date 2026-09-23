@@ -10,17 +10,29 @@ Readout as the first wedge) for the full decision ledger (R1-R8/D4-D11) this
 module's behavior implements.
 
 PIPELINE (see `build_readout`):
-  1. `gate` - six named checks, in order; the first one that fails stops the
-     pipeline and names itself, so a caller never sees a silent partial
-     answer.
+  1. `gate` - five named checks, in order; the first one that fails stops
+     the pipeline and names itself, so a caller never sees a silent partial
+     answer. Real tech-transfer sheets often have many bench runs and only
+     one or two runs at each large scale, so the gate does not require a
+     minimum run count at every scale, or a minimum row count at the rung
+     scales - it only requires enough distinct scales to form a rung at
+     all. Whether there is enough EVIDENCE to license a number is decided
+     later, by `decide` and `MIN_RESIDUALS`/`MIN_RUNG_N_FOR_LICENSE` below,
+     and insufficient evidence is a REFUSAL, not a 422.
   2. `ladder` - a nested leave-last-scale-out backtest: for every scale
      (except the smallest two, which cannot form a >=2-scale training set),
      fit on every smaller scale and predict that scale, keeping the
      per-row residuals and the naive-baseline comparison. This measures the
      model's demonstrated scale-transfer skill, at whatever step ratios the
-     uploaded sheet actually lets it test.
+     uploaded sheet actually lets it test. A rung's held-out scale may have
+     any number of runs >= 1; a rung with fewer than `MIN_RUNG_N_FOR_LICENSE`
+     runs still contributes its residuals to the pool, but is marked
+     `too_few_to_judge` and can never license the reference step ratio.
   3. `decide` - NUMBER / NUMBER_WITH_WARNING / REFUSAL from the ladder's
-     evidence. A number is NEVER issued without an interval.
+     evidence. A number is NEVER issued without an interval. Insufficient
+     evidence (too few pooled residuals, or no rung that can license a
+     reference) is a REFUSAL that still shows everything computed so far,
+     plus a "what it would take" data plan.
   4. Final fit (`ScaleUpTransferModel`, candidate `v0`, EXPLICIT bounds
      spanning training AND target) -> `predict` at the target -> a
      split-conformal interval calibrated on the ladder's pooled residuals
@@ -56,10 +68,9 @@ from .transfer import DEFAULT_SCALE_FEATURE_CONFIG, ScaleFeatureConfig, ScaleUpT
 # --- named constants (every one of these is printed in the readout's ----- #
 # --- provenance section - see Code Quality review finding 1). ----------- #
 MIN_SCALES = 3
-MIN_RUNS_PER_SCALE = 3
-MIN_RUNG_TARGET_ROWS = 10
 MIN_RUNG_TRAIN_SCALES = 2
 MIN_RUNG_TRAIN_ROWS = 4
+MIN_RUNG_N_FOR_LICENSE = 3
 MAX_DROPPED_FRACTION = 0.20
 HARD_CAP_RATIO = 20.0
 WARN_RATIO_MULT = 2.0
@@ -72,10 +83,9 @@ _ERR_INTERPOLATION = "interpolation is out of scope for this readout"
 
 CONSTANTS: dict[str, float | str] = {
     "MIN_SCALES": MIN_SCALES,
-    "MIN_RUNS_PER_SCALE": MIN_RUNS_PER_SCALE,
-    "MIN_RUNG_TARGET_ROWS": MIN_RUNG_TARGET_ROWS,
     "MIN_RUNG_TRAIN_SCALES": MIN_RUNG_TRAIN_SCALES,
     "MIN_RUNG_TRAIN_ROWS": MIN_RUNG_TRAIN_ROWS,
+    "MIN_RUNG_N_FOR_LICENSE": MIN_RUNG_N_FOR_LICENSE,
     "MAX_DROPPED_FRACTION": MAX_DROPPED_FRACTION,
     "HARD_CAP_RATIO": HARD_CAP_RATIO,
     "WARN_RATIO_MULT": WARN_RATIO_MULT,
@@ -148,20 +158,24 @@ def gate(
     *,
     config: ScaleFeatureConfig = DEFAULT_SCALE_FEATURE_CONFIG,
 ) -> GateResult:
-    """Six named checks, in order; the first failure stops the pipeline.
+    """Five named checks, in order; the first failure stops the pipeline.
 
     1. `required_columns` - every required column is present.
-    2. `min_scales_and_runs` - at least `MIN_SCALES` distinct scales, each
-       with at least `MIN_RUNS_PER_SCALE` runs.
-    3. `min_rung_target_rows` - at least `MIN_RUNG_TARGET_ROWS` rows at the
-       third-smallest scale and above (the rungs `ladder` can actually
-       backtest), so passing this guarantees `ladder` can reach
-       `MIN_RESIDUALS` pooled residuals.
-    4. `non_finite_dropped_fraction` - the fraction of rows dropped for a
+    2. `min_distinct_scales` - at least `MIN_SCALES` distinct scales are
+       present. This is a structural minimum, not an evidence minimum: with
+       fewer than `MIN_SCALES` scales no rung can ever be formed, no matter
+       how many runs exist at each one. There is deliberately no minimum run
+       count per scale and no minimum row count at the rung-eligible
+       scales - real tech-transfer sheets routinely have dozens of bench
+       runs and only one or two runs at each large scale, and that shape is
+       exactly what this readout exists to read honestly. Whether the
+       resulting evidence is enough to license a number is `decide`'s job,
+       not the gate's; too little evidence is a REFUSAL, not a 422.
+    3. `non_finite_dropped_fraction` - the fraction of rows dropped for a
        non-finite required column is at most `MAX_DROPPED_FRACTION`.
-    5. `target_not_interpolation` - the target scale is strictly larger than
+    4. `target_not_interpolation` - the target scale is strictly larger than
        every trained scale.
-    6. `target_ratio_hard_cap` - the target/largest-trained-scale ratio is
+    5. `target_ratio_hard_cap` - the target/largest-trained-scale ratio is
        at most `HARD_CAP_RATIO`.
 
     If `target.process_params`' keys do not exactly match `process_columns`,
@@ -198,37 +212,13 @@ def gate(
     unique_scales = np.unique(scale)
 
     if len(unique_scales) < MIN_SCALES:
+        needed_more = MIN_SCALES - len(unique_scales)
         return GateResult(
             passed=False,
-            failed_check="min_scales_and_runs",
-            detail=f"only {len(unique_scales)} distinct scale(s) present; need at least {MIN_SCALES}",
-            n_rows_dropped=n_dropped,
-            dropped_fraction=dropped_fraction,
-            target_ratio=None,
-        )
-    counts = {float(s): int((scale == s).sum()) for s in unique_scales}
-    under = {s: n for s, n in counts.items() if n < MIN_RUNS_PER_SCALE}
-    if under:
-        return GateResult(
-            passed=False,
-            failed_check="min_scales_and_runs",
-            detail=f"scale(s) below {MIN_RUNS_PER_SCALE} runs: {under}",
-            n_rows_dropped=n_dropped,
-            dropped_fraction=dropped_fraction,
-            target_ratio=None,
-        )
-
-    # rung targets are the third-smallest scale and up (see the gate's
-    # own docstring and R4/D7 in the design's decision ledger).
-    rung_target_scales = sorted(unique_scales)[2:]
-    n_rung_rows = int(sum(counts[float(s)] for s in rung_target_scales))
-    if n_rung_rows < MIN_RUNG_TARGET_ROWS:
-        return GateResult(
-            passed=False,
-            failed_check="min_rung_target_rows",
+            failed_check="min_distinct_scales",
             detail=(
-                f"only {n_rung_rows} row(s) at the third-smallest scale and above; "
-                f"need at least {MIN_RUNG_TARGET_ROWS} so the ladder can reach {MIN_RESIDUALS} residuals"
+                f"only {len(unique_scales)} distinct scale(s) present; need {needed_more} more "
+                f"(at least {MIN_SCALES} distinct scales total)"
             ),
             n_rows_dropped=n_dropped,
             dropped_fraction=dropped_fraction,
@@ -288,7 +278,13 @@ def gate(
 
 @dataclass(frozen=True)
 class RungResult:
-    """One backtested step: predicting `scale_L` from every smaller scale."""
+    """One backtested step: predicting `scale_L` from every smaller scale.
+
+    `too_few_to_judge` (n < `MIN_RUNG_N_FOR_LICENSE`): the held-out scale's
+    residuals still pool into the ladder's evidence, but this rung's own
+    "beats both" verdict is too thin a sample to trust, and it can never
+    license the reference step ratio (see `decide`).
+    """
 
     scale_L: float
     step_ratio: float
@@ -297,6 +293,7 @@ class RungResult:
     naive_mean_mae: float
     naive_nn_mae: float
     beats_both: bool
+    too_few_to_judge: bool
 
 
 @dataclass(frozen=True)
@@ -386,6 +383,7 @@ def ladder(
                 naive_mean_mae=row["naive_mean_mae"],
                 naive_nn_mae=row["naive_nn_mae"],
                 beats_both=bool(row["beats_naive_mean"] and row["beats_naive_nn"]),
+                too_few_to_judge=row["n"] < MIN_RUNG_N_FOR_LICENSE,
             )
         )
         oof = report["oof"]
@@ -453,16 +451,22 @@ def decide(
     trained envelope (that is the whole point of scale-up), so only the
     recipe parameters in `target_process_params` drive the warning.
     """
-    winning_rungs = [r for r in ladder_result.rungs if r.beats_both]
-    if not winning_rungs:
+    # a rung with fewer than MIN_RUNG_N_FOR_LICENSE runs can beat both
+    # baselines by chance on that thin a sample, so it is never allowed to
+    # license the reference step ratio (see RungResult.too_few_to_judge).
+    licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
+    if not licensing_rungs:
         return DecisionResult(
             decision=REFUSAL,
-            reasons=["no rung's own MAE beat both naive baselines"],
+            reasons=[
+                f"no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs beat both naive baselines "
+                "to license a reference step ratio"
+            ],
             reference_ratio=None,
             requested_ratio=requested_ratio,
             out_of_range_params=[],
         )
-    reference_ratio = max(r.step_ratio for r in winning_rungs)
+    reference_ratio = max(r.step_ratio for r in licensing_rungs)
 
     if not ladder_result.pooled_beats_both:
         return DecisionResult(
@@ -518,6 +522,82 @@ def decide(
         requested_ratio=requested_ratio,
         out_of_range_params=out_of_range,
     )
+
+
+# --- "what it would take" data plan ------------------------------------------ #
+
+
+def format_liters_plain(value: float) -> str:
+    """Up to 4 significant digits, never scientific notation - the same
+    convention `kalos.portal.scale_routes._fmt_sig4` renders every scale
+    value with (that module delegates to this function so a data-plan
+    liters figure and a rendered scale figure never disagree). Magnitudes
+    of 10^4 and above print as grouped integers ("40,000"); smaller values
+    keep `{:.4g}` ("0.3333", "7.2", "1000")."""
+    v = float(value)
+    if abs(v) >= 1e4:
+        return f"{v:,.0f}"
+    return f"{v:.4g}"
+
+
+def _smallest_rung_target_scale(clean_df: pd.DataFrame, config: ScaleFeatureConfig) -> float:
+    """The smallest scale that can be a rung target: the first scale
+    (ascending) whose strictly-smaller scales satisfy the rung training
+    minimums (`MIN_RUNG_TRAIN_SCALES` distinct scales, `MIN_RUNG_TRAIN_ROWS`
+    rows) - in practice almost always the third-smallest distinct scale,
+    since that is usually enough rows. Falls back to the third-smallest
+    scale if none qualifies among the scales actually present (`gate`
+    guarantees at least `MIN_SCALES` distinct scales, so index 2 exists)."""
+    scale_col = config.scale_column
+    scales = sorted(float(s) for s in np.unique(np.round(clean_df[scale_col].to_numpy(dtype=float), 6)))
+    for i in range(1, len(scales)):
+        smaller = scales[:i]
+        if len(smaller) < MIN_RUNG_TRAIN_SCALES:
+            continue
+        train_mask = clean_df[scale_col].round(6).isin(smaller)
+        if int(train_mask.sum()) >= MIN_RUNG_TRAIN_ROWS:
+            return scales[i]
+    return scales[2]
+
+
+def _build_data_plan(
+    ladder_result: LadderResult,
+    decision_result: DecisionResult,
+    requested_scale_L: float,
+    clean_df: pd.DataFrame,
+    config: ScaleFeatureConfig,
+) -> list[str]:
+    """Plain, specific "what it would take" lines, computed straight from
+    the same rules `decide` applies - never an invented statistic. Each
+    condition below is checked independently of which reason `decide`
+    itself returned first, so a REFUSAL page shows every gap that applies,
+    not just the one that happened to short-circuit `decide`."""
+    plan: list[str] = []
+    n_residuals = len(ladder_result.residuals)
+    x_scale = _smallest_rung_target_scale(clean_df, config)
+
+    if n_residuals < MIN_RESIDUALS:
+        shortfall = MIN_RESIDUALS - n_residuals
+        plan.append(f"{shortfall} more run(s) at any scale of {format_liters_plain(x_scale)} L or larger")
+        plan.append("runs at the largest scales also build the evidence that licenses larger steps")
+
+    licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
+    if not licensing_rungs:
+        plan.append(
+            f"at least {MIN_RUNG_N_FOR_LICENSE} runs at a single scale above {format_liters_plain(x_scale)} L "
+            "whose backtest beats both baselines"
+        )
+
+    reference = decision_result.reference_ratio
+    if reference is not None and decision_result.requested_ratio > WARN_RATIO_MULT * reference:
+        clean_target_L = requested_scale_L / (WARN_RATIO_MULT * reference)
+        refusal_target_L = requested_scale_L / (REFUSE_RATIO_MULT * reference)
+        plan.append(
+            "for a clean prediction, add runs at "
+            f"{format_liters_plain(clean_target_L)} L or larger; to avoid refusal, "
+            f"{format_liters_plain(refusal_target_L)} L or larger (assuming the reference step holds)"
+        )
+    return plan
 
 
 # --- physics assumption provenance ------------------------------------------- #
@@ -742,6 +822,7 @@ def build_readout(
         "requested_ratio": gate_result.target_ratio,
         "out_of_range_params": [],
         "baseline_comparison": None,
+        "data_plan": [],
         "target_inputs": {
             "scale_L": target.scale_L,
             "agitation_rpm": target.agitation_rpm,
@@ -800,6 +881,9 @@ def build_readout(
         "n_residuals": int(len(ladder_result.residuals)),
     }
 
+    if decision_result.decision in (REFUSAL, NUMBER_WITH_WARNING):
+        base["data_plan"] = _build_data_plan(ladder_result, decision_result, target.scale_L, clean_df, working_config)
+
     if decision_result.decision == REFUSAL:
         return base
 
@@ -817,10 +901,9 @@ def build_readout(
 
 __all__ = [
     "MIN_SCALES",
-    "MIN_RUNS_PER_SCALE",
-    "MIN_RUNG_TARGET_ROWS",
     "MIN_RUNG_TRAIN_SCALES",
     "MIN_RUNG_TRAIN_ROWS",
+    "MIN_RUNG_N_FOR_LICENSE",
     "MAX_DROPPED_FRACTION",
     "HARD_CAP_RATIO",
     "WARN_RATIO_MULT",
@@ -842,4 +925,5 @@ __all__ = [
     "ladder",
     "decide",
     "build_readout",
+    "format_liters_plain",
 ]
