@@ -15,6 +15,11 @@ the sheet's own scale ladder against two naive baselines, then issues a predicti
 approximate-coverage interval, a prediction with named warnings, or a refusal with every reason.
 The license to extrapolate comes only from backtest steps the model actually won. The route is
 stateless: nothing from the upload is written to disk or the database. See `docs/SCALE_READOUT.md`.
+The gate no longer requires a minimum run count per scale, so a sheet with many bench runs and only
+one or two runs at each large scale is read honestly instead of rejected outright. When the evidence
+is too thin (too few pooled residuals, or no rung with enough runs to license a reference step
+ratio), the readout still returns a 200 page showing everything it could compute, plus a "What it
+would take" section stating in plain terms how many more runs, and at what scale, would change that.
 
 ### Added - a synthetic multi-scale demo sheet
 

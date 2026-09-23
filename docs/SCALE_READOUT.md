@@ -30,22 +30,39 @@ To regenerate a readout, upload the same sheet again; the page prints the SHA-25
 
 ## How the decision is made
 
-1. **Gate.** At least 3 distinct scales, at least 3 runs per scale, at least 10 rows at the third-smallest scale and above, at most 20% non-finite rows, a target strictly larger than every trained scale, and a target at most 20x the largest trained scale.
+1. **Gate.** At least 3 distinct scales, at most 20% non-finite rows, a target strictly larger than every trained scale, and a target at most 20x the largest trained scale.
    The first failing check is named in the 422.
+   There is deliberately no minimum run count at any scale and no minimum row count at the rung-eligible scales.
+   Real tech-transfer sheets often have dozens of bench runs and only one or two runs at each large scale, and that shape is exactly what this readout exists to read honestly.
+   Whether there is enough evidence to license a number is decided later, and too little evidence is a refusal, not a 422.
 2. **Ladder backtest.** For each scale whose smaller scales give at least 2 distinct scales and 4 rows, fit on the smaller scales only and predict that scale (`leave_one_scale_out_report(..., include_oof=True, held_out_scales=[k])`).
+   The held-out scale itself may have any number of runs, including just one.
    The one-scale first rung is skipped and listed.
    Every rung uses the same explicit bounds as the final model, so the backtest evaluates the model that produces the number.
    Those bounds span the training scales and the target, so the same sheet can backtest differently for different targets: on the demo sheet the 10 L rung's MAE is 0.126 for a 7,500 L target and 0.603 for a 40,000 L target.
    For a fixed sheet and target the readout is deterministic.
+   A rung with fewer than 3 runs (`MIN_RUNG_N_FOR_LICENSE`) still contributes its residuals to the pooled evidence, but it is marked "too few to judge": its own "beats both baselines" verdict is shown as "too few to judge" rather than yes or no, and it can never set the reference step ratio below.
 3. **Decision.**
-   The reference step ratio is the largest step ratio among rungs whose own MAE beats both naive baselines.
-   - *Prediction issued*: the pooled ladder MAE beats both baselines, there are at least 10 ladder residuals, the target ratio is at most 2x the reference, and every process parameter is inside the trained range.
+   The reference step ratio is the largest step ratio among rungs with at least 3 runs (`MIN_RUNG_N_FOR_LICENSE`) whose own MAE beats both naive baselines.
+   A thin rung (fewer than 3 runs) is never allowed to license the reference, even if it happens to beat both baselines.
+   - *Prediction issued*: the pooled ladder MAE beats both baselines, there are at least 10 pooled residuals, at least one rung licenses a reference, the target ratio is at most 2x that reference, and every process parameter is inside the trained range.
    - *Prediction issued with warnings*: as above, but a process parameter is out of range or the target ratio is 2x to 5x the reference.
-   - *No prediction*: no rung beats both baselines, the pooled ladder does not, fewer than 10 residuals, or the target ratio exceeds 5x the reference.
+   - *No prediction (refusal)*: no rung licenses a reference, the pooled ladder does not beat both baselines, fewer than 10 pooled residuals, or the target ratio exceeds 5x the reference.
+     A refusal is a normal 200 HTML page, not a 422: it still shows every section that could be computed (the rung table, the pooled baseline comparison when any residuals exist, the skipped rungs), plus a "What it would take" section (see below).
 4. **Interval.** Split-conformal on the pooled ladder residuals, alpha 0.1, labeled *approximate coverage*: exchangeability does not hold for an unseen larger scale, so it is not called calibrated.
    A number is never issued without an interval.
 
 All thresholds are named constants in `kalos/scale/readout.py` and are printed on every readout.
+
+### What it would take
+
+A refusal, or a prediction issued with a ratio warning, carries a "What it would take" section: plain, specific lines computed straight from the rules above, never an invented statistic.
+
+- **Too few pooled residuals**: "N more run(s) at any scale of X L or larger", where N is how many more residuals are needed to reach 10, and X is the smallest scale that could become a rung target (in practice almost always the third-smallest distinct scale). A second line notes that runs at the largest scales also build the evidence that licenses larger steps.
+- **No rung licenses a reference**: "at least 3 runs at a single scale above X L whose backtest beats both baselines", using the same X.
+- **Target ratio too far from the reference**: with reference ratio r and target scale T, "for a clean prediction, add runs at T/(2r) L or larger; to avoid refusal, T/(5r) L or larger (assuming the reference step holds)".
+
+These lines only appear when the underlying condition actually applies, and a refusal page can show more than one of them at once.
 
 ## What it does not claim
 
