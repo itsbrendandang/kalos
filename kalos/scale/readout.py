@@ -619,17 +619,62 @@ def _resolved_unit_for(plan: NormalizationPlan, raw_name: str) -> str:
     return "column not in plan"
 
 
+def _unit_label_or_none(plan: NormalizationPlan, raw_name: str) -> str | None:
+    """The plain unit label the normalize plan resolved for `raw_name`
+    (e.g. `"g/L"`), or `None` if no unit conversion happened for that
+    column - used to name the prediction/interval rows with the target
+    column's unit when one is actually resolvable, and just the column
+    name otherwise."""
+    for col in plan.columns:
+        if col.raw_name == raw_name and col.to_base and col.unit_token:
+            suffix = canonical_suffix(col.unit_token)
+            return base_unit_label(suffix) if suffix else str(col.unit_token)
+    return None
+
+
 # --- orchestration ------------------------------------------------------------ #
 
 
+def _utc_now_iso() -> str:
+    """Current UTC time, ISO 8601, seconds precision (no microseconds - a
+    render timestamp does not need sub-second precision, and dropping it
+    keeps every rendered number on the page decimal-free)."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def _git_sha() -> str:
-    """kalos git SHA for provenance. No version/commit mechanism is exposed
-    anywhere in the portal today (see `kalos/portal/app.py`'s `/healthz`
-    docstring), so this falls back to `KALOS_GIT_SHA` if set, else the
-    literal `"unknown"` - never fabricated."""
+    """kalos git SHA for provenance.
+
+    Fallback order: env `KALOS_GIT_SHA` if set; else `git rev-parse --short
+    HEAD` run in this package's repo directory (a 2 second timeout, every
+    error swallowed - a missing `git` binary, no `.git` directory in a
+    deploy image, or a slow filesystem must never fail a readout); else the
+    literal `"unknown"` - never fabricated.
+    """
     import os
 
-    return os.environ.get("KALOS_GIT_SHA", "").strip() or "unknown"
+    env_sha = os.environ.get("KALOS_GIT_SHA", "").strip()
+    if env_sha:
+        return env_sha
+
+    import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else "unknown"
 
 
 def build_readout(
@@ -674,11 +719,16 @@ def build_readout(
         "alpha": ALPHA,
         "seed": seed,
         "normalize_plan_json": plan_json,
+        "normalize_plan_sha256": hashlib.sha256(plan_json.encode("utf-8")).hexdigest(),
+        "normalize_plan_n_columns": len(plan.columns),
         "resolved_scale_unit": _resolved_unit_for(plan, working_config.scale_column),
+        "target_column_unit": _unit_label_or_none(plan, target_column),
         "constants": dict(CONSTANTS),
     }
 
     base: dict[str, Any] = {
+        "generated_at_utc": _utc_now_iso(),
+        "target_column": target_column,
         "decision": None,
         "reasons": [],
         "prediction": None,

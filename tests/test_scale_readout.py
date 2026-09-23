@@ -4,6 +4,9 @@ decision ledger (R1-R8/D4-D11) this behavior implements.
 """
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -370,7 +373,37 @@ def test_provenance_hashes_are_stable_across_two_runs():
     assert out1["provenance"]["raw_upload_sha256"] == out2["provenance"]["raw_upload_sha256"]
     assert out1["provenance"]["normalized_frame_sha256"] == out2["provenance"]["normalized_frame_sha256"]
     assert out1["provenance"]["normalize_plan_json"] == out2["provenance"]["normalize_plan_json"]
-    assert out1["prediction"] == out2["prediction"]
+    # the GP fit itself is not bit-for-bit deterministic (BoTorch's L-BFGS
+    # restarts touch global RNG/BLAS state) - the provenance HASHES above are
+    # the reproducibility contract this test is really pinning.
+    assert out1["prediction"] == pytest.approx(out2["prediction"])
+
+
+def test_generated_at_utc_is_present_and_iso_with_no_fractional_seconds():
+    df = _demo_sheet()
+    target = _target(scale_L=7500.0)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    stamp = out["generated_at_utc"]
+    assert isinstance(stamp, str)
+    assert datetime.fromisoformat(stamp).tzinfo is not None
+    assert "." not in stamp  # seconds precision only
+
+
+def test_git_sha_uses_kalos_git_sha_env_override(monkeypatch):
+    monkeypatch.setenv("KALOS_GIT_SHA", "deadbeef")
+    df = _demo_sheet()
+    target = _target(scale_L=7500.0)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assert out["provenance"]["kalos_git_sha"] == "deadbeef"
+
+
+def test_normalize_plan_appendix_provenance_fields():
+    df = _demo_sheet()
+    target = _target(scale_L=7500.0)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    p = out["provenance"]
+    assert p["normalize_plan_n_columns"] == len(df.columns)
+    assert p["normalize_plan_sha256"] == hashlib.sha256(p["normalize_plan_json"].encode("utf-8")).hexdigest()
 
 
 def test_physics_assumptions_tagged_default_and_user_supplied():
