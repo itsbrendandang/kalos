@@ -355,7 +355,9 @@ def render_readout_html(readout: dict[str, Any]) -> str:
     )
     intended_use = f'<p class="intended-use">{_esc(INTENDED_USE_STATEMENT)}</p>'
     body = page1 + intended_use + _provenance_appendix(readout)
-    generated_at = _esc(readout.get("generated_at_utc", ""))
+    # The dict keeps ISO 8601 ("...T18:32:17+00:00"); the page shows
+    # "2026-09-23 18:32:17" next to the template's own "UTC" label.
+    generated_at = _esc(str(readout.get("generated_at_utc", "")).replace("T", " ").removesuffix("+00:00"))
     return _TEMPLATE.substitute(body=body, generated_at=generated_at)
 
 

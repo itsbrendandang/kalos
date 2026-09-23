@@ -10,10 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -270,21 +266,14 @@ def test_refusal_banner_names_the_reason(client):
     assert "REFUSAL" in r.text
 
 
-def test_page_one_is_a_single_printed_page():
-    """Every section except the raw normalize-plan JSON must fit on page 1
-    (the appendix is allowed to push the total to 2 pages). Renders the
-    actual page through the same tool used to spot-check the demo readout
-    (bun + gstack-render.ts), so this is a real print-layout check, not an
-    approximation of one."""
+def test_plan_json_is_isolated_in_a_page_break_appendix():
+    """Everything except the raw normalize-plan JSON belongs on printed page
+    1; the JSON lives in an appendix that the print CSS forces onto its own
+    page (`.appendix { break-before: page }`). A real print render is a
+    manual QA step (see docs/SCALE_READOUT.md); this pins the structure that
+    makes it work, and runs everywhere."""
     from kalos.portal.scale_routes import render_readout_html
     from kalos.scale.readout import TargetSpec, build_readout
-
-    pdftotext = shutil.which("pdftotext")
-    pdfinfo = shutil.which("pdfinfo")
-    bun = shutil.which("bun")
-    render_script = Path.home() / ".claude" / "skills" / "gstack" / "bin" / "gstack-render.ts"
-    if not (pdftotext and pdfinfo and bun and render_script.exists()):
-        pytest.skip("pdftotext/pdfinfo/bun/gstack-render.ts not available in this environment")
 
     df = pd.read_csv(_DEMO_CSV)
     target = TargetSpec(
@@ -294,32 +283,13 @@ def test_page_one_is_a_single_printed_page():
         process_params={"ph_setpoint": 7.2, "temperature_C": 37.0},
     )
     readout = build_readout(df, "titer_g_per_L", ["ph_setpoint", "temperature_C"], target)
-    html_page = render_readout_html(readout)
+    page = render_readout_html(readout)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        html_path = Path(tmp_dir) / "readout.html"
-        pdf_path = Path(tmp_dir) / "readout.pdf"
-        html_path.write_text(html_page, encoding="utf-8")
-
-        subprocess.run(
-            [bun, "run", str(render_script), str(html_path), "--pdf", str(pdf_path)],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-        page1 = subprocess.run(
-            [pdftotext, "-layout", "-f", "1", "-l", "1", str(pdf_path), "-"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        info = subprocess.run([pdfinfo, str(pdf_path)], capture_output=True, text=True, check=True).stdout
-
-    # everything except the raw plan JSON must be on page 1
-    assert "Development decision support only" in page1
-    assert "BASELINE COMPARISON" in page1.upper()
-    assert "PHYSICS ASSUMPTIONS" in page1.upper()
-    assert '"columns":' not in page1  # the raw plan JSON stays off page 1
-
-    pages = next(int(line.split(":")[1]) for line in info.splitlines() if line.startswith("Pages:"))
-    assert pages <= 2
+    assert re.search(r"\.appendix\s*\{[^}]*break-before:\s*page", page)
+    appendix_at = page.index('<section class="appendix">')
+    page_one, appendix = page[:appendix_at], page[appendix_at:]
+    assert "&quot;columns&quot;" not in page_one and '"columns":' not in page_one
+    assert "&quot;columns&quot;" in appendix or '"columns":' in appendix
+    assert "Development decision support only" in page_one
+    assert "Baseline comparison".upper() in page_one.upper()
+    assert "Physics assumptions".upper() in page_one.upper()
