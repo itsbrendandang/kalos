@@ -63,15 +63,46 @@ def _demo_sheet() -> pd.DataFrame:
     return pd.read_csv("examples/synthetic_scaleup/synthetic_scaleup.csv")
 
 
-# A sheet with exactly 3 scales, 10 rows each - meets every gate minimum
-# (>=3 scales, >=3 runs/scale, >=10 rows at the third-smallest+ scale, since
-# 100.0 is both the third-smallest AND the largest here).
+# A sheet with exactly 3 scales, 10 rows each - meets the gate's only
+# structural minimum (>=3 distinct scales; there is no per-scale run-count
+# or rung-row-count requirement any more, see kalos/scale/readout.py).
 _MINIMAL_SCALES = [1.0, 10.0, 100.0]
 _MINIMAL_N = 10
 
 
+def _sparse_sheet() -> pd.DataFrame:
+    """Real tech-transfer sheets look like this: many bench runs, then one
+    or two runs at each large scale. 96 runs at the smallest scale, 2 at
+    the next, then a single run each at three larger scales - the exact
+    shape the removed `min_scales_and_runs`/`min_rung_target_rows` gate
+    checks used to reject with a bare 422 before any evidence was
+    computed."""
+    scales = [0.003, 3.0, 15.0, 3000.0, 35000.0]
+    counts = [96, 2, 1, 1, 1]
+    rng = np.random.default_rng(_RNG_SEED)
+    rows = []
+    for s, n in zip(scales, counts):
+        for _ in range(n):
+            ph = float(rng.uniform(6.9, 7.1))
+            temp = float(rng.uniform(36.5, 37.0))
+            rpm = float(rng.uniform(80, 250))
+            airflow = float(max(s * 0.05, 0.05) * rng.uniform(0.8, 1.2))
+            titer = 5.0 - 0.2 * np.log10(s + 1e-6) + float(rng.normal(0, 0.05))
+            rows.append(
+                {
+                    "scale_L": s,
+                    "agitation_rpm": rpm,
+                    "airflow_L_per_min": airflow,
+                    "ph_setpoint": ph,
+                    "temperature_C": temp,
+                    "titer_g_per_L": titer,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------------------------------- #
-# gate: each of the six checks failing alone names that check
+# gate: each of the five checks failing alone names that check
 # --------------------------------------------------------------------------- #
 
 
@@ -94,27 +125,18 @@ def test_gate_fails_too_few_distinct_scales():
     df = _make_sheet([1.0, 10.0], _MINIMAL_N)
     result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=200.0))
     assert not result.passed
-    assert result.failed_check == "min_scales_and_runs"
+    assert result.failed_check == "min_distinct_scales"
+    # the detail says exactly how many MORE distinct scales are needed.
+    assert "1 more" in result.detail
 
 
-def test_gate_fails_too_few_runs_at_one_scale():
-    df = _make_sheet(_MINIMAL_SCALES, _MINIMAL_N)
-    # thin one scale down below MIN_RUNS_PER_SCALE
-    keep = df[df["scale_L"] != 10.0].index.tolist() + df[df["scale_L"] == 10.0].index[:2].tolist()
-    df = df.loc[keep]
-    result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=200.0))
-    assert not result.passed
-    assert result.failed_check == "min_scales_and_runs"
-
-
-def test_gate_fails_too_few_rung_target_rows():
-    # 3 scales but only MIN_RUNS_PER_SCALE (3) rows each: passes the basic
-    # scale/run minimum but the third-smallest-and-up row count (3) is
-    # below MIN_RUNG_TARGET_ROWS (10).
-    df = _make_sheet(_MINIMAL_SCALES, ro.MIN_RUNS_PER_SCALE)
-    result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=200.0))
-    assert not result.passed
-    assert result.failed_check == "min_rung_target_rows"
+def test_gate_passes_a_sheet_with_only_one_run_at_each_large_scale():
+    """The removed per-scale run-count check used to reject this sheet
+    outright; it is now the gate's whole reason for existing in this
+    shape - real tech-transfer data (see `_sparse_sheet`)."""
+    df = _sparse_sheet()
+    result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=35000.0 * 1.2))
+    assert result.passed, result.detail
 
 
 def test_gate_fails_non_finite_dropped_fraction():
@@ -161,19 +183,14 @@ def test_gate_rejects_mismatched_process_params():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "scales,n_per_scale",
-    [
-        ([1.0, 10.0, 100.0], 10),
-        ([1.0, 3.0, 10.0, 30.0], 6),
-        ([1.0, 5.0, 25.0, 125.0, 625.0], 4),
-    ],
-)
-def test_gate_passing_sheets_yield_at_least_min_residuals(scales, n_per_scale):
-    """Property: any sheet that clears the gate lets the ladder reach at
-    least MIN_RESIDUALS pooled residuals (R4/D7's whole point)."""
-    df = _make_sheet(scales, n_per_scale)
-    target = _target(scale_L=scales[-1] * 1.5)
+def test_gate_passing_does_not_guarantee_min_residuals():
+    """Unlike before, the gate no longer enforces a minimum row count at
+    the rung-eligible scales, so passing the gate no longer guarantees the
+    ladder reaches MIN_RESIDUALS pooled residuals - that is now `decide`'s
+    job, and too few residuals is a REFUSAL, not a 422 (see
+    `_sparse_sheet` and the `build_readout` tests below)."""
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
     gate_result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
     assert gate_result.passed, gate_result.detail
 
@@ -182,7 +199,7 @@ def test_gate_passing_sheets_yield_at_least_min_residuals(scales, n_per_scale):
     bounds = np.vstack([np.minimum(X.min(axis=0), Xt.min(axis=0)), np.maximum(X.max(axis=0), Xt.max(axis=0))])
 
     ladder_result = ro.ladder(gate_result.clean_df, TARGET_COLUMN, PROCESS_COLUMNS, bounds)
-    assert len(ladder_result.residuals) >= ro.MIN_RESIDUALS
+    assert len(ladder_result.residuals) < ro.MIN_RESIDUALS
 
 
 def test_one_scale_first_rung_is_skipped_and_reported():
@@ -236,15 +253,16 @@ def test_ladder_and_final_fit_use_the_same_bounds(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def _rung(scale_L: float, step_ratio: float, beats_both: bool, mae: float = 0.1) -> ro.RungResult:
+def _rung(scale_L: float, step_ratio: float, beats_both: bool, mae: float = 0.1, n: int = 10) -> ro.RungResult:
     return ro.RungResult(
         scale_L=scale_L,
         step_ratio=step_ratio,
-        n=10,
+        n=n,
         mae=mae,
         naive_mean_mae=mae + 1.0,
         naive_nn_mae=mae + 1.0,
         beats_both=beats_both,
+        too_few_to_judge=n < ro.MIN_RUNG_N_FOR_LICENSE,
     )
 
 
@@ -327,6 +345,27 @@ def test_all_rungs_losing_refuses():
     lr = _ladder_result([_rung(10.0, 3.0, False), _rung(100.0, 10.0, False)])
     result = ro.decide(lr, requested_ratio=2.0, target_process_params={"ph_setpoint": 7.0}, trained_param_ranges={"ph_setpoint": (6.5, 7.5)})
     assert result.decision == ro.REFUSAL
+
+
+def test_a_winning_rung_with_too_few_runs_cannot_license_a_reference():
+    """A rung with n=2 that beats both baselines still cannot set the
+    reference step ratio (MIN_RUNG_N_FOR_LICENSE=3) - the only rung here
+    wins but is too thin, so there is no license at all."""
+    lr = _ladder_result([_rung(10.0, 3.0, True, n=2)])
+    result = ro.decide(lr, requested_ratio=2.0, target_process_params={"ph_setpoint": 7.0}, trained_param_ranges={"ph_setpoint": (6.5, 7.5)})
+    assert result.decision == ro.REFUSAL
+    assert result.reference_ratio is None
+
+
+def test_a_winning_rung_with_too_few_runs_is_skipped_in_favor_of_a_licensing_one():
+    """Even when a larger, thin (n=2) rung wins, the reference must come
+    from the smaller rung that actually has enough runs to license it."""
+    thin_but_winning = _rung(1000.0, step_ratio=10.0, beats_both=True, n=2)
+    licensing = _rung(100.0, step_ratio=3.0, beats_both=True, n=3)
+    lr = _ladder_result([licensing, thin_but_winning])
+    result = ro.decide(lr, requested_ratio=4.0, target_process_params={"ph_setpoint": 7.0}, trained_param_ranges={"ph_setpoint": (6.5, 7.5)})
+    assert result.reference_ratio == 3.0
+    assert result.decision != ro.REFUSAL
 
 
 # --------------------------------------------------------------------------- #
@@ -433,3 +472,87 @@ def test_provenance_carries_engine_version_like_api_run():
 
     out = ro.build_readout(_demo_sheet(), TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=7500.0))
     assert out["provenance"]["engine_version"] == __version__
+
+
+# --------------------------------------------------------------------------- #
+# sparse tech-transfer sheet: 200 REFUSAL, not a 422, with a data plan
+# --------------------------------------------------------------------------- #
+
+
+def test_sparse_sheet_is_a_refusal_not_a_gate_failure():
+    """The gate passes (>=3 distinct scales is the only structural
+    minimum); the ladder's own evidence is what's too thin, so this is a
+    REFUSAL from `decide`, never a 422 from `gate`."""
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assert out["gate"]["passed"]
+    assert out["decision"] == ro.REFUSAL
+    assert out["prediction"] is None
+    assert out["interval"] is None
+
+
+def test_sparse_sheet_rungs_with_n_1_are_too_few_to_judge():
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    rungs = out["rungs"]
+    assert rungs, "expected at least one evaluated rung"
+    assert all(r["n"] == 1 for r in rungs)
+    assert all(r["too_few_to_judge"] for r in rungs)
+
+
+def test_sparse_sheet_pooled_residuals_equal_the_rung_rows():
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assert out["baseline_comparison"]["n_residuals"] == sum(r["n"] for r in out["rungs"])
+
+
+def test_sparse_sheet_data_plan_states_the_residual_shortfall():
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+    n_residuals = out["baseline_comparison"]["n_residuals"]
+    expected_n = ro.MIN_RESIDUALS - n_residuals
+    # X is the third-smallest distinct scale (15.0 L): the first two scales
+    # (0.003 L x96, 3.0 L x2) already clear the rung training minimums.
+    expected_x = ro.format_liters_plain(15.0)
+
+    assert expected_n > 0
+    plan = out["data_plan"]
+    assert any(f"{expected_n} more run" in line and f"{expected_x} L or larger" in line for line in plan)
+    assert any("evidence that licenses larger steps" in line for line in plan)
+
+
+def test_sparse_sheet_data_plan_states_the_no_licensing_rung_requirement():
+    df = _sparse_sheet()
+    target = _target(scale_L=35000.0 * 1.2)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    plan = out["data_plan"]
+    assert any(
+        f"at least {ro.MIN_RUNG_N_FOR_LICENSE} runs" in line and "beats both baselines" in line for line in plan
+    )
+
+
+def test_ratio_warning_data_plan_has_correct_clean_and_refusal_targets():
+    """A target ratio between 2x and 5x the reference step ratio: the data
+    plan's two liters figures are exactly T/(2r) and T/(5r)."""
+    df = _demo_sheet()
+    target_scale = 5000.0 * 10.0  # 10x the largest trained scale (5000 L)
+    target = _target(scale_L=target_scale)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assert out["decision"] == ro.NUMBER_WITH_WARNING, out["reasons"]
+    reference = out["reference_ratio"]
+    assert reference is not None
+    requested = out["requested_ratio"]
+    assert requested > 2.0 * reference  # otherwise this fixture doesn't exercise the ratio line
+
+    clean_target_L = target_scale / (2.0 * reference)
+    refusal_target_L = target_scale / (5.0 * reference)
+    plan = out["data_plan"]
+    assert any(
+        ro.format_liters_plain(clean_target_L) in line and ro.format_liters_plain(refusal_target_L) in line
+        for line in plan
+    ), plan
