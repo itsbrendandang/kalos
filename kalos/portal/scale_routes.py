@@ -128,6 +128,17 @@ _FMT_RATIO = "{:.2f}x"
 _FMT_SIG4 = "{:.4g}"
 
 
+def _fmt_sig4(value: float) -> str:
+    """Up to 4 significant digits, never scientific notation: plant scales
+    reach 10^4-10^5 L, and "4e+04 L" is not something to put in front of a
+    process lead. Magnitudes of 10^4 and above print as grouped integers
+    ("40,000"); smaller values keep `{:.4g}` ("0.3333", "7.2", "1000")."""
+    v = float(value)
+    if abs(v) >= 1e4:
+        return f"{v:,.0f}"
+    return _FMT_SIG4.format(v)
+
+
 def _kv(label: str, value: Any, *, mono: bool = False) -> str:
     cls = "kv kv-hash" if mono else "kv"
     return f'<div class="{cls}"><span class="k">{_esc(label)}</span><span class="v">{_esc(value)}</span></div>'
@@ -136,12 +147,12 @@ def _kv(label: str, value: Any, *, mono: bool = False) -> str:
 def _target_inputs_section(readout: dict[str, Any]) -> str:
     inputs = readout["target_inputs"]
     rows = [
-        ("Target scale", f"{_FMT_SIG4.format(inputs['scale_L'])} L"),
-        ("Agitation", f"{_FMT_SIG4.format(inputs['agitation_rpm'])} rpm"),
-        ("Airflow", f"{_FMT_SIG4.format(inputs['airflow_L_per_min'])} L/min"),
+        ("Target scale", f"{_fmt_sig4(inputs['scale_L'])} L"),
+        ("Agitation", f"{_fmt_sig4(inputs['agitation_rpm'])} rpm"),
+        ("Airflow", f"{_fmt_sig4(inputs['airflow_L_per_min'])} L/min"),
     ]
     for name, value in inputs["process_params"].items():
-        rows.append((name, _FMT_SIG4.format(value)))
+        rows.append((name, _fmt_sig4(value)))
     kvs = "".join(_kv(k, v) for k, v in rows)
     return f'<h2>Target inputs</h2><div class="grid">{kvs}</div>'
 
@@ -154,7 +165,7 @@ def _prediction_labels(readout: dict[str, Any]) -> tuple[str, str]:
     unit = (readout.get("provenance") or {}).get("target_column_unit")
     unit_part = f" ({unit})" if unit else ""
     scale = readout["target_inputs"]["scale_L"]
-    subject = f"{target_column}{unit_part} at {_FMT_SIG4.format(scale)} L"
+    subject = f"{target_column}{unit_part} at {_fmt_sig4(scale)} L"
     return f"Predicted {subject}", f"Interval ({readout['interval_label']}) for {subject}"
 
 
@@ -204,7 +215,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
     if rungs:
         rows = "".join(
             "<tr>"
-            f'<td>{_FMT_SIG4.format(r["scale_L"])} L</td><td>{_FMT_RATIO.format(r["step_ratio"])}</td><td>{r["n"]}</td>'
+            f'<td>{_fmt_sig4(r["scale_L"])} L</td><td>{_FMT_RATIO.format(r["step_ratio"])}</td><td>{r["n"]}</td>'
             f'<td>{_FMT_METRIC.format(r["mae"])}</td><td>{_FMT_METRIC.format(r["naive_mean_mae"])}</td>'
             f'<td>{_FMT_METRIC.format(r["naive_nn_mae"])}</td>'
             f'<td>{"yes" if r["beats_both"] else "no"}</td>'
@@ -220,7 +231,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
         parts.append('<p class="muted">No rungs were evaluated.</p>')
     if skipped:
         items = "".join(
-            f'<li>scale {_FMT_SIG4.format(s["scale_L"])} L skipped: {_esc(s["reason"])}</li>' for s in skipped
+            f'<li>scale {_fmt_sig4(s["scale_L"])} L skipped: {_esc(s["reason"])}</li>' for s in skipped
         )
         parts.append(f'<p class="muted">Skipped rungs:</p><ul class="reasons">{items}</ul>')
     return "".join(parts)
@@ -260,7 +271,7 @@ def _baseline_section(readout: dict[str, Any]) -> str:
 def _physics_section(readout: dict[str, Any]) -> str:
     assumptions = readout.get("physics_assumptions") or {}
     rows = "".join(
-        _kv(f"{name} ({info['source']})", _FMT_SIG4.format(info["value"]))
+        _kv(f"{name} ({info['source']})", _fmt_sig4(info["value"]))
         for name, info in sorted(assumptions.items())
     )
     return f'<h2>Physics assumptions</h2><div class="grid">{rows}</div>'
@@ -269,7 +280,7 @@ def _physics_section(readout: dict[str, Any]) -> str:
 def _format_const_value(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, float):
         return str(value)
-    return _FMT_SIG4.format(value)
+    return _fmt_sig4(value)
 
 
 def _constants_table(constants: dict[str, Any], *, per_row: int = 4) -> str:

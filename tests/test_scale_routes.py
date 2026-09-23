@@ -293,3 +293,14 @@ def test_plan_json_is_isolated_in_a_page_break_appendix():
     assert "Development decision support only" in page_one
     assert "Baseline comparison".upper() in page_one.upper()
     assert "Physics assumptions".upper() in page_one.upper()
+
+
+def test_large_scales_never_render_in_scientific_notation():
+    """A 40,000 L target must read "40,000 L", not "4e+04 L"."""
+    from kalos.portal.scale_routes import _fmt_sig4
+
+    assert _fmt_sig4(40000.0) == "40,000"
+    assert _fmt_sig4(125000.0) == "125,000"
+    assert _fmt_sig4(7500.0) == "7500"
+    assert _fmt_sig4(1.0 / 3.0) == "0.3333"
+    assert "e+" not in _fmt_sig4(1e6)
