@@ -17,3 +17,5 @@ models/
 .gstack/
 # git worktrees live here; committing one adds a phantom gitlink
 .claude/worktrees/
+# host-mounted DB backups from deploy/docker-compose.yaml (./backups:/backups); real data, never commit
+deploy/backups/
