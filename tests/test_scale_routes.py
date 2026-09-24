@@ -370,3 +370,17 @@ def test_sparse_tech_transfer_sheet_returns_a_200_refusal_page(client):
     assert "too few to judge" in page
     # the pooled verdict is withheld on thin evidence
     assert "beats both baselines</span><span class=\"v\">yes" not in page
+
+
+def test_scale_only_page_lists_unused_constants_without_values():
+    """Scale-only mode must not print values for physics constants the model
+    never saw; it names them once on a single line instead."""
+    from kalos.portal.scale_routes import render_readout_html
+    from kalos.scale.readout import TargetSpec, build_readout
+
+    df = pd.read_csv(_DEMO_CSV).drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = TargetSpec(scale_L=7500.0, process_params={"ph_setpoint": 7.2, "temperature_C": 37.0})
+    page = render_readout_html(build_readout(df, "titer_g_per_L", ["ph_setpoint", "temperature_C"], target))
+    assert "Not used by the scale-only model:" in page
+    assert "power_number" in page
+    assert "(not used" not in page  # no per-constant "not used" rows with values

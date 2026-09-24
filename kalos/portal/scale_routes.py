@@ -328,13 +328,20 @@ def _data_plan_section(readout: dict[str, Any]) -> str:
     return f'<h2>What it would take</h2><ul class="data-plan">{items}</ul>'
 
 
+_NOT_USED_PREFIX = "not used"
+
+
 def _physics_section(readout: dict[str, Any]) -> str:
+    """Assumptions the model actually used, each with its value and source.
+    Constants the chosen feature set ignores (scale-only mode) are named on
+    one line without values: printing a value for an input the model never
+    saw would suggest it mattered."""
     assumptions = readout.get("physics_assumptions") or {}
-    rows = "".join(
-        _kv(f"{name} ({info['source']})", _fmt_sig4(info["value"]))
-        for name, info in sorted(assumptions.items())
-    )
-    return f'<h2>Physics assumptions</h2><div class="grid">{rows}</div>'
+    used = {n: i for n, i in assumptions.items() if not str(i["source"]).startswith(_NOT_USED_PREFIX)}
+    unused = sorted(n for n in assumptions if n not in used)
+    rows = "".join(_kv(f"{name} ({info['source']})", _fmt_sig4(info["value"])) for name, info in sorted(used.items()))
+    note = f'<p class="unused-note">Not used by the scale-only model: {_esc(", ".join(unused))}</p>' if unused else ""
+    return f'<h2>Physics assumptions</h2><div class="grid">{rows}</div>{note}'
 
 
 def _format_const_value(value: Any) -> str:
