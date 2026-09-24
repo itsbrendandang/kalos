@@ -15,8 +15,10 @@ Not validated under 21 CFR Part 11.
 `POST /api/scale/readout` (requires the `write` scope), multipart form:
 
 - `file`: the run sheet (CSV or XLSX), parsed by the same hardened uploader as `/api/run`.
-  One row per run with the process parameters, `scale_L`, `agitation_rpm`, `airflow_L_per_min`, and the response column.
-- `target`: JSON with `scale_L`, `agitation_rpm`, `airflow_L_per_min`, `target_column`, `process_params` (a dict whose keys are the process columns), and optional `physics_overrides` (any `ScaleFeatureConfig` field).
+  One row per run with the process parameters, `scale_L`, the response column, and - optionally - `agitation_rpm` and `airflow_L_per_min`.
+- `target`: JSON with `scale_L`, `target_column`, `process_params` (a dict whose keys are the process columns), optional `physics_overrides` (any `ScaleFeatureConfig` field), and optional `agitation_rpm` / `airflow_L_per_min`.
+  Whether `agitation_rpm` and `airflow_L_per_min` are actually required depends on the sheet, not the target JSON: see "Scale-only fallback" below.
+  When they are required and missing, the response is a `422` `invalid_target` naming which one.
 
 Responses:
 
@@ -27,6 +29,25 @@ Responses:
 
 Nothing is stored on the server.
 To regenerate a readout, upload the same sheet again; the page prints the SHA-256 of the raw upload so anyone holding the file can verify it.
+
+### Scale-only fallback
+
+Real run sheets often do not record `agitation_rpm` or `airflow_L_per_min`.
+Kalos reads the uploaded sheet's own columns to choose a feature set.
+If the sheet has both `agitation_rpm` and `airflow_L_per_min`, it uses the "physics" feature set, unchanged from before this fallback existed.
+The target JSON must then supply both values, or the response is a `422` `invalid_target` naming whichever is missing.
+If either column is absent, it falls back to the "scale_only" feature set and names which column(s) are missing.
+
+What scale_only models: the two physics features computable from scale alone, `log_volume_ratio` and `hydrostatic_pressure_mmHg`.
+These carry the volume and hydrostatic-pressure scale effects.
+
+What scale_only does not model: mixing (power per volume) and oxygen transfer (kLa), since both depend on agitation and airflow.
+The page shows a neutral note under the decision banner naming exactly which inputs are missing.
+
+How it is chosen: automatically, from the sheet, never from the target JSON.
+In scale_only mode, `agitation_rpm` and `airflow_L_per_min` in the target are optional.
+A value supplied anyway is accepted but ignored, since the sheet gives the model nothing to relate it to, and the page marks it "ignored: sheet does not record them" (or "not recorded" when the field was left unset).
+The physics assumptions section only reports the assumptions scale_only actually uses (the geometry fields `log_volume_ratio` and `hydrostatic_pressure_mmHg` need, plus `reference_scale_L`); the power-number and van't Riet kLa constants are marked "not used (scale-only)".
 
 ## How the decision is made
 

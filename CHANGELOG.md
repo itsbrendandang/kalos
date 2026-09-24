@@ -20,6 +20,9 @@ one or two runs at each large scale is read honestly instead of rejected outrigh
 is too thin (too few pooled residuals, or no rung with enough runs to license a reference step
 ratio), the readout still returns a 200 page showing everything it could compute, plus a "What it
 would take" section stating in plain terms how many more runs, and at what scale, would change that.
+`agitation_rpm`/`airflow_L_per_min` are now optional on the sheet and target: when a sheet does not
+record one or both, the readout falls back to a scale-only feature set instead of a 422, and the
+page names exactly what is not modeled as a result.
 
 ### Added - a synthetic multi-scale demo sheet
 
