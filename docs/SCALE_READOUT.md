@@ -47,7 +47,7 @@ To regenerate a readout, upload the same sheet again; the page prints the SHA-25
    A thin rung (fewer than 3 runs) is never allowed to license the reference, even if it happens to beat both baselines.
    - *Prediction issued*: the pooled ladder MAE beats both baselines, there are at least 10 pooled residuals, at least one rung licenses a reference, the target ratio is at most 2x that reference, and every process parameter is inside the trained range.
    - *Prediction issued with warnings*: as above, but a process parameter is out of range or the target ratio is 2x to 5x the reference.
-   - *No prediction (refusal)*: no rung licenses a reference, the pooled ladder does not beat both baselines, fewer than 10 pooled residuals, or the target ratio exceeds 5x the reference.
+   - *No prediction (refusal)*: no rung licenses a reference, the pooled ladder does not beat both baselines (judged only with at least 10 residuals), fewer than 10 pooled residuals, or the target ratio exceeds 5x the reference. Every condition that applies is listed, not just the first.
      A refusal is a normal 200 HTML page, not a 422: it still shows every section that could be computed (the rung table, the pooled baseline comparison when any residuals exist, the skipped rungs), plus a "What it would take" section (see below).
 4. **Interval.** Split-conformal on the pooled ladder residuals, alpha 0.1, labeled *approximate coverage*: exchangeability does not hold for an unseen larger scale, so it is not called calibrated.
    A number is never issued without an interval.
@@ -59,7 +59,7 @@ All thresholds are named constants in `kalos/scale/readout.py` and are printed o
 A refusal, or a prediction issued with a ratio warning, carries a "What it would take" section: plain, specific lines computed straight from the rules above, never an invented statistic.
 
 - **Too few pooled residuals**: "N more run(s) at any scale of X L or larger", where N is how many more residuals are needed to reach 10, and X is the smallest scale that could become a rung target (in practice almost always the third-smallest distinct scale). A second line notes that runs at the largest scales also build the evidence that licenses larger steps.
-- **No rung licenses a reference**: "at least 3 runs at a single scale above X L whose backtest beats both baselines", using the same X.
+- **No rung licenses a reference**: "at least 3 runs at a single scale of X L or larger whose backtest beats both baselines", using the same X.
 - **Target ratio too far from the reference**: with reference ratio r and target scale T, "for a clean prediction, add runs at T/(2r) L or larger; to avoid refusal, T/(5r) L or larger (assuming the reference step holds)".
 
 These lines only appear when the underlying condition actually applies, and a refusal page can show more than one of them at once.

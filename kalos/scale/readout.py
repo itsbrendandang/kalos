@@ -451,50 +451,43 @@ def decide(
     trained envelope (that is the whole point of scale-up), so only the
     recipe parameters in `target_process_params` drive the warning.
     """
+    # Every refusal condition that applies is reported, not just the first:
+    # a prospect reading a refusal needs the whole list to plan more runs.
+    refusal_reasons: list[str] = []
+    n_residuals = len(ladder_result.residuals)
+    if n_residuals < MIN_RESIDUALS:
+        refusal_reasons.append(f"only {n_residuals} pooled ladder residual(s); need at least {MIN_RESIDUALS}")
+
     # a rung with fewer than MIN_RUNG_N_FOR_LICENSE runs can beat both
     # baselines by chance on that thin a sample, so it is never allowed to
     # license the reference step ratio (see RungResult.too_few_to_judge).
     licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
-    if not licensing_rungs:
-        return DecisionResult(
-            decision=REFUSAL,
-            reasons=[
-                f"no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs beat both naive baselines "
-                "to license a reference step ratio"
-            ],
-            reference_ratio=None,
-            requested_ratio=requested_ratio,
-            out_of_range_params=[],
+    reference_ratio = max((r.step_ratio for r in licensing_rungs), default=None)
+    if reference_ratio is None:
+        refusal_reasons.append(
+            f"no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs beat both naive baselines "
+            "to license a reference step ratio"
         )
-    reference_ratio = max(r.step_ratio for r in licensing_rungs)
 
-    if not ladder_result.pooled_beats_both:
+    # the pooled verdict is only a verdict with enough residuals behind it
+    if n_residuals >= MIN_RESIDUALS and not ladder_result.pooled_beats_both:
+        refusal_reasons.append("pooled ladder MAE does not beat both naive baselines")
+
+    if reference_ratio is not None and requested_ratio > REFUSE_RATIO_MULT * reference_ratio:
+        refusal_reasons.append(
+            f"target ratio {requested_ratio:.2f}x exceeds {REFUSE_RATIO_MULT:.0f}x the reference "
+            f"step ratio {reference_ratio:.2f}x"
+        )
+
+    if refusal_reasons:
         return DecisionResult(
             decision=REFUSAL,
-            reasons=["pooled ladder MAE does not beat both naive baselines"],
+            reasons=refusal_reasons,
             reference_ratio=reference_ratio,
             requested_ratio=requested_ratio,
             out_of_range_params=[],
         )
-    if len(ladder_result.residuals) < MIN_RESIDUALS:
-        return DecisionResult(
-            decision=REFUSAL,
-            reasons=[f"only {len(ladder_result.residuals)} pooled ladder residual(s); need at least {MIN_RESIDUALS}"],
-            reference_ratio=reference_ratio,
-            requested_ratio=requested_ratio,
-            out_of_range_params=[],
-        )
-    if requested_ratio > REFUSE_RATIO_MULT * reference_ratio:
-        return DecisionResult(
-            decision=REFUSAL,
-            reasons=[
-                f"target ratio {requested_ratio:.2f}x exceeds {REFUSE_RATIO_MULT:.0f}x the reference "
-                f"step ratio {reference_ratio:.2f}x"
-            ],
-            reference_ratio=reference_ratio,
-            requested_ratio=requested_ratio,
-            out_of_range_params=[],
-        )
+    assert reference_ratio is not None  # no refusal reasons implies a licensing rung
 
     out_of_range = sorted(
         name
@@ -584,7 +577,7 @@ def _build_data_plan(
     licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
     if not licensing_rungs:
         plan.append(
-            f"at least {MIN_RUNG_N_FOR_LICENSE} runs at a single scale above {format_liters_plain(x_scale)} L "
+            f"at least {MIN_RUNG_N_FOR_LICENSE} runs at a single scale of {format_liters_plain(x_scale)} L or larger "
             "whose backtest beats both baselines"
         )
 

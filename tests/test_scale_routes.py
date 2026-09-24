@@ -304,3 +304,25 @@ def test_large_scales_never_render_in_scientific_notation():
     assert _fmt_sig4(7500.0) == "7500"
     assert _fmt_sig4(1.0 / 3.0) == "0.3333"
     assert "e+" not in _fmt_sig4(1e6)
+
+
+def test_sparse_tech_transfer_sheet_returns_a_200_refusal_page(client):
+    """The shape real tech-transfer data has (many bench runs, one or two
+    runs per large scale) must get a readable refusal page with its
+    evidence and a data plan - not a 422 and not a number."""
+    from test_scale_readout import _sparse_sheet  # pytest puts tests/ on sys.path
+
+    tc, _ = client
+    csv_bytes = _sparse_sheet().to_csv(index=False).encode("utf-8")
+    r = _post(tc, target_json=_target_json(scale_L=42000.0, airflow_L_per_min=1500.0, process_params={"ph_setpoint": 7.0, "temperature_C": 36.7}), csv_bytes=csv_bytes)
+    assert r.status_code == 200, r.text
+    page = r.text
+    assert "No prediction:" in page
+    # every refusal reason is listed, not just the first
+    assert "pooled ladder residual(s); need at least 10" in page
+    assert "to license a reference step ratio" in page
+    assert "What it would take" in page
+    assert "more run(s) at any scale of 15 L or larger" in page
+    assert "too few to judge" in page
+    # the pooled verdict is withheld on thin evidence
+    assert "beats both baselines</span><span class=\"v\">yes" not in page

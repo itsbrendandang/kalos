@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
 from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
-from kalos.scale.readout import NUMBER, NUMBER_WITH_WARNING, REFUSAL, TargetSpec, build_readout
+from kalos.scale.readout import MIN_RESIDUALS, MIN_RUNG_N_FOR_LICENSE, NUMBER, NUMBER_WITH_WARNING, REFUSAL, TargetSpec, build_readout
 from kalos.scale.readout import format_liters_plain as _format_liters_plain
 
 log = logging.getLogger("kalos.portal")
@@ -240,7 +240,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
 def _ratio_section(readout: dict[str, Any]) -> str:
     reference = readout.get("reference_ratio")
     requested = readout.get("requested_ratio")
-    reference_str = _FMT_RATIO.format(reference) if reference is not None else "n/a (no rung beat both baselines)"
+    reference_str = _FMT_RATIO.format(reference) if reference is not None else f"n/a (no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs beat both baselines)"
     requested_str = _FMT_RATIO.format(requested) if requested is not None else "n/a"
     out_of_range = readout.get("out_of_range_params") or []
     extra = ""
@@ -263,7 +263,12 @@ def _baseline_section(readout: dict[str, Any]) -> str:
         + _kv("Model MAE", _FMT_METRIC.format(comparison["pooled_mae"]))
         + _kv("naive_mean MAE", _FMT_METRIC.format(comparison["pooled_naive_mean_mae"]))
         + _kv("naive_nn MAE", _FMT_METRIC.format(comparison["pooled_naive_nn_mae"]))
-        + _kv("beats both baselines", "yes" if comparison["pooled_beats_both"] else "no")
+        + _kv(
+            "beats both baselines",
+            "too few to judge"
+            if comparison["n_residuals"] < MIN_RESIDUALS
+            else ("yes" if comparison["pooled_beats_both"] else "no"),
+        )
         + _kv("pooled residuals (n)", comparison["n_residuals"])
     )
 
@@ -328,7 +333,7 @@ def _provenance_section(readout: dict[str, Any]) -> str:
     )
     plan_pin = f"{p.get('normalize_plan_n_columns')} columns, SHA-256 {p.get('normalize_plan_sha256')}"
     hash_rows = (
-        _kv("raw upload SHA-256", p.get("raw_upload_sha256"), mono=True)
+        _kv("raw upload SHA-256", p.get("raw_upload_sha256") or "not provided", mono=True)
         + _kv("normalized frame SHA-256", p.get("normalized_frame_sha256"), mono=True)
         + _kv("normalize plan", plan_pin, mono=True)
     )
