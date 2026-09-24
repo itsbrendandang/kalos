@@ -536,23 +536,38 @@ def test_sparse_sheet_data_plan_states_the_no_licensing_rung_requirement():
     )
 
 
-def test_ratio_warning_data_plan_has_correct_clean_and_refusal_targets():
-    """A target ratio between 2x and 5x the reference step ratio: the data
-    plan's two liters figures are exactly T/(2r) and T/(5r)."""
+def test_ratio_warning_data_plan_gives_only_the_clean_target():
+    """A target ratio between 2x and 5x the reference step ratio is a
+    warning, not a refusal: the plan names T/(2r) for a clean prediction
+    and must NOT tell the reader how to "avoid refusal" - it already did."""
     df = _demo_sheet()
     target_scale = 5000.0 * 10.0  # 10x the largest trained scale (5000 L)
-    target = _target(scale_L=target_scale)
-    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=target_scale))
     assert out["decision"] == ro.NUMBER_WITH_WARNING, out["reasons"]
     reference = out["reference_ratio"]
     assert reference is not None
-    requested = out["requested_ratio"]
-    assert requested > 2.0 * reference  # otherwise this fixture doesn't exercise the ratio line
+    assert out["requested_ratio"] > 2.0 * reference  # exercises the ratio line
 
-    clean_target_L = target_scale / (2.0 * reference)
-    refusal_target_L = target_scale / (5.0 * reference)
-    plan = out["data_plan"]
+    clean = ro.format_liters_plain(target_scale / (2.0 * reference))
+    ratio_lines = [line for line in out["data_plan"] if "for a clean prediction" in line]
+    assert len(ratio_lines) == 1, out["data_plan"]
+    assert clean in ratio_lines[0]
+    assert "avoid refusal" not in ratio_lines[0]
+
+
+def test_ratio_refusal_data_plan_gives_clean_and_refusal_targets():
+    """A target ratio above 5x the reference is a refusal: the plan gives
+    both T/(2r) (clean) and T/(5r) (avoid refusal)."""
+    df = _demo_sheet()
+    target_scale = 5000.0 * 17.0  # 17x the largest trained scale
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=target_scale))
+    assert out["decision"] == ro.REFUSAL, out["reasons"]
+    reference = out["reference_ratio"]
+    assert reference is not None
+    assert out["requested_ratio"] > 5.0 * reference  # exercises the refusal clause
+
+    clean = ro.format_liters_plain(target_scale / (2.0 * reference))
+    refusal = ro.format_liters_plain(target_scale / (5.0 * reference))
     assert any(
-        ro.format_liters_plain(clean_target_L) in line and ro.format_liters_plain(refusal_target_L) in line
-        for line in plan
-    ), plan
+        clean in line and f"avoid refusal, {refusal} L" in line for line in out["data_plan"]
+    ), out["data_plan"]

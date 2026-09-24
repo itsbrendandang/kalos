@@ -584,12 +584,13 @@ def _build_data_plan(
     reference = decision_result.reference_ratio
     if reference is not None and decision_result.requested_ratio > WARN_RATIO_MULT * reference:
         clean_target_L = requested_scale_L / (WARN_RATIO_MULT * reference)
-        refusal_target_L = requested_scale_L / (REFUSE_RATIO_MULT * reference)
-        plan.append(
-            "for a clean prediction, add runs at "
-            f"{format_liters_plain(clean_target_L)} L or larger; to avoid refusal, "
-            f"{format_liters_plain(refusal_target_L)} L or larger (assuming the reference step holds)"
-        )
+        line = f"for a clean prediction, add runs at {format_liters_plain(clean_target_L)} L or larger"
+        # the "avoid refusal" bar only means something when the ratio is what
+        # refused; on a warning the readout already cleared it.
+        if decision_result.requested_ratio > REFUSE_RATIO_MULT * reference:
+            refusal_target_L = requested_scale_L / (REFUSE_RATIO_MULT * reference)
+            line += f"; to avoid refusal, {format_liters_plain(refusal_target_L)} L or larger"
+        plan.append(line + " (assuming the reference step holds)")
     return plan
 
 
