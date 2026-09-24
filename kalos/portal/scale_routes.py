@@ -77,6 +77,12 @@ def _parse_target(raw: str) -> tuple[TargetSpec, str, list[str], dict[str, float
           "physics_overrides": {"power_number": 6.0}   // optional
         }
 
+    `agitation_rpm`/`airflow_L_per_min` are OPTIONAL keys: whether they are
+    actually required depends on the uploaded sheet, not the target JSON -
+    `kalos.scale.readout.gate` raises `ValueError` (surfaced below as a 422
+    `invalid_target`) naming whichever is missing only when the sheet
+    records both columns (the "physics" feature set).
+
     `process_columns` is taken from `process_params`' keys - the same set
     `kalos.scale.readout.gate` requires to match exactly, so there is only
     one place a caller names the process parameters.
@@ -88,7 +94,7 @@ def _parse_target(raw: str) -> tuple[TargetSpec, str, list[str], dict[str, float
     if not isinstance(data, dict):
         raise _TargetJsonError(f"{_ERR_INVALID_TARGET}: expected a JSON object")
 
-    required = ("scale_L", "agitation_rpm", "airflow_L_per_min", "target_column", "process_params")
+    required = ("scale_L", "target_column", "process_params")
     missing = [k for k in required if k not in data]
     if missing:
         raise _TargetJsonError(f"{_ERR_INVALID_TARGET}: missing key(s) {missing}")
@@ -101,12 +107,14 @@ def _parse_target(raw: str) -> tuple[TargetSpec, str, list[str], dict[str, float
     if physics_overrides is not None and not isinstance(physics_overrides, dict):
         raise _TargetJsonError(f"{_ERR_INVALID_TARGET}: 'physics_overrides' must be an object")
 
+    raw_agitation = data.get("agitation_rpm")
+    raw_airflow = data.get("airflow_L_per_min")
     try:
         target = TargetSpec(
             scale_L=float(data["scale_L"]),
-            agitation_rpm=float(data["agitation_rpm"]),
-            airflow_L_per_min=float(data["airflow_L_per_min"]),
             process_params={str(k): float(v) for k, v in process_params.items()},
+            agitation_rpm=float(raw_agitation) if raw_agitation is not None else None,
+            airflow_L_per_min=float(raw_airflow) if raw_airflow is not None else None,
         )
     except (TypeError, ValueError) as exc:
         raise _TargetJsonError(f"{_ERR_INVALID_TARGET}: {exc}") from exc
@@ -144,17 +152,51 @@ def _kv(label: str, value: Any, *, mono: bool = False) -> str:
     return f'<div class="{cls}"><span class="k">{_esc(label)}</span><span class="v">{_esc(value)}</span></div>'
 
 
+def _scale_only_field_text(value: float | None) -> str:
+    """In scale_only mode: "not recorded" when the caller left the field
+    unset (the normal case - the sheet does not record it either), or
+    "ignored: sheet does not record them" when the caller supplied a value
+    anyway (the sheet still gives the model nothing to relate it to)."""
+    return "ignored: sheet does not record them" if value is not None else "not recorded"
+
+
 def _target_inputs_section(readout: dict[str, Any]) -> str:
     inputs = readout["target_inputs"]
+    scale_only = readout.get("feature_set") == "scale_only"
+    agitation_text = (
+        _scale_only_field_text(inputs["agitation_rpm"]) if scale_only else f"{_fmt_sig4(inputs['agitation_rpm'])} rpm"
+    )
+    airflow_text = (
+        _scale_only_field_text(inputs["airflow_L_per_min"])
+        if scale_only
+        else f"{_fmt_sig4(inputs['airflow_L_per_min'])} L/min"
+    )
     rows = [
         ("Target scale", f"{_fmt_sig4(inputs['scale_L'])} L"),
-        ("Agitation", f"{_fmt_sig4(inputs['agitation_rpm'])} rpm"),
-        ("Airflow", f"{_fmt_sig4(inputs['airflow_L_per_min'])} L/min"),
+        ("Agitation", agitation_text),
+        ("Airflow", airflow_text),
     ]
     for name, value in inputs["process_params"].items():
         rows.append((name, _fmt_sig4(value)))
     kvs = "".join(_kv(k, v) for k, v in rows)
     return f'<h2>Target inputs</h2><div class="grid">{kvs}</div>'
+
+
+def _scale_only_note(readout: dict[str, Any]) -> str:
+    """A neutral info note directly under the decision banner in
+    scale_only mode, naming which column(s) the sheet does not record -
+    not a red/amber banner: scale_only is an honest fallback, not a
+    warning or a refusal."""
+    if readout.get("feature_set") != "scale_only":
+        return ""
+    missing = readout.get("missing_physics_inputs") or []
+    joined = missing[0] if len(missing) == 1 else " and ".join(missing)
+    return (
+        '<div class="note note-info">'
+        f"Scale-only model: this sheet does not record {_esc(joined)}, so mixing and "
+        "oxygen-transfer effects are not modeled."
+        "</div>"
+    )
 
 
 def _prediction_labels(readout: dict[str, Any]) -> tuple[str, str]:
@@ -373,6 +415,7 @@ def render_readout_html(readout: dict[str, Any]) -> str:
         s
         for s in (
             _decision_banner(readout),
+            _scale_only_note(readout),
             _prediction_section(readout),
             _target_inputs_section(readout),
             _rungs_table(readout),

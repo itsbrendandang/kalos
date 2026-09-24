@@ -42,6 +42,25 @@ PIPELINE (see `build_readout`):
 UNITS. `scale_L` is liters, `agitation_rpm` is rpm, `airflow_L_per_min` is
 liters per minute - the same units `kalos.scale.features` assumes.
 
+SCALE-ONLY FALLBACK (owner decision 2026-09-24). Real run sheets often do
+not record `agitation_rpm`/`airflow_L_per_min`. `build_readout` reads the
+uploaded sheet's own columns to choose a `feature_set` (see
+`kalos.scale.transfer.ScaleFeatureConfig.feature_set`): `"physics"` when
+both columns are present (unchanged behavior), `"scale_only"` when either
+is absent, using only `kalos.scale.features.SCALE_ONLY_FEATURE_COLUMNS`
+(`log_volume_ratio`, `hydrostatic_pressure_mmHg` - the physics features
+computable from `scale_L` alone). This is a deliberate FEATURE-SET
+choice, not an imputation: a missing column silently turned into an
+all-NaN physics feature would make `ScaleUpTransferModel.fit`'s
+no-imputation contract drop every row. `TargetSpec.agitation_rpm`/
+`airflow_L_per_min` are required only in `"physics"` mode (`gate` raises
+`ValueError` naming whichever is missing); in `"scale_only"` mode they are
+optional, and a caller-supplied value is ignored (recorded as such) since
+the sheet gives the model nothing to relate it to. `feature_set` and
+`missing_physics_inputs` are carried in the returned dict and its
+`provenance`, and the physics assumptions section only reports the
+assumptions the selected feature set actually uses.
+
 Every threshold below is a named module-level constant so the readout can
 print exactly what gated it, rather than a caller having to reverse-engineer
 a number baked into a comparison.
@@ -50,7 +69,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, fields
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -104,26 +123,46 @@ class TargetSpec:
     """The target scale plus its planned operating conditions.
 
     `scale_L`: target vessel volume, liters.
-    `agitation_rpm`: planned impeller speed at the target scale, rpm.
-    `airflow_L_per_min`: planned sparge/gas flow at the target scale, liters
-    per minute.
     `process_params`: the recipe inputs to be run at the target scale, one
     entry per column in `process_columns` (e.g. `{"ph_setpoint": 7.0,
     "temperature_C": 37.0}`) - checked against the trained range separately
     from the scale axis (see `decide`).
+    `agitation_rpm`: planned impeller speed at the target scale, rpm.
+    `airflow_L_per_min`: planned sparge/gas flow at the target scale, liters
+    per minute.
+
+    `agitation_rpm`/`airflow_L_per_min` are OPTIONAL (default `None`):
+    `build_readout` selects the "physics" feature set only when the
+    uploaded sheet records BOTH `agitation_rpm` and `airflow_L_per_min`
+    columns, and `gate` then raises `ValueError` naming whichever of these
+    two is `None` - a planned physics feature set with no planned value to
+    feed it is a caller/target-JSON error, not a gate failure. When the
+    sheet is missing either column, `build_readout` falls back to the
+    "scale_only" feature set and these two fields become genuinely
+    optional; a value supplied anyway is recorded as ignored (the sheet
+    does not record what it would take to use it).
     """
 
     scale_L: float
-    agitation_rpm: float
-    airflow_L_per_min: float
     process_params: dict[str, float]
+    agitation_rpm: float | None = None
+    airflow_L_per_min: float | None = None
 
     def to_frame(self, config: ScaleFeatureConfig) -> pd.DataFrame:
-        """A single-row frame in the shape `build_feature_matrix` expects."""
+        """A single-row frame in the shape `build_feature_matrix` expects.
+
+        `agitation_rpm`/`airflow_L_per_min` are only written onto the row
+        when not `None`. In "scale_only" mode `build_feature_matrix` never
+        reads those columns anyway (see `SCALE_ONLY_FEATURE_COLUMNS`), so
+        omitting them keeps this frame honest about what was actually
+        supplied rather than writing a value that is silently unused.
+        """
         row = dict(self.process_params)
         row[config.scale_column] = self.scale_L
-        row[config.agitation_column] = self.agitation_rpm
-        row[config.airflow_column] = self.airflow_L_per_min
+        if self.agitation_rpm is not None:
+            row[config.agitation_column] = self.agitation_rpm
+        if self.airflow_L_per_min is not None:
+            row[config.airflow_column] = self.airflow_L_per_min
         return pd.DataFrame([row])
 
 
@@ -147,7 +186,14 @@ class GateResult:
 
 
 def _required_columns(target_column: str, process_columns: Sequence[str], config: ScaleFeatureConfig) -> list[str]:
-    return [target_column, config.scale_column, config.agitation_column, config.airflow_column, *process_columns]
+    """`scale_L`, the process columns, and the target column.
+
+    `agitation_rpm`/`airflow_L_per_min` are deliberately NOT required
+    here: `build_readout` reads them when present to pick the "physics"
+    feature set (see `kalos.scale.transfer.ScaleFeatureConfig.feature_set`)
+    but falls back to "scale_only" when either is absent, rather than
+    422-ing a real run sheet that simply does not record them."""
+    return [target_column, config.scale_column, *process_columns]
 
 
 def gate(
@@ -181,12 +227,36 @@ def gate(
     If `target.process_params`' keys do not exactly match `process_columns`,
     raises `ValueError` (a caller/target-JSON error, not a gate failure - the
     portal route maps this to its own 422 before ever calling `gate`).
+
+    Likewise raises `ValueError`, naming whichever is missing, if
+    `config.feature_set == "physics"` (selected by the caller - see
+    `build_readout`'s feature_set selection, based on which columns the
+    uploaded sheet actually has) and `target.agitation_rpm` and/or
+    `target.airflow_L_per_min` is `None`: a planned physics feature set
+    with no planned value to feed it is the same kind of caller/target-JSON
+    error as a `process_params` mismatch, not a gate failure.
     """
     if set(target.process_params) != set(process_columns):
         raise ValueError(
             f"target.process_params keys {sorted(target.process_params)} do not match "
             f"process_columns {sorted(process_columns)}"
         )
+
+    if config.feature_set == "physics":
+        missing_target_fields = [
+            name
+            for name, value in (
+                ("agitation_rpm", target.agitation_rpm),
+                ("airflow_L_per_min", target.airflow_L_per_min),
+            )
+            if value is None
+        ]
+        if missing_target_fields:
+            raise ValueError(
+                "target must supply " + ", ".join(missing_target_fields) + ": this sheet records both "
+                "agitation_rpm and airflow_L_per_min, so the physics feature set needs a planned "
+                "value for each"
+            )
 
     required = _required_columns(target_column, process_columns, config)
     missing = [c for c in required if c not in df.columns]
@@ -602,15 +672,42 @@ _KLA_FIELDS = {f.name for f in fields(VantRietParams)}
 _OTHER_FIELDS = {"reference_scale_L"}
 _ALL_PHYSICS_FIELDS = _GEOMETRY_FIELDS | _POWER_FIELDS | _KLA_FIELDS | _OTHER_FIELDS
 
+# The assumptions actually used by the scale_only feature set
+# (`log_volume_ratio`, `hydrostatic_pressure_mmHg` - see
+# `SCALE_ONLY_FEATURE_COLUMNS`): `reference_scale_L` (log_volume_ratio's
+# zero point) plus the geometry fields hydrostatic pressure's liquid-height
+# calculation needs (`aspect_ratio_h_over_t` via `tank_geometry_proxy`,
+# `liquid_density_kg_per_m3` for `rho * g * h`). NOT
+# `impeller_to_tank_diameter_ratio` (only feeds impeller diameter, which
+# only `specific_power_w_per_m3` uses) and NOT the power-number/van't Riet
+# constants (those feed `specific_power_w_per_m3`/`kla_proxy_per_s`, both
+# excluded from `SCALE_ONLY_FEATURE_COLUMNS`).
+_SCALE_ONLY_USED_FIELDS = {"aspect_ratio_h_over_t", "liquid_density_kg_per_m3", "reference_scale_L"}
+_NOT_USED_SCALE_ONLY = "not used (scale-only)"
+
 
 def _build_physics_config(
     physics_overrides: dict[str, float] | None,
+    *,
+    feature_set: Literal["physics", "scale_only"] = "physics",
 ) -> tuple[ScaleFeatureConfig, dict[str, dict[str, Any]]]:
     """Build a `ScaleFeatureConfig` from `physics_overrides` (a flat dict
     keyed by the dataclass field names in `GeometryAssumptions` /
     `PowerNumberAssumption` / `VantRietParams`, plus `reference_scale_L`),
-    and the per-field provenance (`value`, `source`: `"default"` or
-    `"user-supplied"`) every assumption is printed with.
+    and the per-field provenance (`value`, `source`: `"default"`,
+    `"user-supplied"`, or - only in `"scale_only"` mode, for a field that
+    mode's features do not read - `"not used (scale-only)"`) every
+    assumption is printed with.
+
+    `feature_set` (default `"physics"`): set on the returned
+    `ScaleFeatureConfig.feature_set` (so every downstream consumer -
+    `gate`, `ladder`, `build_feature_matrix` - agrees on which physics
+    columns to build), and used here only to tag `_SCALE_ONLY_USED_FIELDS`
+    (the assumptions `log_volume_ratio`/`hydrostatic_pressure_mmHg`
+    actually read) as `"default"`/`"user-supplied"` same as always, while
+    every OTHER assumption is tagged `"not used (scale-only)"` - the
+    physics assumptions section should only claim to use what the
+    selected feature set actually computes.
 
     Raises `ValueError` naming any override key that is not one of those
     fields.
@@ -633,6 +730,7 @@ def _build_physics_config(
         geometry=geometry,
         power=power,
         kla_params=kla,
+        feature_set=feature_set,
     )
 
     assumptions: dict[str, dict[str, Any]] = {}
@@ -644,7 +742,11 @@ def _build_physics_config(
             value = getattr(kla, name, None)
         if name == "reference_scale_L":
             value = reference_scale_L
-        assumptions[name] = {"value": value, "source": "user-supplied" if name in overrides else "default"}
+        if feature_set == "scale_only" and name not in _SCALE_ONLY_USED_FIELDS:
+            source = _NOT_USED_SCALE_ONLY
+        else:
+            source = "user-supplied" if name in overrides else "default"
+        assumptions[name] = {"value": value, "source": source}
     return config, assumptions
 
 
@@ -772,18 +874,43 @@ def build_readout(
     `PowerNumberAssumption` / `VantRietParams` field names (plus
     `reference_scale_L`) to override; any value not supplied falls back to
     the literature default, and every assumption is printed tagged
-    `"default"` or `"user-supplied"` (see `_build_physics_config`). Column
-    names (`scale_L`, `agitation_rpm`, `airflow_L_per_min`) always use
-    `DEFAULT_SCALE_FEATURE_CONFIG`'s - the input contract fixes them.
+    `"default"`, `"user-supplied"`, or (scale_only mode, for an assumption
+    that mode's features do not read) `"not used (scale-only)"` (see
+    `_build_physics_config`). Column names (`scale_L`, `agitation_rpm`,
+    `airflow_L_per_min`) always use `DEFAULT_SCALE_FEATURE_CONFIG`'s - the
+    input contract fixes them.
+
+    FEATURE SET SELECTION (the scale-only fallback). Real run sheets often
+    do not record `agitation_rpm`/`airflow_L_per_min`. This function reads
+    the normalized upload's own columns to choose: `"physics"` when BOTH
+    are present (unchanged behavior - `target.agitation_rpm` and
+    `target.airflow_L_per_min` must then both be supplied, or `gate` raises
+    `ValueError` naming whichever is missing); `"scale_only"` when EITHER
+    is absent, using only the physics features computable from `scale_L`
+    alone (`kalos.scale.features.SCALE_ONLY_FEATURE_COLUMNS`) - never a
+    silently all-NaN physics feature, which the no-imputation `fit`
+    contract would otherwise turn into "every row dropped". The chosen
+    `feature_set` and the list of absent columns (`missing_physics_inputs`)
+    are returned at the top level and in `provenance`.
 
     `raw_bytes` (optional): the raw upload bytes, hashed (SHA-256) into
     provenance. `seed` is recorded in provenance for reproducibility, even
     though nothing in this pipeline currently draws randomness (the GP fit
     and the ladder's leave-one-scale-out splits are both deterministic).
     """
-    working_config, physics_assumptions = _build_physics_config(physics_overrides)
-
     working_df, plan, normalized_csv, plan_json = _normalize_provenance(df, target_column)
+
+    missing_physics_inputs = [
+        name
+        for name, col in (
+            ("agitation_rpm", DEFAULT_SCALE_FEATURE_CONFIG.agitation_column),
+            ("airflow_L_per_min", DEFAULT_SCALE_FEATURE_CONFIG.airflow_column),
+        )
+        if col not in working_df.columns
+    ]
+    feature_set: Literal["physics", "scale_only"] = "scale_only" if missing_physics_inputs else "physics"
+
+    working_config, physics_assumptions = _build_physics_config(physics_overrides, feature_set=feature_set)
 
     gate_result = gate(working_df, target_column, process_columns, target, config=working_config)
 
@@ -800,6 +927,8 @@ def build_readout(
         "normalize_plan_n_columns": len(plan.columns),
         "resolved_scale_unit": _resolved_unit_for(plan, working_config.scale_column),
         "target_column_unit": _unit_label_or_none(plan, target_column),
+        "feature_set": feature_set,
+        "missing_physics_inputs": missing_physics_inputs,
         "constants": dict(CONSTANTS),
     }
 
@@ -818,6 +947,8 @@ def build_readout(
         "out_of_range_params": [],
         "baseline_comparison": None,
         "data_plan": [],
+        "feature_set": feature_set,
+        "missing_physics_inputs": missing_physics_inputs,
         "target_inputs": {
             "scale_L": target.scale_L,
             "agitation_rpm": target.agitation_rpm,

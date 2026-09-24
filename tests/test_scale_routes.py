@@ -153,10 +153,54 @@ def test_ratio_hard_cap_gate_failure_is_422(client):
 
 def test_missing_run_sheet_column_is_422(client):
     tc, _store = client
-    bad_csv = pd.read_csv(_DEMO_CSV).drop(columns=["agitation_rpm"]).to_csv(index=False).encode()
+    bad_csv = pd.read_csv(_DEMO_CSV).drop(columns=["ph_setpoint"]).to_csv(index=False).encode()
     r = _post(tc, target_json=_target_json(), csv_bytes=bad_csv)
     assert r.status_code == 422
     assert r.json()["failed_check"] == "required_columns"
+
+
+# --------------------------------------------------------------------------- #
+# scale-only fallback: agitation_rpm/airflow_L_per_min optional (owner
+# decision 2026-09-24)
+# --------------------------------------------------------------------------- #
+
+
+def test_dropped_columns_demo_is_200_scale_only_with_the_note_and_not_recorded(client):
+    tc, _store = client
+    dropped_csv = pd.read_csv(_DEMO_CSV).drop(columns=["agitation_rpm", "airflow_L_per_min"]).to_csv(index=False).encode()
+    target_json = json.dumps(
+        {
+            "scale_L": 7500.0,
+            "target_column": "titer_g_per_L",
+            "process_params": {"ph_setpoint": 7.2, "temperature_C": 37.0},
+        }
+    )
+    r = _post(tc, target_json=target_json, csv_bytes=dropped_csv)
+    assert r.status_code == 200, r.text
+    page = r.text
+    assert (
+        "Scale-only model: this sheet does not record agitation_rpm and airflow_L_per_min, "
+        "so mixing and oxygen-transfer effects are not modeled." in page
+    )
+    assert "not recorded" in page
+    assert "note-info" in page
+
+
+def test_sheet_with_both_columns_but_target_missing_agitation_is_422_invalid_target(client):
+    tc, _store = client
+    target_json = json.dumps(
+        {
+            "scale_L": 7500.0,
+            "airflow_L_per_min": 300.0,
+            "target_column": "titer_g_per_L",
+            "process_params": {"ph_setpoint": 7.2, "temperature_C": 37.0},
+        }
+    )
+    r = _post(tc, target_json=target_json)
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["failed_check"] == "invalid_target"
+    assert "agitation_rpm" in body["detail"]
 
 
 # --------------------------------------------------------------------------- #

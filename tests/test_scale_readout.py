@@ -13,7 +13,7 @@ import pytest
 
 from kalos.scale import readout as ro
 from kalos.scale.evaluation import leave_one_scale_out_report
-from kalos.scale.transfer import ScaleUpTransferModel
+from kalos.scale.transfer import ScaleFeatureConfig, ScaleUpTransferModel
 
 PROCESS_COLUMNS = ["ph_setpoint", "temperature_C"]
 TARGET_COLUMN = "titer_g_per_L"
@@ -115,10 +115,29 @@ def test_gate_passes_on_a_clean_minimal_sheet():
 
 
 def test_gate_fails_missing_required_column():
-    df = _make_sheet(_MINIMAL_SCALES, _MINIMAL_N).drop(columns=["agitation_rpm"])
+    # `agitation_rpm`/`airflow_L_per_min` are deliberately NOT in this list
+    # any more (see `_required_columns` - the scale-only fallback this
+    # module now supports means a sheet missing either is not a gate
+    # failure), so this exercises a column that is still genuinely
+    # required: a process column.
+    df = _make_sheet(_MINIMAL_SCALES, _MINIMAL_N).drop(columns=["ph_setpoint"])
     result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=200.0))
     assert not result.passed
     assert result.failed_check == "required_columns"
+
+
+def test_gate_passes_when_agitation_and_airflow_columns_are_absent():
+    """The behavior this module exists to fix (owner decision 2026-09-24):
+    a sheet missing `agitation_rpm`/`airflow_L_per_min` no longer 422s at
+    the gate - `build_readout` falls back to the scale_only feature set
+    instead (see `test_scale_readout.py`'s scale-only fallback section).
+    `config.feature_set="scale_only"` here mirrors what `build_readout`
+    itself would have selected for this sheet before calling `gate`."""
+    df = _make_sheet(_MINIMAL_SCALES, _MINIMAL_N).drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = ro.TargetSpec(scale_L=200.0, process_params={"ph_setpoint": 7.0, "temperature_C": 36.7})
+    config = ScaleFeatureConfig(feature_set="scale_only")
+    result = ro.gate(df, TARGET_COLUMN, PROCESS_COLUMNS, target, config=config)
+    assert result.passed, result.detail
 
 
 def test_gate_fails_too_few_distinct_scales():
@@ -571,6 +590,125 @@ def test_ratio_refusal_data_plan_gives_clean_and_refusal_targets():
     assert any(
         clean in line and f"avoid refusal, {refusal} L" in line for line in out["data_plan"]
     ), out["data_plan"]
+
+
+# --------------------------------------------------------------------------- #
+# scale-only fallback: agitation_rpm/airflow_L_per_min optional when the
+# sheet does not record them (owner decision 2026-09-24)
+# --------------------------------------------------------------------------- #
+
+
+def test_dropped_columns_demo_runs_end_to_end_as_scale_only():
+    df = _demo_sheet().drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = ro.TargetSpec(scale_L=7500.0, process_params={"ph_setpoint": 7.2, "temperature_C": 37.0})
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+    assert out["gate"]["passed"], out["gate"]["detail"]
+    assert out["feature_set"] == "scale_only"
+    assert set(out["missing_physics_inputs"]) == {"agitation_rpm", "airflow_L_per_min"}
+    assert out["provenance"]["feature_set"] == "scale_only"
+    assert set(out["provenance"]["missing_physics_inputs"]) == {"agitation_rpm", "airflow_L_per_min"}
+    # never a crash, whatever the evidence-driven decision turns out to be.
+    assert out["decision"] in (ro.NUMBER, ro.NUMBER_WITH_WARNING, ro.REFUSAL)
+
+
+def test_dropped_columns_demo_ladder_uses_the_scale_only_feature_set(monkeypatch):
+    """The ladder backtest must evaluate the SAME feature set that produces
+    the final number - checked here via the feature names
+    `leave_one_scale_out_report` actually reported, not just the config
+    passed in."""
+    from kalos.scale.features import SCALE_ONLY_FEATURE_COLUMNS
+
+    df = _demo_sheet().drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = ro.TargetSpec(scale_L=7500.0, process_params={"ph_setpoint": 7.2, "temperature_C": 37.0})
+
+    captured_feature_names: list[list[str]] = []
+    original_report = leave_one_scale_out_report
+
+    def _spy_report(*args, **kwargs):
+        report = original_report(*args, **kwargs)
+        captured_feature_names.append(report["feature_names"])
+        return report
+
+    monkeypatch.setattr(ro, "leave_one_scale_out_report", _spy_report)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+    assert out["feature_set"] == "scale_only"
+    assert captured_feature_names, "the ladder should have called the evaluation harness at least once"
+    expected_names = PROCESS_COLUMNS + list(SCALE_ONLY_FEATURE_COLUMNS)
+    for names in captured_feature_names:
+        assert names == expected_names
+
+
+def test_demo_sheet_with_both_columns_is_still_physics_mode():
+    """Physics-path parity: with both columns present, `feature_set` stays
+    `"physics"` and the decision/prediction are unchanged from before the
+    scale-only fallback existed (see `test_demo_sheet_1p5x_target_yields_a_number_with_interval`)."""
+    df = _demo_sheet()
+    target = _target(scale_L=7500.0)
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+    assert out["feature_set"] == "physics"
+    assert out["missing_physics_inputs"] == []
+    assert out["decision"] == ro.NUMBER
+    assert out["prediction"] is not None
+    assert out["interval"] is not None
+
+
+def test_sheet_missing_only_airflow_is_scale_only_and_lists_only_airflow():
+    df = _demo_sheet().drop(columns=["airflow_L_per_min"])
+    target = ro.TargetSpec(scale_L=7500.0, process_params={"ph_setpoint": 7.2, "temperature_C": 37.0})
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+    assert out["feature_set"] == "scale_only"
+    assert out["missing_physics_inputs"] == ["airflow_L_per_min"]
+
+
+def test_physics_mode_target_missing_agitation_raises_value_error_naming_it():
+    """The sheet records both columns (physics mode); the target must then
+    supply both values, or `gate` raises `ValueError` (the portal route
+    maps this to a 422 `invalid_target`) naming the missing one."""
+    df = _demo_sheet()
+    target = ro.TargetSpec(
+        scale_L=7500.0,
+        process_params={"ph_setpoint": 7.2, "temperature_C": 37.0},
+        airflow_L_per_min=300.0,
+    )
+    with pytest.raises(ValueError, match="agitation_rpm"):
+        ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+
+
+def test_scale_only_ignores_a_caller_supplied_agitation_value():
+    """In scale_only mode a caller-supplied value is accepted (no error)
+    but never fed to the physics features - it is recorded in
+    `target_inputs` as-is for the page to mark "ignored"."""
+    df = _demo_sheet().drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = ro.TargetSpec(
+        scale_L=7500.0,
+        process_params={"ph_setpoint": 7.2, "temperature_C": 37.0},
+        agitation_rpm=999.0,
+    )
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assert out["feature_set"] == "scale_only"
+    assert out["target_inputs"]["agitation_rpm"] == 999.0
+
+
+def test_scale_only_physics_assumptions_mark_unused_constants():
+    df = _demo_sheet().drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    target = ro.TargetSpec(scale_L=7500.0, process_params={"ph_setpoint": 7.2, "temperature_C": 37.0})
+    out = ro.build_readout(df, TARGET_COLUMN, PROCESS_COLUMNS, target)
+    assumptions = out["physics_assumptions"]
+
+    assert assumptions["power_number"]["source"] == "not used (scale-only)"
+    assert assumptions["a"]["source"] == "not used (scale-only)"
+    assert assumptions["alpha"]["source"] == "not used (scale-only)"
+    assert assumptions["beta"]["source"] == "not used (scale-only)"
+    assert assumptions["impeller_to_tank_diameter_ratio"]["source"] == "not used (scale-only)"
+    # still reported as actually used, since log_volume_ratio and
+    # hydrostatic_pressure_mmHg both need them.
+    assert assumptions["aspect_ratio_h_over_t"]["source"] == "default"
+    assert assumptions["liquid_density_kg_per_m3"]["source"] == "default"
+    assert assumptions["reference_scale_L"]["source"] == "default"
 
 
 def test_production_phase_headers_do_not_block_the_readout():
