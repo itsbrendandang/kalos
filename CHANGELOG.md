@@ -2,6 +2,34 @@
 
 Newest first.
 
+## 2026-09-24 (proper container files)
+
+The deploy pack is now organized the way container tooling expects, and it
+builds the same under Docker and Podman.
+
+### Changed - one directory per image
+
+`deploy/engine/Containerfile`, `deploy/web/Containerfile` and
+`deploy/backup/Containerfile` replace `Dockerfile.engine`, `Dockerfile.web`
+and `backup/Dockerfile`; `deploy/compose.yaml` replaces
+`docker-compose.yaml`. Image contents are unchanged. Update any local
+scripts: `docker compose -f deploy/compose.yaml ...`.
+
+### Fixed - the engine build no longer ships the whole checkout to the builder
+
+There was no ignore file, so every engine build sent `.venv`, `.git`,
+agent worktrees and `deploy/backups/` (real database backups) as build
+context. A repo-root `.containerignore` allowlist (`.dockerignore` links to
+it) now sends only `pyproject.toml`, `README.md` and `kalos/`: about 0.8 MB,
+verified under both Docker and Podman.
+
+### Docs
+
+`deploy/RUNBOOK.md` gains a "Container files" section and Podman
+instructions (build with `--format docker`, or Podman silently drops the
+`HEALTHCHECK` the stack depends on). The web Containerfile's header now
+describes the same-origin engine proxy kalos-web actually uses.
+
 ## 2026-09-10 (the deploy pack meets reality)
 
 The wave-2 deploy pack was written and config-tested but its images were never

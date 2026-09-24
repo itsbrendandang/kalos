@@ -82,7 +82,7 @@ log = logging.getLogger("kalos.portal")
 # interacting with that build's OpenBLAS threading, measured 2026-09-10 on
 # the first real compose deployment. The 4-thread default is kept for bare
 # metal (where it was tuned and behaves); containers, which already isolate
-# CPU, should set 0 - deploy/docker-compose.yaml now does.
+# CPU, should set 0 - deploy/compose.yaml now does.
 _TORCH_THREADS = int(
     os.environ.get("KALOS_TORCH_THREADS", "").strip() or str(min(4, os.cpu_count() or 1))
 )
@@ -275,7 +275,7 @@ def index() -> str:
 
 @app.get("/healthz")
 def healthz() -> dict:
-    """Liveness probe for a deploy healthcheck (deploy/Dockerfile.engine).
+    """Liveness probe for a deploy healthcheck (deploy/engine/Containerfile).
 
     Unauthenticated BY DESIGN, and safe to leave that way: no
     `Depends(require_scope(...))`, the same pattern `/` above already uses.

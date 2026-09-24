@@ -1,6 +1,6 @@
 #!/bin/sh
 # kalos SQLite backup sidecar loop. Runs inside the `backup` service in
-# docker-compose.yaml, sharing the engine's state volume (read-only) plus a
+# compose.yaml, sharing the engine's state volume (read-only) plus a
 # host-mounted backup directory.
 #
 # WHY .backup AND NOT `cp`/`cat`/`tar` OF THE LIVE .db FILES
@@ -34,7 +34,7 @@
 # artifact.
 set -eu
 
-# Default matches Dockerfile.engine's KALOS_STATE_DIR (/home/kalos/.kalos) -
+# Default matches deploy/engine/Containerfile's KALOS_STATE_DIR (/home/kalos/.kalos) -
 # see that file's comment for the current state: SqliteStore
 # (experiments.db), the runner lock, CampaignStore (portal.db), and the
 # `_LATEST` cache all now read KALOS_STATE_DIR at call time, so this only

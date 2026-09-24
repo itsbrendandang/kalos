@@ -7,7 +7,7 @@
 #
 #   - No `postgres` service. kalos's data model is SQLite at
 #     `~/.kalos/{experiments,portal}.db` inside the engine container (see
-#     Dockerfile.engine's KALOS_STATE_DIR comment for exactly why that path
+#     deploy/engine/Containerfile's KALOS_STATE_DIR comment for exactly why that path
 #     is not arbitrary). The reference's Postgres+db-backup PATTERN (named
 #     volume for data, a separate backup sidecar on its own schedule with a
 #     host-mounted, non-compose-volume backup directory) is kept; the
@@ -52,7 +52,7 @@ services:
   engine:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.engine
+      dockerfile: deploy/engine/Containerfile
     image: kalos-engine:${KALOS_IMAGE_TAG:-local}
     restart: unless-stopped
     environment:
@@ -78,11 +78,11 @@ services:
       - KALOS_CORS_ORIGINS=${KALOS_CORS_ORIGINS}
       # State dir - genuinely honored everywhere now (CampaignStore,
       # SqliteStore, SingletonLock, and app.py's `_LATEST` cache all read
-      # this at call time; see Dockerfile.engine's comment). Pointed at this
+      # this at call time; see deploy/engine/Containerfile's comment). Pointed at this
       # user's actual $HOME/.kalos rather than an arbitrary path purely for
       # simplicity - it needs no separate `mkdir`/`chown` beyond the
       # container's own home directory setup, and it is the one mount point
-      # docker-compose.yaml's volume below targets.
+      # compose.yaml's volume below targets.
       - KALOS_STATE_DIR=/home/kalos/.kalos
       # Optional external-provider credentials (kalos/providers/, all
       # keyless-by-default - see kalos/.env.example in the engine repo for
@@ -104,7 +104,7 @@ services:
       - KALOS_TORCH_THREADS=${KALOS_TORCH_THREADS:-0}
     volumes:
       # Named volume: survives container recreation (rebuild, image update).
-      # Mounted at the engine's actual $HOME/.kalos - see Dockerfile.engine.
+      # Mounted at the engine's actual $HOME/.kalos - see deploy/engine/Containerfile.
       - kalos-state:/home/kalos/.kalos
     # No published port (wave-2 change): the browser no longer calls the
     # engine directly. kalos-web's server-side proxy
@@ -113,14 +113,14 @@ services:
     # front door instead of two. To restore the direct-browser escape hatch
     # (dev only), re-add "${KALOS_ENGINE_PORT:-8050}:8050" here and set
     # NEXT_PUBLIC_API_URL.
-    # HEALTHCHECK is baked into the image (Dockerfile.engine) - no override
+    # HEALTHCHECK is baked into the image (deploy/engine/Containerfile) - no override
     # needed here; compose reads the image-level healthcheck for
     # `condition: service_healthy` below.
 
   web:
     build:
       context: ../../kalos-web
-      dockerfile: ../kalos/deploy/Dockerfile.web
+      dockerfile: ../kalos/deploy/web/Containerfile
       args:
         # ESCAPE HATCH ONLY (wave-2): leave unset for the default posture,
         # where the browser calls same-origin /api/engine and kalos-web's
@@ -155,7 +155,7 @@ services:
   backup:
     build:
       context: ./backup
-      dockerfile: Dockerfile
+      dockerfile: Containerfile
     image: kalos-backup:${KALOS_IMAGE_TAG:-local}
     restart: always
     environment:

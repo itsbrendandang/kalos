@@ -1,4 +1,4 @@
-"""GET /healthz and GET /readyz (deploy/Dockerfile.engine's HEALTHCHECK target).
+"""GET /healthz and GET /readyz (deploy/engine/Containerfile's HEALTHCHECK target).
 
 Before this, the only unauthenticated route the deploy healthcheck could hit
 was `/`, which renders the full portal page - heavier than a healthcheck

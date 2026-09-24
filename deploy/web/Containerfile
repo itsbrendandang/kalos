@@ -1,30 +1,19 @@
 # syntax=docker/dockerfile:1
 #
-# kalos-web image - Next.js 16 (App Router, all client components in the API
-# call paths - see the "browser calls the engine directly" note in
-# ../RUNBOOK.md). Multi-stage: install -> build -> minimal runtime.
+# kalos-web image - Next.js 16 (App Router). Multi-stage: install -> build ->
+# minimal runtime. Build context is the kalos-web checkout (see
+# deploy/compose.yaml's `web.build`), not this repo.
 #
-# ASSUMES `output: "standalone"` IS SET in kalos-web/next.config.ts. It is
-# NOT set there today (checked 2026-08-25: next.config.ts is the bare
-# `const nextConfig: NextConfig = {};`). Without it, `.next/standalone` does
-# not exist and the COPY in the runtime stage below fails the build. This
-# Dockerfile was written against the sane end state on purpose rather than
-# against today's config, because the alternative (no standalone output) means
-# shipping the full `node_modules` tree (a much larger, slower-to-build image)
-# for a difference of one line in a file this deploy pack is not allowed to
-# touch (kalos-web is a separate repo/scope). The exact diff needed:
+# Requires `output: "standalone"` in kalos-web/next.config.ts (set; verified
+# 2026-09-24). Without it `.next/standalone` does not exist and the runtime
+# stage's COPY fails loudly.
 #
-#   --- a/next.config.ts
-#   +++ b/next.config.ts
-#   @@
-#    const nextConfig: NextConfig = {
-#   -  /* config options here */
-#   +  output: "standalone",
-#    };
-#
-# See the deployment report for the full explanation. Until that line lands,
-# `docker build -f deploy/Dockerfile.engine ...` for the web image will fail
-# at the runtime-stage COPY with a clear "not found" error, not silently.
+# How the browser reaches the engine: through kalos-web's same-origin server
+# proxy, which reads KALOS_ENGINE_URL / KALOS_ENGINE_TOKEN AT RUNTIME (set in
+# compose.yaml), so the engine address can change with a restart, no rebuild.
+# NEXT_PUBLIC_API_URL remains only as an escape hatch for calling the engine
+# directly from the browser; it is inlined at BUILD time, so changing it does
+# need a rebuild.
 
 # ---------------------------------------------------------------------------
 # deps - install once, reused by builder; kept separate so a source-only
@@ -47,21 +36,9 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# NEXT_PUBLIC_* variables are inlined into the client JS bundle AT BUILD
-# TIME by the Next.js compiler - they are not read from the environment when
-# the container starts. lib/api.ts reads `process.env.NEXT_PUBLIC_API_URL`
-# from "use client" code (every page under app/ that calls the engine is a
-# client component - confirmed 2026-08-25), i.e. the BROWSER calls the engine
-# directly, not this Next.js server. That has two consequences worth being
-# explicit about:
-#   1. The engine's externally-reachable URL (host + port the *browser* can
-#      reach, not a Docker-internal service name) has to be known and stable
-#      BEFORE this image is built.
-#   2. Changing that URL later means rebuilding this image
-#      (`docker compose build web`), not just restarting the container with a
-#      new environment variable - a runtime env change has no effect on an
-#      already-built NEXT_PUBLIC_* value. See RUNBOOK.md, "Changing the
-#      engine URL".
+# NEXT_PUBLIC_* variables are inlined into the client bundle at BUILD time.
+# Leave NEXT_PUBLIC_API_URL empty for the default same-origin proxy (see the
+# header); set it only to make the browser call the engine directly.
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_DEMO_MODE=""
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \
