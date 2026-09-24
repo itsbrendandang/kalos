@@ -571,3 +571,18 @@ def test_ratio_refusal_data_plan_gives_clean_and_refusal_targets():
     assert any(
         clean in line and f"avoid refusal, {refusal} L" in line for line in out["data_plan"]
     ), out["data_plan"]
+
+
+def test_production_phase_headers_do_not_block_the_readout():
+    """Regression from the first real-data run (lipase sheet): process
+    columns named after the production phase were guessed as extra targets
+    and the whole readout failed. The caller's named target is authoritative."""
+    df = _demo_sheet().rename(columns={"ph_setpoint": "pH_production", "temperature_C": "temp_production_C"})
+    target = ro.TargetSpec(
+        scale_L=7500.0,
+        agitation_rpm=150.0,
+        airflow_L_per_min=300.0,
+        process_params={"pH_production": 7.2, "temp_production_C": 37.0},
+    )
+    out = ro.build_readout(df, TARGET_COLUMN, ["pH_production", "temp_production_C"], target)
+    assert out["decision"] == ro.NUMBER, out["reasons"]

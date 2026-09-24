@@ -653,6 +653,7 @@ def _build_physics_config(
 
 def _normalize_provenance(
     df: pd.DataFrame,
+    target_column: str,
 ) -> tuple[pd.DataFrame, NormalizationPlan, str, str]:
     """Run `kalos.normalize`'s offline plan/apply flow over the raw upload
     for provenance and unit resolution, and return a working frame with the
@@ -669,7 +670,7 @@ def _normalize_provenance(
     frame's hash (see `build_readout`) are taken from the plan's untouched
     output, matching what a client re-running normalization would get.
     """
-    plan = offline_plan(df)
+    plan = offline_plan(df, target_column=target_column)
     result = apply_plan(df, plan)
     rename_back = {
         p.canonical_name: p.raw_name
@@ -782,7 +783,7 @@ def build_readout(
     """
     working_config, physics_assumptions = _build_physics_config(physics_overrides)
 
-    working_df, plan, normalized_csv, plan_json = _normalize_provenance(df)
+    working_df, plan, normalized_csv, plan_json = _normalize_provenance(df, target_column)
 
     gate_result = gate(working_df, target_column, process_columns, target, config=working_config)
 
