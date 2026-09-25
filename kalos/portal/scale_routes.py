@@ -250,6 +250,16 @@ def _decision_banner(readout: dict[str, Any]) -> str:
     )
 
 
+def _rung_verdict(r: dict[str, Any]) -> str:
+    """The rung's own verdict, plus why a winning rung still cannot license
+    the reference ratio when it sits below the license window."""
+    if r["too_few_to_judge"]:
+        return "too few to judge"
+    if not r["beats_both"]:
+        return "no"
+    return "yes" if r.get("in_license_window", True) else "yes (below license window)"
+
+
 def _rungs_table(readout: dict[str, Any]) -> str:
     rungs = readout.get("rungs") or []
     skipped = readout.get("skipped_rungs") or []
@@ -260,7 +270,7 @@ def _rungs_table(readout: dict[str, Any]) -> str:
             f'<td>{_fmt_sig4(r["scale_L"])} L</td><td>{_FMT_RATIO.format(r["step_ratio"])}</td><td>{r["n"]}</td>'
             f'<td>{_FMT_METRIC.format(r["mae"])}</td><td>{_FMT_METRIC.format(r["naive_mean_mae"])}</td>'
             f'<td>{_FMT_METRIC.format(r["naive_nn_mae"])}</td>'
-            f'<td>{"too few to judge" if r["too_few_to_judge"] else ("yes" if r["beats_both"] else "no")}</td>'
+            f"<td>{_rung_verdict(r)}</td>"
             "</tr>"
             for r in rungs
         )

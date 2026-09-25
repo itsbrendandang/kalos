@@ -64,7 +64,9 @@ The physics assumptions section only reports the assumptions scale_only actually
    For a fixed sheet and target the readout is deterministic.
    A rung with fewer than 3 runs (`MIN_RUNG_N_FOR_LICENSE`) still contributes its residuals to the pooled evidence, but it is marked "too few to judge": its own "beats both baselines" verdict is shown as "too few to judge" rather than yes or no, and it can never set the reference step ratio below.
 3. **Decision.**
-   The reference step ratio is the largest step ratio among rungs with at least 3 runs (`MIN_RUNG_N_FOR_LICENSE`) whose own MAE beats both naive baselines.
+   The reference step ratio is the largest step ratio among rungs with at least 3 runs (`MIN_RUNG_N_FOR_LICENSE`) whose own MAE beats both naive baselines, and whose held-out scale is within one decade (`LICENSE_WINDOW_DECADES`) of the largest trained scale.
+   The window matters because a step ratio alone ignores the scale regime: a 5x step won at 0.05 to 0.25 L says little about a 5x step at plant scale, where mixing and oxygen transfer behave differently.
+   A winning rung below the window is shown as "yes (below license window)".
    A thin rung (fewer than 3 runs) is never allowed to license the reference, even if it happens to beat both baselines.
    - *Prediction issued*: the pooled ladder MAE beats both baselines, there are at least 10 pooled residuals, at least one rung licenses a reference, the target ratio is at most 2x that reference, and every process parameter is inside the trained range.
    - *Prediction issued with warnings*: as above, but a process parameter is out of range or the target ratio is 2x to 5x the reference.

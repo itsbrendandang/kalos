@@ -24,6 +24,8 @@ would take" section stating in plain terms how many more runs, and at what scale
 record one or both, the readout falls back to a scale-only feature set instead of a 422, and the
 page names exactly what is not modeled as a result.
 
+The extrapolation license comes only from backtest steps near the scale being extrapolated from (within one decade of the largest trained scale), so a step won at bench scale cannot license a plant-scale step.
+
 ### Added - a synthetic multi-scale demo sheet
 
 `examples/synthetic_scaleup/`: 9 scales from 1 to 5000 L, 10 runs each, seeded and pinned by a test

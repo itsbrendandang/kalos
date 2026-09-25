@@ -724,3 +724,51 @@ def test_production_phase_headers_do_not_block_the_readout():
     )
     out = ro.build_readout(df, TARGET_COLUMN, ["pH_production", "temp_production_C"], target)
     assert out["decision"] == ro.NUMBER, out["reasons"]
+
+
+# --------------------------------------------------------------------------- #
+# license window: bench-scale wins cannot license plant-scale steps
+# --------------------------------------------------------------------------- #
+
+
+def test_bench_scale_rung_below_the_license_window_cannot_set_the_reference():
+    """A 5x step won at 0.25 L must not license a 5x step at plant scale:
+    only rungs within LICENSE_WINDOW_DECADES of the largest trained scale
+    may set the reference ratio."""
+    bench = ro.RungResult(
+        scale_L=0.25, step_ratio=5.0, n=10, mae=0.1, naive_mean_mae=1.1, naive_nn_mae=1.1,
+        beats_both=True, too_few_to_judge=False, in_license_window=False,
+    )
+    plant = _rung(2000.0, 2.0, beats_both=True)
+    result = ro.decide(
+        _ladder_result([bench, plant]),
+        requested_ratio=4.5,
+        target_process_params={"ph_setpoint": 7.0},
+        trained_param_ranges={"ph_setpoint": (6.5, 7.5)},
+    )
+    assert result.reference_ratio == pytest.approx(2.0)
+    # 4.5x > 2 x 2.0 warns; with the bench rung licensing (5.0) it would be clean
+    assert result.decision == ro.NUMBER_WITH_WARNING
+
+
+def test_only_bench_scale_wins_is_a_refusal_naming_the_window():
+    bench = ro.RungResult(
+        scale_L=0.25, step_ratio=5.0, n=10, mae=0.1, naive_mean_mae=1.1, naive_nn_mae=1.1,
+        beats_both=True, too_few_to_judge=False, in_license_window=False,
+    )
+    result = ro.decide(
+        _ladder_result([bench, _rung(2000.0, 2.0, beats_both=False)]),
+        requested_ratio=2.0,
+        target_process_params={"ph_setpoint": 7.0},
+        trained_param_ranges={"ph_setpoint": (6.5, 7.5)},
+    )
+    assert result.decision == ro.REFUSAL
+    assert any("decade(s) of the largest trained scale" in r for r in result.reasons)
+
+
+def test_ladder_marks_rungs_outside_the_license_window():
+    """Demo sheet: largest trained scale 5000 L, window 1 decade -> rungs at
+    500 L and above are inside, the rest outside."""
+    out = ro.build_readout(_demo_sheet(), TARGET_COLUMN, PROCESS_COLUMNS, _target(scale_L=7500.0))
+    for r in out["rungs"]:
+        assert r["in_license_window"] == (r["scale_L"] >= 500.0), r

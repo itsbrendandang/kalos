@@ -90,6 +90,11 @@ MIN_SCALES = 3
 MIN_RUNG_TRAIN_SCALES = 2
 MIN_RUNG_TRAIN_ROWS = 4
 MIN_RUNG_N_FOR_LICENSE = 3
+# A rung can license the reference step ratio only if its held-out scale is
+# within this many decades of the largest trained scale. A 5x step won at
+# 0.05 -> 0.25 L says little about a 5x step at plant scale, where mixing and
+# oxygen transfer behave differently; ratio alone ignores the scale regime.
+LICENSE_WINDOW_DECADES = 1.0
 MAX_DROPPED_FRACTION = 0.20
 HARD_CAP_RATIO = 20.0
 WARN_RATIO_MULT = 2.0
@@ -105,6 +110,7 @@ CONSTANTS: dict[str, float | str] = {
     "MIN_RUNG_TRAIN_SCALES": MIN_RUNG_TRAIN_SCALES,
     "MIN_RUNG_TRAIN_ROWS": MIN_RUNG_TRAIN_ROWS,
     "MIN_RUNG_N_FOR_LICENSE": MIN_RUNG_N_FOR_LICENSE,
+    "LICENSE_WINDOW_DECADES": LICENSE_WINDOW_DECADES,
     "MAX_DROPPED_FRACTION": MAX_DROPPED_FRACTION,
     "HARD_CAP_RATIO": HARD_CAP_RATIO,
     "WARN_RATIO_MULT": WARN_RATIO_MULT,
@@ -364,6 +370,8 @@ class RungResult:
     naive_nn_mae: float
     beats_both: bool
     too_few_to_judge: bool
+    # held-out scale is within LICENSE_WINDOW_DECADES of the largest trained scale
+    in_license_window: bool = True
 
 
 @dataclass(frozen=True)
@@ -444,6 +452,7 @@ def ladder(
             continue
         row = report["per_scale"][0]
         step_ratio = k / smaller[-1]
+        in_window = bool(np.log10(scales[-1] / k) <= LICENSE_WINDOW_DECADES + 1e-9)
         rungs.append(
             RungResult(
                 scale_L=k,
@@ -454,6 +463,7 @@ def ladder(
                 naive_nn_mae=row["naive_nn_mae"],
                 beats_both=bool(row["beats_naive_mean"] and row["beats_naive_nn"]),
                 too_few_to_judge=row["n"] < MIN_RUNG_N_FOR_LICENSE,
+                in_license_window=in_window,
             )
         )
         oof = report["oof"]
@@ -509,6 +519,12 @@ class DecisionResult:
     out_of_range_params: list[str]
 
 
+def _can_license(rung: RungResult) -> bool:
+    """A rung licenses the reference step ratio only when it beat both
+    baselines, on enough runs, near the scale regime being extrapolated from."""
+    return rung.beats_both and not rung.too_few_to_judge and rung.in_license_window
+
+
 def decide(
     ladder_result: LadderResult,
     requested_ratio: float,
@@ -531,12 +547,12 @@ def decide(
     # a rung with fewer than MIN_RUNG_N_FOR_LICENSE runs can beat both
     # baselines by chance on that thin a sample, so it is never allowed to
     # license the reference step ratio (see RungResult.too_few_to_judge).
-    licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
+    licensing_rungs = [r for r in ladder_result.rungs if _can_license(r)]
     reference_ratio = max((r.step_ratio for r in licensing_rungs), default=None)
     if reference_ratio is None:
         refusal_reasons.append(
-            f"no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs beat both naive baselines "
-            "to license a reference step ratio"
+            f"no rung with at least {MIN_RUNG_N_FOR_LICENSE} runs, within {LICENSE_WINDOW_DECADES:g} decade(s) "
+            "of the largest trained scale, beat both naive baselines to license a reference step ratio"
         )
 
     # the pooled verdict is only a verdict with enough residuals behind it
@@ -638,16 +654,18 @@ def _build_data_plan(
     plan: list[str] = []
     n_residuals = len(ladder_result.residuals)
     x_scale = _smallest_rung_target_scale(clean_df, config)
+    largest_trained_L = float(clean_df[config.scale_column].max())
+    license_floor_L = max(x_scale, largest_trained_L / 10**LICENSE_WINDOW_DECADES)
 
     if n_residuals < MIN_RESIDUALS:
         shortfall = MIN_RESIDUALS - n_residuals
         plan.append(f"{shortfall} more run(s) at any scale of {format_liters_plain(x_scale)} L or larger")
         plan.append("runs at the largest scales also build the evidence that licenses larger steps")
 
-    licensing_rungs = [r for r in ladder_result.rungs if r.beats_both and not r.too_few_to_judge]
+    licensing_rungs = [r for r in ladder_result.rungs if _can_license(r)]
     if not licensing_rungs:
         plan.append(
-            f"at least {MIN_RUNG_N_FOR_LICENSE} runs at a single scale of {format_liters_plain(x_scale)} L or larger "
+            f"at least {MIN_RUNG_N_FOR_LICENSE} runs at a single scale of {format_liters_plain(license_floor_L)} L or larger "
             "whose backtest beats both baselines"
         )
 
