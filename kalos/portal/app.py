@@ -15,7 +15,6 @@ sibling modules:
     `UploadRejected`, the upload size/shape caps).
   - `kalos.portal.analysis` - the science (`_analyze` and its helpers).
   - `kalos.portal.serialization` - JSON-safe serialization helpers.
-  - `kalos.portal.experiments` - the M2 `/api/experiments*` surface.
 Names historically imported `from kalos.portal.app import ...` are re-exported
 below so existing call sites and tests keep working unchanged.
 """
@@ -47,9 +46,8 @@ from kalos.portal.config import (
     log_security_posture,
     open_access_explicitly_allowed,
 )
+from kalos.portal.campaign import CampaignStore, get_campaign_store
 from kalos.portal.campaign_routes import router as _campaign_router
-from kalos.portal.experiments import get_lock_path, get_store
-from kalos.portal.experiments import router as _experiments_router
 from kalos.portal.scale_routes import router as _scale_router
 from kalos.portal.uploads import (
     MAX_COLUMNS,
@@ -63,7 +61,6 @@ from kalos.portal.uploads import (
     _parse_upload,
 )
 from kalos.providers import provider_status
-from kalos.store import SqliteStore
 
 log = logging.getLogger("kalos.portal")
 
@@ -298,20 +295,21 @@ def healthz() -> dict:
 
 
 @app.get("/readyz")
-def readyz(store: SqliteStore = Depends(get_store)) -> JSONResponse:
+def readyz(store: CampaignStore = Depends(get_campaign_store)) -> JSONResponse:
     """Readiness probe: unlike `/healthz`, this DOES touch the database - on
     purpose, to answer "can this instance actually serve requests that need
     the store", not just "is the process up".
 
-    Read-only: `store.list()` is a plain SELECT, never a write, so a
-    readiness check can never itself be the thing that corrupts or contends
-    for the store it is checking. Degrades to a 503 with a `reason` on any
-    failure (missing/corrupt/locked database file) instead of raising, so an
-    orchestrator's readiness probe always gets a normal HTTP response rather
-    than a stack trace.
+    Read-only: `store.get()` is a plain SELECT (the `default` tenant's
+    campaign row, or None if none seeded yet - either is a healthy answer),
+    never a write, so a readiness check can never itself be the thing that
+    corrupts or contends for the store it is checking. Degrades to a 503
+    with a `reason` on any failure (missing/corrupt/locked database file)
+    instead of raising, so an orchestrator's readiness probe always gets a
+    normal HTTP response rather than a stack trace.
     """
     try:
-        store.list()
+        store.get()
     except Exception as exc:  # noqa: BLE001 - any store failure means "not ready", not a 500
         return JSONResponse({"status": "unavailable", "reason": str(exc)}, status_code=503)
     return JSONResponse({"status": "ok"})
@@ -521,27 +519,21 @@ async def run_uploaded(
         return JSONResponse({"error": _ERR_PARSE}, status_code=400)
 
 
-# --- M2.2: /api/experiments - thin wrappers over the store + Singleton runner  #
-# (docs/M2_INTEGRATION.md, "Portal API additions"). The routes themselves live
-# in `kalos.portal.experiments`; mounted here so they are served by this app.
-app.include_router(_experiments_router)
-
 # --- campaign loop: /api/campaign* (docs/CAMPAIGN_LOOP.md) - the closed
 # optimization loop: propose -> run -> log outcome -> re-propose. Routes live
 # in `kalos.portal.campaign_routes`; mounted here so they are served by this
-# app, same pattern as the experiments router above.
+# app.
 app.include_router(_campaign_router)
 
 # --- Scale-Up Readout: /api/scale/readout (stateless, D6) - a one-page HTML
 # readout over an uploaded multi-scale run sheet. Routes live in
-# `kalos.portal.scale_routes`; mounted here, same pattern as the routers
+# `kalos.portal.scale_routes`; mounted here, same pattern as the router
 # above.
 app.include_router(_scale_router)
 
 __all__ = [
     "app",
-    "get_store",
-    "get_lock_path",
+    "get_campaign_store",
     "_analyze",
     "UploadRejected",
     "MAX_COLUMNS",
