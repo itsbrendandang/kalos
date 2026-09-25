@@ -23,21 +23,21 @@ jobs:
     # container-only defects (a boot crash from an empty env var, a proxy
     # timeout, a torch-thread pathology) that 791 passing unit tests never
     # caught - none of them run inside the actual image. `docker build` alone
-    # only catches broken Dockerfile syntax/layering; the boot-crash class of
+    # only catches broken Containerfile syntax/layering; the boot-crash class of
     # bug only shows up once the container actually starts, hence the
     # `docker run` + /healthz poll below rather than stopping at the build.
     #
-    # kalos-web's image (deploy/Dockerfile.web) is deliberately NOT built
+    # kalos-web's image (kalos-web/Containerfile) is deliberately NOT built
     # here: its build context is the sibling kalos-web repo
-    # (docker-compose.yaml's `context: ../../kalos-web`), which this
+    # (compose.yaml's `context: ../../kalos-web`), which this
     # single-repo checkout does not have, and pulling it in would need a
     # cross-repo PAT stored as a secret - a deliberate call to make, not a
     # silent side effect of a CI hardening pass.
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f deploy/Dockerfile.engine -t kalos-engine:ci .
+      - run: docker build -f deploy/engine/Containerfile -t kalos-engine:ci .
       # Default image config binds loopback-only and needs no auth (see
-      # Dockerfile.engine's KALOS_HOST comment) - that bind is unreachable
+      # deploy/engine/Containerfile's KALOS_HOST comment) - that bind is unreachable
       # from outside the container, so publishing a port would just hang.
       # KALOS_HOST=0.0.0.0 here reproduces the compose deployment's actual
       # posture, which means it also has to satisfy `assert_safe_exposure`
@@ -51,7 +51,7 @@ jobs:
             -e KALOS_ANON_SALT=ci-smoke-test-salt \
             -e KALOS_CORS_ORIGINS=http://localhost:3000 \
             kalos-engine:ci
-          # Poll the image's own HEALTHCHECK (deploy/Dockerfile.engine polls
+          # Poll the image's own HEALTHCHECK (deploy/engine/Containerfile polls
           # /healthz via stdlib urllib) rather than curling the port directly:
           # tried that locally first and it failed with "Connection reset by
           # peer" during the ~15-20s torch import on boot - curl's own

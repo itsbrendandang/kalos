@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # kalos engine image - FastAPI/uvicorn portal (`python -m kalos.portal`,
-# kalos/portal/__main__.py), not Flask/Gunicorn. See docker-compose.yaml and
+# kalos/portal/__main__.py), not Flask/Gunicorn. See compose.yaml and
 # ../RUNBOOK.md for how this image is wired up and why.
 #
 # Multi-stage: a `builder` stage does the pip/compile work into a venv, and
@@ -25,7 +25,7 @@ WORKDIR /build
 # Only the inputs `pip install -e .` (well, a real install, not editable -
 # see below) actually needs: package metadata + the package itself. Not
 # uv.lock - pip does not read it, and kalos does not vendor a requirements
-# lock for pip today; this Dockerfile pins nothing beyond what pyproject.toml
+# lock for pip today; this Containerfile pins nothing beyond what pyproject.toml
 # pins, which is the same story a fresh `pip install kalos[ml,portal]` tells
 # an operator outside Docker.
 RUN python -m venv /opt/venv
@@ -96,7 +96,7 @@ COPY --from=builder /opt/venv /opt/venv
 # follow it together. It is still pinned to this user's actual `$HOME/.kalos`
 # for simplicity: no extra directory to create or `chown` beyond the
 # container's own home setup, and it stays the one mount point
-# docker-compose.yaml's `kalos-state` volume targets (experiments.db,
+# compose.yaml's `kalos-state` volume targets (experiments.db,
 # portal.db, runner.lock, latest/ - all four artifacts, one directory).
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -105,7 +105,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 
 # `KALOS_HOST` is deliberately NOT set here - kalos/portal/__main__.py
 # defaults it to 127.0.0.1 (loopback-only), which is the safe default for
-# "run this image standalone with no other configuration". docker-compose.yaml
+# "run this image standalone with no other configuration". compose.yaml
 # overrides it to 0.0.0.0 explicitly, alongside the auth env that
 # `assert_safe_exposure` requires before it will accept a non-loopback bind
 # (kalos/portal/config.py). See RUNBOOK.md, "Security checklist".

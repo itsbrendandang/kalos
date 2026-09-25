@@ -1,0 +1,11 @@
+# Build context for deploy/engine/Containerfile (context = repo root).
+# Allowlist: the image COPYs only pyproject.toml, README.md and kalos/, so
+# nothing else is sent to the builder. New top-level files (a local .env,
+# deploy/backups/, .venv, .git, agent worktrees) are excluded by default.
+# Podman reads this file; .dockerignore is a symlink to it for Docker.
+*
+!pyproject.toml
+!README.md
+!kalos/
+**/__pycache__
+**/*.pyc

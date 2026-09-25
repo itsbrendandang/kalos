@@ -1,5 +1,5 @@
-"""Static validation of the deploy/ pack (docker-compose.yaml, .env.example,
-Dockerfiles, backup script) - deployment plumbing does not run kalos itself,
+"""Static validation of the deploy/ pack (compose.yaml, .env.example,
+Containerfiles, backup script) - deployment plumbing does not run kalos itself,
 so this deliberately does not touch any `kalos.*` import: it just checks the
 config files are well-formed and internally consistent with each other.
 
@@ -21,7 +21,7 @@ import pytest
 import yaml
 
 DEPLOY_DIR = Path(__file__).resolve().parent.parent / "deploy"
-COMPOSE_PATH = DEPLOY_DIR / "docker-compose.yaml"
+COMPOSE_PATH = DEPLOY_DIR / "compose.yaml"
 ENV_EXAMPLE_PATH = DEPLOY_DIR / ".env.example"
 
 # Every env var this deploy pack treats as REQUIRED - i.e. the stack starts
@@ -91,7 +91,7 @@ def test_compose_engine_binds_state_dir_to_engine_home_and_backup_reads_it_reado
     kalos/runner/singleton.py's DEFAULT_LOCK_PATH both hardcode
     Path.home()/".kalos" and ignore KALOS_STATE_DIR - so the volume mount
     target must be the engine container's actual $HOME/.kalos
-    (/home/kalos/.kalos per Dockerfile.engine), not an arbitrary path, or
+    (/home/kalos/.kalos per deploy/engine/Containerfile), not an arbitrary path, or
     experiments.db and runner.lock silently land outside the mounted volume
     (and outside the backup sidecar's reach)."""
     doc = _load_compose()
@@ -238,16 +238,16 @@ def test_no_secret_looking_literal_in_any_deploy_file():
     assert not offenders, f"secret-looking literals found: {offenders}"
 
 
-def test_dockerfiles_run_as_non_root_user():
-    for name in ("Dockerfile.engine", "Dockerfile.web", "backup/Dockerfile"):
+def test_containerfiles_run_as_non_root_user():
+    for name in ("engine/Containerfile", "backup/Containerfile"):
         text = (DEPLOY_DIR / name).read_text()
         user_lines = [line for line in text.splitlines() if line.strip().startswith("USER ")]
         assert user_lines, f"{name} never switches to a non-root USER"
         assert user_lines[-1].strip() != "USER root", f"{name} ends as root"
 
 
-def test_dockerfiles_declare_a_healthcheck():
-    for name in ("Dockerfile.engine", "Dockerfile.web"):
+def test_containerfiles_declare_a_healthcheck():
+    for name in ("engine/Containerfile",):
         text = (DEPLOY_DIR / name).read_text()
         assert "HEALTHCHECK" in text, f"{name} has no HEALTHCHECK"
 
@@ -259,10 +259,10 @@ def test_backup_script_is_syntactically_valid_posix_sh():
 
 
 def test_backup_script_state_dir_default_matches_engine_home():
-    """The backup sidecar's default STATE_DIR must match Dockerfile.engine's
+    """The backup sidecar's default STATE_DIR must match deploy/engine/Containerfile's
     KALOS_STATE_DIR - a drift between the two would make the sidecar back up
     an empty directory."""
     script_text = (DEPLOY_DIR / "backup" / "backup.sh").read_text()
-    dockerfile_text = (DEPLOY_DIR / "Dockerfile.engine").read_text()
+    containerfile_text = (DEPLOY_DIR / "engine" / "Containerfile").read_text()
     assert "/home/kalos/.kalos" in script_text
-    assert "KALOS_STATE_DIR=/home/kalos/.kalos" in dockerfile_text
+    assert "KALOS_STATE_DIR=/home/kalos/.kalos" in containerfile_text
