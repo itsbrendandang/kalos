@@ -9,9 +9,10 @@ builds the same under Docker and Podman.
 
 ### Changed - one directory per image
 
-`deploy/engine/Containerfile`, `deploy/web/Containerfile` and
-`deploy/backup/Containerfile` replace `Dockerfile.engine`, `Dockerfile.web`
-and `backup/Dockerfile`; `deploy/compose.yaml` replaces
+`deploy/engine/Containerfile` and `deploy/backup/Containerfile` replace
+`Dockerfile.engine` and `backup/Dockerfile`; the web image's Containerfile
+moved into the kalos-web repo itself (it builds that repo), so the kalos
+checkout no longer has to be named `kalos`. `deploy/compose.yaml` replaces
 `docker-compose.yaml`. Image contents are unchanged. Update any local
 scripts: `docker compose -f deploy/compose.yaml ...`.
 

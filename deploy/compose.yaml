@@ -120,7 +120,7 @@ services:
   web:
     build:
       context: ../../kalos-web
-      dockerfile: ../kalos/deploy/web/Containerfile
+      dockerfile: Containerfile
       args:
         # ESCAPE HATCH ONLY (wave-2): leave unset for the default posture,
         # where the browser calls same-origin /api/engine and kalos-web's

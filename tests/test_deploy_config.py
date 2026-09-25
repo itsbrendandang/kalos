@@ -239,7 +239,7 @@ def test_no_secret_looking_literal_in_any_deploy_file():
 
 
 def test_containerfiles_run_as_non_root_user():
-    for name in ("engine/Containerfile", "web/Containerfile", "backup/Containerfile"):
+    for name in ("engine/Containerfile", "backup/Containerfile"):
         text = (DEPLOY_DIR / name).read_text()
         user_lines = [line for line in text.splitlines() if line.strip().startswith("USER ")]
         assert user_lines, f"{name} never switches to a non-root USER"
@@ -247,7 +247,7 @@ def test_containerfiles_run_as_non_root_user():
 
 
 def test_containerfiles_declare_a_healthcheck():
-    for name in ("engine/Containerfile", "web/Containerfile"):
+    for name in ("engine/Containerfile",):
         text = (DEPLOY_DIR / name).read_text()
         assert "HEALTHCHECK" in text, f"{name} has no HEALTHCHECK"
 

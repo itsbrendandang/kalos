@@ -48,9 +48,8 @@ Env knobs that exist because this deployment found the need for them:
   section resolves `kalos-web`'s path as `../../kalos-web` relative to this
   file - if your checkout layout differs, that one path is the thing to
   edit, nothing else in this pack assumes a particular layout.
-  The web image's Containerfile path is resolved from that context as
-  `../kalos/deploy/web/Containerfile`, so the kalos checkout directory must
-  also be named `kalos`.
+  The web image is built from kalos-web's own `Containerfile`, at the root of
+  that checkout.
 
 ## Container files
 
@@ -60,7 +59,7 @@ and Podman), plus one compose file:
 | Path | Image | Build context |
 |---|---|---|
 | `deploy/engine/Containerfile` | `kalos-engine` (FastAPI/BoTorch portal) | repo root |
-| `deploy/web/Containerfile` | `kalos-web` (Next.js) | the sibling `kalos-web` checkout |
+| `kalos-web/Containerfile` (in the kalos-web repo) | `kalos-web` (Next.js) | the sibling `kalos-web` checkout |
 | `deploy/backup/Containerfile` | `kalos-backup` (SQLite backup sidecar) | `deploy/backup/` |
 | `deploy/compose.yaml` | the whole stack | - |
 
@@ -78,6 +77,10 @@ The same files work under Podman:
 podman build --format docker -f deploy/engine/Containerfile -t kalos-engine:local .
 podman compose -f deploy/compose.yaml up -d --build
 ```
+
+Docker looks for a file named `Dockerfile` by default, so outside compose
+pass the file explicitly: `docker build -f deploy/engine/Containerfile .`
+(Podman finds `Containerfile` on its own).
 
 Use `--format docker`: Podman's default OCI image format drops the
 `HEALTHCHECK` instruction, and compose's `depends_on: service_healthy`
@@ -230,7 +233,7 @@ script still copies it opportunistically under
 ## Health checks
 
 Both `engine` and `web` carry an image-level `HEALTHCHECK` (see
-`deploy/engine/Containerfile` / `deploy/web/Containerfile` for exactly what each checks and
+`deploy/engine/Containerfile` / `kalos-web/Containerfile` for exactly what each checks and
 why). The engine's hits `GET /healthz` (wave-2 fix; an earlier pass of this
 deploy pack used `GET /` as a stand-in because the route did not exist yet
 - see git history for that reasoning). `/healthz` is unauthenticated by
@@ -287,7 +290,7 @@ so it stays a pure liveness check. `docker compose ps` shows `healthy` /
 ## Changing the engine URL
 
 Because `NEXT_PUBLIC_API_URL` is compiled into kalos-web's client bundle at
-build time (see `deploy/web/Containerfile`), moving the engine to a new host/port
+build time (see `kalos-web/Containerfile`), moving the engine to a new host/port
 means:
 
 ```bash

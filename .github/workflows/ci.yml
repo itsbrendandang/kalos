@@ -27,7 +27,7 @@ jobs:
     # bug only shows up once the container actually starts, hence the
     # `docker run` + /healthz poll below rather than stopping at the build.
     #
-    # kalos-web's image (deploy/web/Containerfile) is deliberately NOT built
+    # kalos-web's image (kalos-web/Containerfile) is deliberately NOT built
     # here: its build context is the sibling kalos-web repo
     # (compose.yaml's `context: ../../kalos-web`), which this
     # single-repo checkout does not have, and pulling it in would need a
