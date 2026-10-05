@@ -16,7 +16,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from kalos.portal.auth import READ, WRITE, Principal, require_scope
+from kalos.portal.auth import (
+    READ,
+    RUNNER,
+    WRITE,
+    AuthConfigError,
+    Authenticator,
+    Principal,
+    get_authenticator,
+    require_principal,
+    require_scope,
+)
 from kalos.portal.serialization import _json_safe_records
 from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
 from kalos.runner.adapter import LocalStoreAdapter
@@ -145,10 +155,16 @@ def patch_experiment_status(
     exp_id: str,
     body: _PatchStatusBody,
     store: SqliteStore = Depends(get_store),
-    principal: Principal = Depends(require_scope(WRITE)),
+    principal: Principal = Depends(require_principal),
 ) -> dict[str, Any]:
     """Set an experiment's status - this is how the front end flips the READY
-    flag.
+    flag, and how a remote runner (`HttpBackendAdapter.set_status`) claims
+    and fails experiments.
+
+    Scope is checked per transition (least privilege): the `READY` flip needs
+    `write`, the runner transitions need `runner`, and a principal with
+    neither is refused (403) before the body is even looked at. So a polling
+    runner's principal needs only `read` + `runner`, never `write`.
 
     A CLIENT-FACING ALLOWLIST, enforced here (not just `legal_transition`):
     the only status a client may PATCH to is `READY` - allowed from `DRAFT`
@@ -163,24 +179,35 @@ def patch_experiment_status(
     Singleton's own orphan recovery (`reclaim_stale`), never for a client.
     An illegal transition that survives the allowlist (e.g. `DONE -> READY`
     without `force`) is still a 409, not a crash.
+
+    A principal holding the `runner` scope (a provisioned token only, never
+    open mode) may ALSO PATCH to `PROCESSING` and `FAILED` - the two runner
+    transitions `legal_transition` then confines to `READY -> PROCESSING` and
+    `PROCESSING -> FAILED`. `DONE` stays unreachable through PATCH for
+    everyone: it is only ever set by the result push, which carries the result.
     """
+    if not (principal.has(WRITE) or principal.has(RUNNER)):
+        raise HTTPException(status_code=403, detail=f"requires '{WRITE}' scope")
     try:
         new_status = Status(body.status)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown status {body.status!r}")
 
-    if new_status != Status.READY:
+    runner_transition = principal.has(RUNNER) and new_status in (Status.PROCESSING, Status.FAILED)
+    if new_status != Status.READY and not runner_transition:
         raise HTTPException(
             status_code=409,
             detail=f"status {new_status.value!r} is set by the runner, not directly settable",
         )
+    if new_status == Status.READY and not principal.has(WRITE):
+        raise HTTPException(status_code=403, detail=f"requires '{WRITE}' scope")
 
     try:
         current = store.get(exp_id, tenant=principal.tenant)
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
 
-    if current.status == Status.PROCESSING:
+    if current.status == Status.PROCESSING and not runner_transition:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -209,32 +236,53 @@ class _PushResultBody(BaseModel):
     provenance: dict[str, Any]
 
 
-def _check_runner_token(authorization: str | None) -> None:
-    """Token-gate `/result` (SECURITY - see the module section header below).
+def _result_push_tenant(authorization: str | None, auth: Authenticator) -> str:
+    """Authorize a `/result` push and return the tenant it may write to
+    (SECURITY - see the module section header below).
 
-    Without this, `/result` accepted an unauthenticated `{result,
+    Without a gate, `/result` accepted an unauthenticated `{result,
     provenance}` from anyone and marked a `PROCESSING` experiment `DONE`,
     letting an attacker race a fabricated result in ahead of the genuine one.
 
-    Reads `KALOS_RUNNER_TOKEN` from the environment AT REQUEST TIME (not
-    import time), so tests can monkeypatch/env-override it per-test:
-      - unset -> the endpoint is disabled entirely: 404. The local M2 loop
-        (`LocalStoreAdapter`) never calls this endpoint - it writes to the
-        store directly - so only a remote runner needs it, and it must be
-        opted into explicitly.
-      - set -> the caller must send `Authorization: Bearer <token>` matching
-        EXACTLY (constant-time compare via `hmac.compare_digest`, so a wrong
-        guess cannot be timed byte-by-byte); missing or wrong -> 401.
+    Two credentials are accepted, both read AT REQUEST TIME (not import time),
+    so tests can monkeypatch/env-override them per-test:
+      - the legacy machine-channel secret `KALOS_RUNNER_TOKEN`, as
+        `Authorization: Bearer <token>` matching EXACTLY (constant-time
+        compare via `hmac.compare_digest`, so a wrong guess cannot be timed
+        byte-by-byte). It carries no identity, so it writes to the `default`
+        tenant only.
+      - a provisioned `KALOS_AUTH_TOKENS` principal holding the `runner`
+        scope, which writes to that principal's tenant. A principal without
+        `runner` (e.g. a plain read+write client token) -> 403.
+    With neither configured the endpoint is disabled entirely: 404. The local
+    M2 loop (`LocalStoreAdapter`) never calls this endpoint - it writes to
+    the store directly - so only a remote runner needs it, and it must be
+    opted into explicitly. Otherwise a missing or wrong bearer -> 401.
     Never logs the token.
     """
-    token = os.environ.get("KALOS_RUNNER_TOKEN")
-    if not token:
+    try:
+        enforces = auth.enforces()
+    except AuthConfigError:
+        log.exception("kalos auth: token configuration is invalid")
+        raise HTTPException(status_code=500, detail="authentication is misconfigured") from None
+    legacy_token = os.environ.get("KALOS_RUNNER_TOKEN")
+    if not legacy_token and not enforces:
         raise HTTPException(status_code=404, detail="not found")
-    provided = None
-    if authorization and authorization.startswith("Bearer "):
-        provided = authorization[len("Bearer ") :]
-    if not provided or not hmac.compare_digest(provided, token):
+
+    if legacy_token:
+        provided = None
+        if authorization and authorization.startswith("Bearer "):
+            provided = authorization[len("Bearer ") :]
+        # Compare BYTES: `compare_digest` raises TypeError on a non-ASCII str,
+        # which would let any caller turn a wrong guess into a 500.
+        if provided and hmac.compare_digest(provided.encode("utf-8"), legacy_token.encode("utf-8")):
+            return "default"
+    if not enforces:
         raise HTTPException(status_code=401, detail="unauthorized")
+    principal = require_principal(authorization, auth)  # 401 on a missing/unknown token
+    if not principal.has(RUNNER):
+        raise HTTPException(status_code=403, detail=f"requires '{RUNNER}' scope")
+    return principal.tenant
 
 
 @router.post("/api/experiments/{exp_id}/result")
@@ -242,6 +290,7 @@ def push_experiment_result(
     exp_id: str,
     body: _PushResultBody,
     authorization: str | None = Header(default=None),
+    auth: Authenticator = Depends(get_authenticator),
     store: SqliteStore = Depends(get_store),
 ) -> dict[str, Any]:
     """Ingest a processed result + provenance and mark the experiment DONE
@@ -250,24 +299,27 @@ def push_experiment_result(
     Singleton path (`LocalStoreAdapter`, the M2 default) calls
     `store.save_result` directly and never goes through this HTTP endpoint.
 
-    Token-gated and off by default - see `_check_runner_token`: unset
-    `KALOS_RUNNER_TOKEN` -> 404, missing/wrong bearer -> 401. Also rejects an
+    Gated and off by default - see `_result_push_tenant`: with neither
+    `KALOS_RUNNER_TOKEN` nor auth tokens configured -> 404, missing/wrong
+    bearer -> 401, a principal without the `runner` scope -> 403. The
+    experiment is looked up on the tenant that credential grants, so a
+    cross-tenant id reads as not-found (404). Also rejects an
     experiment that already has a non-null `result` with 409 ("result
     already present"), independent of the `PROCESSING`-only rule already
     enforced by `save_result` - an integrity/idempotency guard so a stray or
     racing push can never silently overwrite a genuine result.
     """
-    _check_runner_token(authorization)
+    tenant = _result_push_tenant(authorization, auth)
 
     try:
-        current = store.get(exp_id)
+        current = store.get(exp_id, tenant=tenant)
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
     if current.result is not None:
         raise HTTPException(status_code=409, detail="result already present")
 
     try:
-        exp = store.save_result(exp_id, body.result, body.provenance)
+        exp = store.save_result(exp_id, body.result, body.provenance, tenant=tenant)
     except ExperimentNotFound:
         raise HTTPException(status_code=404, detail=f"no experiment with id {exp_id!r}")
     except IllegalTransition as exc:

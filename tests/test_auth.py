@@ -12,6 +12,7 @@ import pytest
 from kalos.portal.auth import (
     ADMIN,
     READ,
+    RUNNER,
     WRITE,
     AuthConfigError,
     Authenticator,
@@ -41,6 +42,7 @@ def test_open_mode_returns_anonymous_readwrite_principal(monkeypatch):
     assert p.tenant == "default"
     assert p.has(READ) and p.has(WRITE)
     assert not p.has(ADMIN)  # admin is never granted without a real token
+    assert not p.has(RUNNER)  # nor runner: open mode must not let anyone claim or push results
 
 
 # --- configured mode: valid / invalid / missing ----------------------------- #

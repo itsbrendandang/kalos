@@ -20,8 +20,9 @@ Design (deliberately self-hosted, no external identity provider):
   granted in open mode. The moment tokens are provisioned, enforcement turns on;
   there is no half-authenticated state.
 
-This generalizes the single-token `_check_runner_token` gate in
-`kalos.portal.experiments`; that legacy channel is subsumed over time.
+This generalizes the single-token `KALOS_RUNNER_TOKEN` gate on `/result` in
+`kalos.portal.experiments` (`_result_push_tenant`), which now also accepts a
+`runner`-scoped principal; that legacy channel is subsumed over time.
 """
 from __future__ import annotations
 
@@ -41,12 +42,18 @@ log = logging.getLogger("kalos.portal")
 READ = "read"
 WRITE = "write"
 ADMIN = "admin"
-_VALID_SCOPES = frozenset({READ, WRITE, ADMIN})
+# The remote Singleton runner's machine privilege: the runner-only experiment
+# status transitions (`READY -> PROCESSING`, `PROCESSING -> FAILED`) and the
+# result push (`kalos/portal/experiments.py`). A plain `write` principal is a
+# client and gets neither, so a client still cannot claim an experiment or
+# fabricate its result. Like `admin`, never granted in open mode.
+RUNNER = "runner"
+_VALID_SCOPES = frozenset({READ, WRITE, ADMIN, RUNNER})
 
 # The tenant/subject an unauthenticated request is attributed to in open mode.
 _ANON_TENANT = "default"
 _ANON_SUBJECT = "anonymous"
-_OPEN_MODE_SCOPES = frozenset({READ, WRITE})  # never ADMIN without a real token
+_OPEN_MODE_SCOPES = frozenset({READ, WRITE})  # never ADMIN or RUNNER without a real token
 
 
 @dataclass(frozen=True)
