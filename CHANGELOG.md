@@ -66,6 +66,49 @@ sent twice.
 `tests/test_m2_runner_auth.py` drives the real Singleton (`run_ready`) through
 the FastAPI app with auth enforced, and pins each failure mode above.
 
+## 2026-09-23 (the Scale-Up Readout)
+
+You can now hand a prospect one page that answers "what will this process do at the next scale,
+and should I believe the number?" - and that says no when the data cannot support an answer.
+
+### Added - `POST /api/scale/readout`
+
+Upload a multi-scale run sheet plus a target scale and get a self-contained, print-ready HTML
+readout (page 1 is the decision; a provenance appendix follows). Kalos first backtests itself on
+the sheet's own scale ladder against two naive baselines, then issues a prediction with an
+approximate-coverage interval, a prediction with named warnings, or a refusal with every reason.
+The license to extrapolate comes only from backtest steps the model actually won. The route is
+stateless: nothing from the upload is written to disk or the database. See `docs/SCALE_READOUT.md`.
+The gate no longer requires a minimum run count per scale, so a sheet with many bench runs and only
+one or two runs at each large scale is read honestly instead of rejected outright. When the evidence
+is too thin (too few pooled residuals, or no rung with enough runs to license a reference step
+ratio), the readout still returns a 200 page showing everything it could compute, plus a "What it
+would take" section stating in plain terms how many more runs, and at what scale, would change that.
+`agitation_rpm`/`airflow_L_per_min` are now optional on the sheet and target: when a sheet does not
+record one or both, the readout falls back to a scale-only feature set instead of a 422, and the
+page names exactly what is not modeled as a result.
+
+The extrapolation license comes only from backtest steps near the scale being extrapolated from (within one decade of the largest trained scale), so a step won at bench scale cannot license a plant-scale step.
+
+### Added - a synthetic multi-scale demo sheet
+
+`examples/synthetic_scaleup/`: 9 scales from 1 to 5000 L, 10 runs each, seeded and pinned by a test
+so the committed CSV cannot drift. On it, a 1.5x step (7500 L) issues a prediction whose backtest
+MAE is 0.263 against 0.699 and 0.729 for the naive baselines.
+
+### Changed - the scale-model evidence is now reconciled
+
+The scale evaluation's docstring said v0 did not clearly beat the naive baselines on upward
+extrapolation; rerunning it on the synthetic mab-scaleup dataset shows it does on MAE (0.533 vs
+1.510 and 1.382, n=5), while its ranking of recipes at the larger scale stays unmeasured at that n.
+Docstring and `docs/SCALE_EVIDENCE.md` now say the same thing, with the command to reproduce it.
+
+### For contributors
+
+`leave_one_scale_out_report` gains `include_oof` (per-row out-of-fold arrays) and `held_out_scales`
+(evaluate only the named folds, skipping the pooled LOGO pass). Both default off, and the default
+output is pinned byte-identical by a regression test. `deploy/backups/` is now gitignored.
+
 ## 2026-09-10 (the deploy pack meets reality)
 
 The wave-2 deploy pack was written and config-tested but its images were never

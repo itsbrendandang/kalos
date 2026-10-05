@@ -69,7 +69,7 @@ behind the explicit `candidate` constructor parameter below.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -83,6 +83,7 @@ from .features import (
     DEFAULT_POWER_NUMBER,
     DEFAULT_VANT_RIET,
     PHYSICS_FEATURE_COLUMNS,
+    SCALE_ONLY_FEATURE_COLUMNS,
     GeometryAssumptions,
     PowerNumberAssumption,
     VantRietParams,
@@ -96,6 +97,20 @@ class ScaleFeatureConfig:
     matrix. Bundles `kalos.scale.features.compute_scale_features`'s
     arguments so a caller states them once and reuses the same config for
     `fit`, `predict`, and the evaluation harness.
+
+    `feature_set` (default `"physics"` - UNCHANGED default behavior):
+    which physics columns `build_feature_matrix` appends after the process
+    columns.
+      - `"physics"` (default): `PHYSICS_FEATURE_COLUMNS`, exactly as
+        before this field existed.
+      - `"scale_only"`: `SCALE_ONLY_FEATURE_COLUMNS` - the two physics
+        features computable from `scale_L` alone (`log_volume_ratio`,
+        `hydrostatic_pressure_mmHg`), for a run sheet that does not record
+        `agitation_rpm`/`airflow_L_per_min`. Choosing this explicitly, so
+        those two features are never silently all-NaN (which the
+        no-imputation `fit` contract would otherwise turn into "every row
+        dropped" - see `kalos.scale.readout.build_readout`'s feature_set
+        selection for the caller that actually picks this).
     """
 
     scale_column: str = "scale_L"
@@ -105,6 +120,7 @@ class ScaleFeatureConfig:
     geometry: GeometryAssumptions = DEFAULT_GEOMETRY
     power: PowerNumberAssumption = DEFAULT_POWER_NUMBER
     kla_params: VantRietParams = DEFAULT_VANT_RIET
+    feature_set: Literal["physics", "scale_only"] = "physics"
 
 
 DEFAULT_SCALE_FEATURE_CONFIG = ScaleFeatureConfig()
@@ -126,8 +142,15 @@ def build_feature_matrix(
     `df` (a column silently dropped from the matrix would change what the
     fitted model means without telling anyone).
 
-    The physics columns are exactly `kalos.scale.features.PHYSICS_FEATURE_COLUMNS`,
-    computed via `compute_scale_features` under `config`.
+    The physics columns are `kalos.scale.features.PHYSICS_FEATURE_COLUMNS`
+    (default `config.feature_set == "physics"`) or the scale-only subset
+    `kalos.scale.features.SCALE_ONLY_FEATURE_COLUMNS` (`config.feature_set
+    == "scale_only"`), computed via `compute_scale_features` under
+    `config` either way - `feature_set` only selects which of that
+    function's columns are kept, it does not change how they are computed.
+    The default (`"physics"`) path is byte-identical to this function's
+    behavior before `feature_set` existed - see
+    `test_scale_transfer.py::test_build_feature_matrix_default_feature_set_is_byte_identical`.
     """
     missing = [c for c in process_columns if c not in df.columns]
     if missing:
@@ -146,10 +169,15 @@ def build_feature_matrix(
         power=config.power,
         kla_params=config.kla_params,
     )
+    if config.feature_set == "scale_only":
+        physics_columns: tuple[str, ...] = SCALE_ONLY_FEATURE_COLUMNS
+        physics = physics[list(physics_columns)]
+    else:
+        physics_columns = PHYSICS_FEATURE_COLUMNS
     physics_arr = physics.to_numpy(dtype=float)
 
     X = np.hstack([process_arr, physics_arr])
-    names = process_cols + list(PHYSICS_FEATURE_COLUMNS)
+    names = process_cols + list(physics_columns)
     return X, names
 
 

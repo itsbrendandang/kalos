@@ -314,6 +314,21 @@ PHYSICS_FEATURE_COLUMNS: tuple[str, ...] = (
     "hydrostatic_pressure_mmHg",
 )
 
+# The subset of PHYSICS_FEATURE_COLUMNS computable from `scale_L` alone - no
+# `agitation_rpm`/`airflow_L_per_min` column needed. This is the scale-only
+# fallback feature set (see `kalos.scale.transfer.ScaleFeatureConfig.feature_set`)
+# for a run sheet that does not record agitation/airflow: `log_volume_ratio`
+# depends only on `scale_L`, and `hydrostatic_pressure_mmHg` depends only on
+# `scale_L` and geometry - neither reads `agitation_rpm`/`airflow_L_per_min`.
+# Derived BY NAME from `PHYSICS_FEATURE_COLUMNS` (filtered, order preserved)
+# rather than listed independently, so the two constants cannot drift apart.
+_SCALE_ONLY_NAMES = frozenset({"log_volume_ratio", "hydrostatic_pressure_mmHg"})
+SCALE_ONLY_FEATURE_COLUMNS: tuple[str, ...] = tuple(c for c in PHYSICS_FEATURE_COLUMNS if c in _SCALE_ONLY_NAMES)
+assert set(SCALE_ONLY_FEATURE_COLUMNS) == _SCALE_ONLY_NAMES, (
+    "SCALE_ONLY_FEATURE_COLUMNS drifted from PHYSICS_FEATURE_COLUMNS - a name in "
+    "_SCALE_ONLY_NAMES no longer matches a column in PHYSICS_FEATURE_COLUMNS"
+)
+
 
 def compute_scale_features(
     df: pd.DataFrame,
@@ -376,6 +391,7 @@ __all__ = [
     "DEFAULT_POWER_NUMBER",
     "DEFAULT_VANT_RIET",
     "PHYSICS_FEATURE_COLUMNS",
+    "SCALE_ONLY_FEATURE_COLUMNS",
     "tank_geometry_proxy",
     "log_volume_ratio",
     "specific_power_proxy",

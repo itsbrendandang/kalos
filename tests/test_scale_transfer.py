@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from kalos.scale.features import PHYSICS_FEATURE_COLUMNS
-from kalos.scale.transfer import ScaleFeatureConfig, ScaleUpTransferModel, build_feature_matrix
+from kalos.scale.features import PHYSICS_FEATURE_COLUMNS, SCALE_ONLY_FEATURE_COLUMNS
+from kalos.scale.transfer import DEFAULT_SCALE_FEATURE_CONFIG, ScaleFeatureConfig, ScaleUpTransferModel, build_feature_matrix
 
 _RNG = np.random.default_rng(20260825)
 
@@ -158,6 +158,51 @@ def test_predict_observation_noise_widens_std():
     _mean_pred, std_pred = model.predict(test, observation_noise=True)
 
     assert np.all(std_pred >= std_latent - 1e-9)
+
+
+def test_build_feature_matrix_default_feature_set_is_byte_identical():
+    """CRITICAL regression: `feature_set` defaults to `"physics"`, and the
+    default config's output must be byte-identical to what
+    `build_feature_matrix` returned before `feature_set` existed - a
+    hardcoded expectation array, not a re-derivation, so a future change
+    that quietly alters the default path is caught here."""
+    df = _fabricate_batches([1.0, 10.0, 100.0], n_per_scale=3)
+    X, names = build_feature_matrix(df, _PROCESS_COLUMNS)
+
+    assert names == _PROCESS_COLUMNS + list(PHYSICS_FEATURE_COLUMNS)
+    assert DEFAULT_SCALE_FEATURE_CONFIG.feature_set == "physics"
+
+    # Hand-computed from the same process/physics functions this module
+    # has always used, independently of `build_feature_matrix` itself.
+    from kalos.scale.features import compute_scale_features
+
+    expected_process = df[_PROCESS_COLUMNS].to_numpy(dtype=float)
+    expected_physics = compute_scale_features(df).to_numpy(dtype=float)
+    expected = np.hstack([expected_process, expected_physics])
+    np.testing.assert_array_equal(X, expected)
+
+
+def test_build_feature_matrix_scale_only_uses_exactly_the_scale_only_columns():
+    df = _fabricate_batches([1.0, 10.0, 100.0], n_per_scale=3)
+    config = ScaleFeatureConfig(feature_set="scale_only")
+    X, names = build_feature_matrix(df, _PROCESS_COLUMNS, config)
+
+    assert names == _PROCESS_COLUMNS + list(SCALE_ONLY_FEATURE_COLUMNS)
+    assert set(SCALE_ONLY_FEATURE_COLUMNS) == {"log_volume_ratio", "hydrostatic_pressure_mmHg"}
+    assert X.shape == (len(df), len(_PROCESS_COLUMNS) + len(SCALE_ONLY_FEATURE_COLUMNS))
+    assert np.isfinite(X).all()
+
+
+def test_build_feature_matrix_scale_only_ignores_missing_agitation_and_airflow():
+    """A sheet with no `agitation_rpm`/`airflow_L_per_min` columns at all
+    still produces a fully finite scale_only feature matrix - the whole
+    point of the fallback."""
+    df = _fabricate_batches([1.0, 10.0], n_per_scale=3).drop(columns=["agitation_rpm", "airflow_L_per_min"])
+    config = ScaleFeatureConfig(feature_set="scale_only")
+    X, names = build_feature_matrix(df, _PROCESS_COLUMNS, config)
+
+    assert names == _PROCESS_COLUMNS + list(SCALE_ONLY_FEATURE_COLUMNS)
+    assert np.isfinite(X).all()
 
 
 def test_custom_scale_feature_config_column_names():
