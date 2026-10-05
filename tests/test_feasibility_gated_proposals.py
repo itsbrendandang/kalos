@@ -275,13 +275,20 @@ def test_gated_production_batch_has_higher_mean_p_feasible_than_ungated(monkeypa
     assert mean_gated > mean_ungated
 
 
-def test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool():
-    """THE BENCH TIE-IN. Retrospective best-found-so-far trial through the
-    PRODUCTION continuous acquisition (`propose`, snap-to-nearest-pool-
-    candidate - the standard way to run a continuous acquisition against a
-    fixed pool, the same idea as `kalos.bench.pool.run_pool_one`'s `bo`/
-    `bo_feas` strategies, but exercising `propose`'s own gate rather than the
-    discrete EI-times-P(feasible) re-ranking that module already covers).
+_POOL_NOISE_SD = 0.05
+_POOL_SEEDS = range(12)
+_POOL_N_INIT, _POOL_BUDGET = 6, 16
+
+
+@pytest.fixture(scope="module")
+def pool_trials() -> dict:
+    """THE BENCH TIE-IN. Paired retrospective runs through the PRODUCTION
+    continuous acquisition (`propose`, snap-to-nearest-pool-candidate - the
+    standard way to run a continuous acquisition against a fixed pool, the
+    same idea as `kalos.bench.pool.run_pool_one`'s `bo`/`bo_feas` strategies,
+    but exercising `propose`'s own gate rather than the discrete
+    EI-times-P(feasible) re-ranking that module already covers). Run once and
+    shared by the two tests below, which assert the two halves of one claim.
 
     Pool design: a narrow 2-D response peak (so the search is genuinely hard
     - a small pool subset does not already contain a near-optimal point by
@@ -290,29 +297,51 @@ def test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool():
     gated run avoiding the infeasible region never trades away the true
     optimum to do so, matching this file's other zero-inflated sheet (real
     signal, infeasibility that depends on a feature, not pure random
-    zeroing - the BENCHMARK.md pathology).
+    zeroing - the BENCHMARK.md pathology). `infeasible` is the generator's
+    own mask: ground truth for "this pick was a non-producer", independent
+    of the labels the classifier is fit on (which also count the 11 rows
+    whose near-zero titer was clipped to exactly 0 by noise).
 
-    Control, not a large-effect claim (same tolerance style as
-    tests/test_feasibility.py's `bo_feas` check, `tol=1e-6`): gating the
-    production path must not HURT best-found-so-far under zero-inflation."""
+    Statistical assumptions, shared by both tests:
+      - Each seed is one independent replicate run: an initial design drawn
+        from the pool plus the acquisition's RNG. Both arms reuse the seed,
+        so the comparison is paired and the gate is the only difference.
+      - A run's trajectory is chaotic: a last-bit difference in the GP fit or
+        acquisition optimizer (platform BLAS, torch/scipy versions) can send
+        one replicate down a different path. Seed 5 did exactly that across
+        two dependency sets, at a step BEFORE the classifier had even fit, so
+        it was not the gate. Dependency drift therefore acts like re-drawing
+        some replicates, and a verdict must hold under resampling of seeds,
+        not just for one draw. The previous single check
+        (`mean(gated) >= mean(ungated) - 1e-6` over 8 seeds, budget 10) did
+        not: 7 of 8 seeds tied at the pool max in both arms, so seed 5 alone
+        decided it, and it flipped between dependency sets.
+      - Seeds, budget and both thresholds were sized by bootstrap over 128
+        replicate runs (seeds 0-63 under the uv.lock pins and under torch
+        2.14 / scikit-learn 1.9.1 / numpy 2.5.3 / scipy 1.18.1): the correct
+        gate passes both tests in >99.9% of 12-seed resamples, and a
+        classifier fit on inverted labels or on the wrong feasible region
+        fails the non-producer test in >99.99%.
+    """
     rng = np.random.default_rng(42)
     n = 150
     X = rng.uniform(0, 1, size=(n, 2))
     y = 10.0 * np.exp(-25.0 * ((X[:, 0] - 0.3) ** 2 + (X[:, 1] - 0.5) ** 2))
-    y = y + rng.normal(0, 0.05, n)
+    y = y + rng.normal(0, _POOL_NOISE_SD, n)
     y = np.clip(y, 0.0, None)
     infeasible = (X[:, 0] > 0.7) & (rng.random(n) < 0.85)
     y = np.where(infeasible, 0.0, y)
 
-    def _trial(gate: bool, seed: int) -> float:
+    def _trial(gate: bool, seed: int) -> tuple[float, int]:
+        """(best titer found, number of picks that were true non-producers)."""
         local_rng = np.random.default_rng(seed)
         torch.manual_seed(seed)
         order = local_rng.permutation(n)
-        n_init, budget = 6, 10
-        evaluated = list(order[:n_init])
-        remaining = set(order[n_init:])
+        evaluated = list(order[:_POOL_N_INIT])
+        remaining = set(order[_POOL_N_INIT:])
         best = float(y[evaluated].max())
-        for _ in range(budget):
+        n_non_producer_picks = 0
+        for _ in range(_POOL_BUDGET):
             if not remaining:
                 break
             ev = np.asarray(evaluated)
@@ -328,10 +357,72 @@ def test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool():
             remaining.discard(pick)
             evaluated.append(pick)
             best = max(best, float(y[pick]))
-        return best
+            n_non_producer_picks += int(infeasible[pick])
+        return best, n_non_producer_picks
 
-    seeds = range(8)
-    tol = 1e-6
-    gated_finals = [_trial(True, s) for s in seeds]
-    ungated_finals = [_trial(False, s) for s in seeds]
-    assert np.mean(gated_finals) >= np.mean(ungated_finals) - tol
+    return {
+        "pool_max": float(y.max()),
+        "gated": [_trial(True, s) for s in _POOL_SEEDS],
+        "ungated": [_trial(False, s) for s in _POOL_SEEDS],
+    }
+
+
+def test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool(pool_trials):
+    """Guard: gating must not trade away the optimum. Count the runs whose
+    best-found-so-far is near-optimal: within 2 assay-noise SDs (0.1) of the
+    pool max. The pool's top three recipes sit within 0.04 of each other,
+    below the 0.05 noise SD, so reaching any of them is the same answer.
+
+    Non-inferiority, stated: gated reaches near-optimal in at least as many
+    of the 12 paired runs as ungated, less ONE. Per run the outcome is
+    essentially binary (found the peak, or a rare chaotic total miss), so a
+    mean over seeds is dominated by whichever replicate happens to miss. The
+    one-run margin keeps a single such replicate from deciding the verdict,
+    which is exactly how the old check failed. Total misses are rare: 0 of
+    128 gated and 1 of 128 inverted-label runs in the sizing bootstrap.
+
+    What this does NOT discriminate: with infeasibility far from the
+    optimum and a soft log-space gate, best-found on this pool barely moves
+    for any classifier tried. Even one fit to call the optimum's half of the
+    box infeasible still reaches near-optimal in 12/12 runs. So this check
+    catches a gate that blocks the optimum outright (that same wrong-region
+    classifier with its logit scaled 50x reaches near-optimal in only 3/12
+    runs and fails here); the non-producer test below carries the
+    discriminating weight. Shared design and assumptions: see `pool_trials`."""
+    near_optimal = pool_trials["pool_max"] - 2 * _POOL_NOISE_SD
+    gated_best = [best for best, _ in pool_trials["gated"]]
+    ungated_best = [best for best, _ in pool_trials["ungated"]]
+    gated_hits = sum(b >= near_optimal for b in gated_best)
+    ungated_hits = sum(b >= near_optimal for b in ungated_best)
+    assert gated_hits >= ungated_hits - 1, (
+        f"gated reached near-optimal in {gated_hits}/{len(gated_best)} runs vs "
+        f"ungated {ungated_hits}/{len(ungated_best)}; "
+        f"gated best {np.round(gated_best, 3).tolist()}, "
+        f"ungated best {np.round(ungated_best, 3).tolist()}"
+    )
+
+
+def test_gated_runs_pick_fewer_true_non_producers_than_ungated_on_zero_inflated_pool(
+    pool_trials,
+):
+    """The gate's job (see `kalos.core.feasibility`'s module docstring): spend
+    fewer picks on non-producers. Scored against the generator's ground-truth
+    mask, not the classifier's own labels or P(feasible), so the gate is not
+    grading itself (unlike the `_analyze`-level test above).
+
+    Claim, stated: summed over the 12 paired runs, gated runs pick strictly
+    fewer true non-producers than ungated. This is directional, with no
+    effect-size margin. It is still not vacuous: a no-op gate ties and fails,
+    and a classifier fit on inverted labels or the wrong feasible region
+    picks MORE non-producers than ungated and fails. The observed effect is
+    large: 11 vs 24-25 picks over these seeds, under both dependency sets.
+    A relative margin like "at most 80% of ungated" was weighed and
+    rejected: it passes the correct gate in only ~98% of 12-seed resamples,
+    so it would reintroduce exactly the dependency-drift fragility this
+    replaces. Shared design and assumptions: see `pool_trials`."""
+    gated = [k for _, k in pool_trials["gated"]]
+    ungated = [k for _, k in pool_trials["ungated"]]
+    assert sum(gated) < sum(ungated), (
+        f"gated picked {sum(gated)} true non-producers vs ungated {sum(ungated)}; "
+        f"per seed gated {gated}, ungated {ungated}"
+    )
