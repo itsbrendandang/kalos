@@ -301,8 +301,9 @@ def test_offline_plan_production_phase_headers_do_not_break_validation():
     """Bioprocess sheets name process conditions after the production phase
     ("temp_production_C", "pH_production"). The outcome heuristic matches
     "product" inside those headers; without a named target the plan must
-    still validate (no target, every candidate kept as a feature) instead
-    of raising "more than one target column"."""
+    still validate instead of raising "more than one target column": the
+    preferred outcome (lipase) is the target and the other flagged headers
+    are metadata, never features."""
     df = pd.DataFrame(
         {
             "temp_production_C": [25.0, 25.0, 30.0],
@@ -311,9 +312,58 @@ def test_offline_plan_production_phase_headers_do_not_break_validation():
         }
     )
     plan = offline_plan(df)
-    assert [c.raw_name for c in plan.columns if c.role == "target"] == []
+    roles = {c.raw_name: c.role for c in plan.columns}
+    assert roles == {"temp_production_C": "metadata", "pH_production": "metadata", "lipase_g.L": "target"}
     notes = {c.raw_name: c.note for c in plan.columns}
-    assert "caller must name the target" in notes["lipase_g.L"]
+    assert "'lipase_g.L' is the target" in notes["temp_production_C"]
+
+
+def test_offline_plan_two_outcomes_keeps_one_target_and_demotes_the_other_to_metadata():
+    """Titer and Purity are both outcome-like; the plan keeps the preferred
+    one (titer) as its only target and demotes Purity to metadata (never a
+    feature, so an outcome is never used as a model input)."""
+    df = pd.DataFrame({"Titer": [1.0, 2, 3], "Purity": [0.9, 0.8, 0.7], "Temp": [30, 31, 32]})
+    plan = offline_plan(df)
+    by_raw = {c.raw_name: c for c in plan.columns}
+    assert {raw: c.role for raw, c in by_raw.items()} == {
+        "Titer": "target",
+        "Purity": "metadata",
+        "Temp": "feature",
+    }
+    assert by_raw["Purity"].canonical_name == "purity"
+    assert "'Titer' is the target" in by_raw["Purity"].note
+    assert "never a model input" in by_raw["Purity"].note
+    assert plan.summary()["n_target"] == 1
+
+
+def test_offline_plan_target_preference_beats_sheet_order():
+    df = pd.DataFrame({"biomass_od600": [1.0, 2, 3], "lipase_titer": [0.6, 1.59, 1.31]})
+    roles = {c.raw_name: c.role for c in offline_plan(df).columns}
+    assert roles == {"biomass_od600": "metadata", "lipase_titer": "target"}
+
+
+def test_offline_plan_without_a_preferred_outcome_keeps_the_first_in_sheet_order():
+    """No header matches titer/titre/lipase/yield, so the first outcome-like
+    header in sheet order is the target; reordering the sheet moves it."""
+    df = pd.DataFrame({"Purity": [0.9, 0.8, 0.7], "biomass": [1.0, 2, 3]})
+    roles = {c.raw_name: c.role for c in offline_plan(df).columns}
+    assert roles == {"Purity": "target", "biomass": "metadata"}
+
+    reordered = {c.raw_name: c.role for c in offline_plan(df[["biomass", "Purity"]]).columns}
+    assert reordered == {"biomass": "target", "Purity": "metadata"}
+
+
+def test_propose_plan_offline_fallback_resolves_two_outcomes(monkeypatch):
+    """`propose_plan` falls back to `offline_plan` outside its try/except,
+    so a two-outcome sheet with no live provider must not raise either."""
+    monkeypatch.setenv("KALOS_LLM_PROVIDER", "none")
+    df = pd.DataFrame({"Titer": [1.0, 2, 3], "Purity": [0.9, 0.8, 0.7], "Temp": [30, 31, 32]})
+    plan = propose_plan(df)
+    assert plan.created_by == "offline"
+    assert [c.raw_name for c in plan.columns if c.role == "target"] == ["Titer"]
+
+    actions = {p.raw_name: (p.role, p.action) for p in apply_plan(df, plan).provenance}
+    assert actions["Purity"] == ("metadata", "renamed")
 
 
 def test_offline_plan_explicit_target_wins_over_the_header_heuristic():
