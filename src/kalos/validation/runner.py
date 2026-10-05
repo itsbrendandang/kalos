@@ -1,4 +1,4 @@
-"""The validation gate's entry point: run all nine checks, never raise.
+"""The validation gate's entry point: run all eleven checks, never raise.
 
 `validate_frame` is meant to sit in front of the analyze/optimize path and
 look at exactly the kind of data that path is most likely to choke on -
@@ -9,12 +9,12 @@ turns a data-quality problem the client could have fixed into an opaque
 an unexpected shape in one check can only ever cost that check's findings,
 never take down the report.
 
-`mode` ("warn" vs., say, a future "block") is carried through to the report
-untouched. The runner does not read it or change behavior based on it - that
-decision belongs to the caller (the portal route), which can choose to
-reject a `status == "fail"` upload when in a stricter mode. Keeping that
-choice out of this module keeps it a pure "what did we find," not a policy
-engine.
+`mode` ("warn" or "strict", from `kalos.portal.analysis.validation_mode`) is
+carried through to the report untouched. The runner does not read it or
+change behavior based on it - that decision belongs to the caller (`_analyze`
+in `kalos.portal.analysis`), which rejects a `status == "fail"` upload in
+"strict" mode. Keeping that choice out of this module keeps it a pure "what
+did we find," not a policy engine.
 """
 from __future__ import annotations
 

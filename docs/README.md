@@ -1,8 +1,18 @@
 # Kalos documentation
 
 Long-form write-ups that sit behind the [root README](../README.md). The README
-is the map of the pipeline and the install; these are the contracts, results,
-and decisions in depth.
+says what Kalos does and how to run it; these are the contracts, results, and
+decisions in depth.
+
+**Using and extending the engine**
+
+| Doc | What it covers | Read it when |
+| --- | --- | --- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | The module map of `src/kalos/`, the experiment store, the campaign loop in brief, other domains, device notes | finding your way around the code |
+| [API.md](API.md) | `POST /api/run`: upload guarantees, provenance, validation, `roles=auto`, the XGBoost baseline | calling the engine or reading its response |
+| [TYPESAFE.md](TYPESAFE.md) | TypeSafe column decisions: the questions asked, the policy code applies, configuration | turning on or extending the TypeSafe tier |
+
+**Contracts, results, and operations**
 
 | Doc | What it covers | Read it when |
 | --- | --- | --- |
@@ -10,7 +20,7 @@ and decisions in depth.
 | [M2_INTEGRATION.md](M2_INTEGRATION.md) | The experiment store, the `BackendAdapter` seam, the Singleton runner, and the `/api/experiments` contract | integrating with the Voyager platform or the runner |
 | [BENCHMARK.md](BENCHMARK.md) | Does BO beat LHS/random at a fixed budget? Synthetic surfaces with known optima, the noise sweep, and the real-data pool retrospective | making any claim about optimizer performance |
 | [HARDENING.md](HARDENING.md) | The in-house production track: auth tokens, tenancy, CORS, configuration reference, status log | touching auth, tenancy, or deployment security |
-| [DESIGN.md](DESIGN.md) | The engine portal's visual system (kalos blue on Satoshi), tokens, and anti-slop rules | changing `kalos/portal/index.html` |
+| [DESIGN.md](DESIGN.md) | The engine portal's visual system (kalos blue on Satoshi), tokens, and anti-slop rules | changing `src/kalos/portal/index.html` |
 | [ROADMAP.md](ROADMAP.md) | The prioritized backlog: known bugs, structural refactors, product gaps, ops, CI | choosing what to work on next |
 
 Elsewhere in the repo:
@@ -25,8 +35,8 @@ Elsewhere in the repo:
 
 | Decision | Code | Doc |
 | --- | --- | --- |
-| Is this upload safe to parse? | `kalos/portal/uploads.py` | root README, "Uploading a run sheet" |
-| Is the data physically plausible? | `kalos/validation/` | root README, "Data validation gate" |
-| What does each column mean? | `kalos/normalize/` (offline, LLM, TypeSafe tiers), `kalos/domains/` | root README, "TypeSafe decisions" and "Domains" |
-| How reliable is the model? | `kalos/core/evaluation.py`, `kalos/core/gates.py` | root README, [BENCHMARK.md](BENCHMARK.md) |
-| What should run next? | `kalos/core/optimize.py`, `kalos/core/feasibility.py` | [CAMPAIGN_LOOP.md](CAMPAIGN_LOOP.md), [BENCHMARK.md](BENCHMARK.md) |
+| Is this upload safe to parse? | `src/kalos/portal/uploads.py` | [API.md](API.md) |
+| Is the data physically plausible? | `src/kalos/validation/` | [API.md](API.md), "Data validation gate" |
+| What does each column mean? | `src/kalos/normalize/` (offline, LLM, TypeSafe tiers), `src/kalos/domains/` | [TYPESAFE.md](TYPESAFE.md), [ARCHITECTURE.md](ARCHITECTURE.md) "Domains" |
+| How reliable is the model? | `src/kalos/core/evaluation.py`, `src/kalos/core/gates.py` | [API.md](API.md) (incl. the XGBoost baseline), [BENCHMARK.md](BENCHMARK.md) |
+| What should run next? | `src/kalos/core/optimize.py`, `src/kalos/core/feasibility.py` | [CAMPAIGN_LOOP.md](CAMPAIGN_LOOP.md), [BENCHMARK.md](BENCHMARK.md) |

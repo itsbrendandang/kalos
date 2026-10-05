@@ -36,6 +36,15 @@ normalize = ["anthropic>=0.40"]
 # KALOS_LLM_PROVIDER=typesafe. Imported lazily; without it (or without
 # TYPESAFE_API_KEY) normalization falls back to the offline plan.
 typesafe = ["typesafe-sdk>=0.7"]
+# The XGBoost baseline the GP is scored against (kalos/core/evaluation.py,
+# `xgboost_baseline_report`; reported as `cv_xgboost_baseline`). On Linux the
+# CPU-only build (~6 MB) instead of the full wheel, which pulls ~200 MB of
+# NCCL GPU libraries this CPU engine never uses; both install the `xgboost`
+# module. Without it the baseline reports `available: false`.
+xgboost = [
+  "xgboost-cpu>=2.1.1; sys_platform == 'linux'",
+  "xgboost>=2.0; sys_platform != 'linux'",
+]
 # `httpx` is the transport `starlette.testclient.TestClient` (used across the
 # portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
 # a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
@@ -47,16 +56,20 @@ typesafe = ["typesafe-sdk>=0.7"]
 # still needs the package present, and CI installs `.[ml,portal,dev]` only - so
 # without this the two mocked-live tests error out on a fresh CI checkout. Listing
 # it in `dev` keeps that path genuinely covered instead of silently skipped.
-# `typesafe-sdk` is in `dev` for the same reason as `anthropic`: the wire test
+# `typesafe-sdk` and xgboost are in `dev` for the same reason as `anthropic`: the wire test
 # in tests/test_typesafe_tier.py drives the real SDK client against an
-# in-process mock transport (no network, no key), and CI installs
-# `.[ml,portal,dev]` only.
+# in-process mock transport (no network, no key), tests/test_xgboost_baseline.py
+# fits the real baseline, and CI installs `.[ml,portal,dev]` only.
 dev = [
   "pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs",
   "httpx>=0.27,<1", "anthropic>=0.40", "typesafe-sdk>=0.7",
+  "xgboost-cpu>=2.1.1; sys_platform == 'linux'", "xgboost>=2.0; sys_platform != 'linux'",
 ]
 
+# src layout: the package lives in src/kalos/, so tests and tools always run
+# against the installed package, never against a stray copy on the CWD path.
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["kalos*"]
 
 # The portal serves two non-Python assets straight off the package directory:
@@ -83,6 +96,7 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.12"
+mypy_path = "src"
 packages = ["kalos"]
 # Third-party libs without usable stubs in this project's context. torch/botorch/
 # gpytorch DO ship py.typed, but following their full type surface makes a cold-cache

@@ -1,5 +1,5 @@
-"""Static validation of the deploy/ pack (docker-compose.yaml, .env.example,
-Dockerfiles, backup script) - deployment plumbing does not run kalos itself,
+"""Static validation of the deploy/ pack (compose.yaml, .env.example,
+Containerfiles, backup script) - deployment plumbing does not run kalos itself,
 so this deliberately does not touch any `kalos.*` import: it just checks the
 config files are well-formed and internally consistent with each other.
 
@@ -21,7 +21,7 @@ import pytest
 import yaml
 
 DEPLOY_DIR = Path(__file__).resolve().parent.parent / "deploy"
-COMPOSE_PATH = DEPLOY_DIR / "docker-compose.yaml"
+COMPOSE_PATH = DEPLOY_DIR / "compose.yaml"
 ENV_EXAMPLE_PATH = DEPLOY_DIR / ".env.example"
 
 # Every env var this deploy pack treats as REQUIRED - i.e. the stack starts
@@ -31,7 +31,10 @@ REQUIRED_ENV_KEYS = [
     "KALOS_AUTH_TOKENS",
     "KALOS_ANON_SALT",
     "KALOS_CORS_ORIGINS",
-    "NEXT_PUBLIC_API_URL",
+    # The plaintext token kalos-web's server proxy sends to the engine; without
+    # it every proxied call is refused. (NEXT_PUBLIC_API_URL used to be listed
+    # here; since the wave-2 proxy it is a dev escape hatch to leave unset.)
+    "KALOS_ENGINE_TOKEN",
 ]
 
 
@@ -87,13 +90,13 @@ def test_compose_engine_has_no_replicas_override():
 
 
 def test_compose_engine_binds_state_dir_to_engine_home_and_backup_reads_it_readonly():
-    """kalos/store/sqlite_store.py's SqliteStore and
-    kalos/runner/singleton.py's DEFAULT_LOCK_PATH both hardcode
-    Path.home()/".kalos" and ignore KALOS_STATE_DIR - so the volume mount
-    target must be the engine container's actual $HOME/.kalos
-    (/home/kalos/.kalos per Dockerfile.engine), not an arbitrary path, or
-    experiments.db and runner.lock silently land outside the mounted volume
-    (and outside the backup sidecar's reach)."""
+    """Every engine store - experiments.db (SqliteStore), portal.db, the
+    latest-analysis cache, and runner.lock (SingletonLock) - resolves under
+    KALOS_STATE_DIR, which compose sets to the engine container's
+    $HOME/.kalos (/home/kalos/.kalos per deploy/engine/Containerfile). The
+    volume must mount exactly there, or that state silently lands outside the
+    mounted volume and outside the backup sidecar's reach, which reads the
+    same volume read-only."""
     doc = _load_compose()
     engine_env = doc["services"]["engine"]["environment"]
     assert "KALOS_STATE_DIR=/home/kalos/.kalos" in engine_env
@@ -238,38 +241,50 @@ def test_no_secret_looking_literal_in_any_deploy_file():
     assert not offenders, f"secret-looking literals found: {offenders}"
 
 
-def test_dockerfiles_run_as_non_root_user():
-    for name in ("Dockerfile.engine", "Dockerfile.web", "backup/Dockerfile"):
+def test_containerfiles_run_as_non_root_user():
+    for name in ("engine/Containerfile", "backup/Containerfile"):
         text = (DEPLOY_DIR / name).read_text()
         user_lines = [line for line in text.splitlines() if line.strip().startswith("USER ")]
         assert user_lines, f"{name} never switches to a non-root USER"
         assert user_lines[-1].strip() != "USER root", f"{name} ends as root"
 
 
-def test_dockerfiles_declare_a_healthcheck():
-    for name in ("Dockerfile.engine", "Dockerfile.web"):
+def test_containerfiles_declare_a_healthcheck():
+    for name in ("engine/Containerfile",):
         text = (DEPLOY_DIR / name).read_text()
         assert "HEALTHCHECK" in text, f"{name} has no HEALTHCHECK"
 
 
-def test_dockerignore_keeps_engine_inputs_and_drops_heavy_or_secret_paths():
-    """The engine builds from the repo root, so `.dockerignore` decides what is
-    sent to the daemon: it must keep every path Dockerfile.engine COPYs, and
-    must drop the dev venv (GBs), the git dir, and any real `.env`."""
-    ignore = (DEPLOY_DIR.parent / ".dockerignore").read_text().splitlines()
-    patterns = {line.strip() for line in ignore if line.strip() and not line.startswith("#")}
-    for must_drop in (".venv/", ".git/", ".env"):
-        assert must_drop in patterns, f".dockerignore does not exclude {must_drop}"
-    engine = (DEPLOY_DIR / "Dockerfile.engine").read_text()
+def test_containerignore_allowlists_exactly_what_the_engine_copies():
+    """The engine builds from the repo root, so `.containerignore` decides what
+    reaches the builder. It is an allowlist: it must deny everything first (so a
+    local `.env`, `.venv`, `.git`, or `deploy/backups/` can never ride along),
+    re-include every path `engine/Containerfile` COPYs (or the build breaks),
+    and `.dockerignore` must stay a symlink to it so Docker and Podman agree."""
+    root = DEPLOY_DIR.parent
+    dockerignore = root / ".dockerignore"
+    assert dockerignore.is_symlink(), ".dockerignore must be a symlink to .containerignore"
+    assert dockerignore.resolve() == (root / ".containerignore").resolve()
+
+    rules = [
+        line.strip()
+        for line in (root / ".containerignore").read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert rules[0] == "*", ".containerignore must start by excluding everything"
+    allowed = {rule[1:].rstrip("/") for rule in rules if rule.startswith("!")}
+
+    containerfile = (DEPLOY_DIR / "engine" / "Containerfile").read_text()
     copied = []
-    for line in engine.splitlines():
+    for line in containerfile.splitlines():
         parts = line.split()
         if parts[:1] == ["COPY"] and not any(p.startswith("--from") for p in parts):
             copied.extend(parts[1:-1])
-    assert copied, "found no COPY sources in Dockerfile.engine"
+    assert copied, "found no COPY sources in engine/Containerfile"
     for src in copied:
-        name = src.rstrip("/")
-        assert name not in {p.rstrip("/") for p in patterns}, f".dockerignore drops {src}, which Dockerfile.engine COPYs"
+        assert src.rstrip("/") in allowed, f"engine/Containerfile COPYs {src}, which .containerignore does not allow"
+    for secret_or_heavy in (".env", ".venv", ".git", "deploy"):
+        assert secret_or_heavy not in allowed, f".containerignore re-includes {secret_or_heavy}"
 
 
 def test_backup_script_is_syntactically_valid_posix_sh():
@@ -279,10 +294,10 @@ def test_backup_script_is_syntactically_valid_posix_sh():
 
 
 def test_backup_script_state_dir_default_matches_engine_home():
-    """The backup sidecar's default STATE_DIR must match Dockerfile.engine's
+    """The backup sidecar's default STATE_DIR must match deploy/engine/Containerfile's
     KALOS_STATE_DIR - a drift between the two would make the sidecar back up
     an empty directory."""
     script_text = (DEPLOY_DIR / "backup" / "backup.sh").read_text()
-    dockerfile_text = (DEPLOY_DIR / "Dockerfile.engine").read_text()
+    containerfile_text = (DEPLOY_DIR / "engine" / "Containerfile").read_text()
     assert "/home/kalos/.kalos" in script_text
-    assert "KALOS_STATE_DIR=/home/kalos/.kalos" in dockerfile_text
+    assert "KALOS_STATE_DIR=/home/kalos/.kalos" in containerfile_text

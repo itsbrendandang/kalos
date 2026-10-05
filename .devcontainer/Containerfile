@@ -3,7 +3,8 @@
 # Tools only - no project code and no Python packages. The workspace is
 # bind-mounted and scripts/setup-dev.sh installs kalos into .venv (a named
 # volume, see devcontainer.json), so dependency changes never need an image
-# rebuild. Production images live in deploy/ and share nothing with this one.
+# rebuild. Production images live in deploy/ (one directory per image, each a
+# Containerfile) and share nothing with this one. Builds under Docker or Podman.
 FROM mcr.microsoft.com/devcontainers/python:3.12
 
 # uv: scripts/setup-dev.sh uses it when present (several times faster than pip
@@ -16,3 +17,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sqlite3 shellcheck \
     && rm -rf /var/lib/apt/lists/*
+
+# The named volumes devcontainer.json mounts here start empty; creating the
+# directories as vscode first means Docker seeds them vscode-owned, so uv's
+# cache (~/.cache/uv) and the engine state dir are writable without sudo.
+RUN mkdir -p /home/vscode/.cache/huggingface /home/vscode/.kalos \
+    && chown -R vscode:vscode /home/vscode/.cache /home/vscode/.kalos

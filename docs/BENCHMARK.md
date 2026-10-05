@@ -3,7 +3,7 @@
 This is the one question a bioprocess-optimization product must answer honestly before it is sold:
 given a fixed experiment budget, does the Bayesian-optimization loop reach a good recipe in **fewer experiments** than just running a Latin Hypercube (LHS) design or sampling at random?
 
-`kalos/bench/` answers it on synthetic surfaces with **known optima** (so true simple regret is measurable and the whole thing is reproducible from committed code), while sweeping observation noise.
+`src/kalos/bench/` answers it on synthetic surfaces with **known optima** (so true simple regret is measurable and the whole thing is reproducible from committed code), while sweeping observation noise.
 The noise sweep is the honest link to real data: on the real media DoE the held-out signal is weak (grouped-CV Spearman ~0.37-0.52), and measurement noise is a large part of why.
 
 Reproduce:
@@ -51,7 +51,7 @@ Positioning follows from this: sell the rigor and the honest decision layer, and
 
 The synthetic sweep says BO helps when the signal is clean and stops helping as noise rises.
 So the honest test is the real one.
-On the actual combined media DoE (96 runs, target `Lipase_g.L`, via `kalos/bench/pool.py`): does BO pick the best recipes from the pool in fewer experiments than random selection?
+On the actual combined media DoE (96 runs, target `Lipase_g.L`, via `src/kalos/bench/pool.py`): does BO pick the best recipes from the pool in fewer experiments than random selection?
 
 `run_pool` starts from a seeded random subset, then each strategy picks the next real experiment to "run", revealing its measured (already noisy) titer.
 BO scores every remaining candidate by Expected Improvement from the surrogate and picks the best; random picks any untested one.
@@ -79,7 +79,7 @@ This validates the roadmap - feasibility labels and noise/replicates are the rea
 ## Update: we built the feasibility classifier and tested the hypothesis
 
 The section above proposed two levers: a feasibility classifier for the zero-inflation, and replicates / higher signal-to-noise.
-We built the first one (`kalos/core/feasibility.py`: a calibrated, cold-start-safe producer/non-producer classifier) and gated the pool-based acquisition with it (`bo_feas` gates EI by predicted P(feasible); `bo_feas_clean` also fits the GP on producer-only points).
+We built the first one (`src/kalos/core/feasibility.py`: a calibrated, cold-start-safe producer/non-producer classifier) and gated the pool-based acquisition with it (`bo_feas` gates EI by predicted P(feasible); `bo_feas_clean` also fits the GP on producer-only points).
 Then we tested it on the same real dataset, with leakage-safe features (9 media + pH inputs; the measured outputs `Size`, `Conc.`, `% Purity` are excluded), 30 seeds.
 
 Two things came back, and together they are decisive.
@@ -149,7 +149,7 @@ The highest-leverage laboratory action remains reducing assay noise and collecti
 ## Update: the SNR lever now ships in the production engine
 
 The win above was proven in the benchmark harness but not in the path that actually proposes experiments for clients.
-It is now wired into production analysis (`kalos/portal/analysis.py`, `_analyze`).
+It is now wired into production analysis (`src/kalos/portal/analysis.py`, `_analyze`).
 When an uploaded run sheet has replicated recipes (>= 2 replicated recipes and >= 6 distinct recipes with a positive noise floor), the proposal surrogate is fit on the **replicate-averaged** titer with the **measured assay noise floor** fed in as fixed per-recipe observation variance (`sigma^2 / n_reps`, the variance of each recipe's mean), and the proposed batch optimizes that reproducible objective.
 Non-replicated sheets are unchanged.
 Every analysis result now also carries a `noise` block - `n_recipes`, `n_replicated`, `icc`, `noise_sd`, `signal_sd`, and `best_single` vs `best_reproducible` - so a client sees, honestly, how much of their titer spread is real signal versus assay noise, and what the reproducible ceiling actually is (not the lucky single-measurement spike).
@@ -165,7 +165,7 @@ It races BO / feasibility-gated BO / random on both the reproducible objective (
 ## Caveats
 
 - The synthetic surfaces measure whether the optimization machinery beats space-filling in a controlled setting; they do not claim a specific number of experiments saved on real data.
-- The real-data pool benchmark uses client data that is NOT committed; `kalos/bench/pool.py` takes a DataFrame, so the code stays reproducible and data-free. Point it at a run sheet to reproduce the numbers above.
+- The real-data pool benchmark uses client data that is NOT committed; `src/kalos/bench/pool.py` takes a DataFrame, so the code stays reproducible and data-free. Point it at a run sheet to reproduce the numbers above.
 - The real-data numbers in the update section are reproducible from the private `bioqore-data` store (referenced via the `BIOQORE_DATA` env var); no client data is committed to this repo.
 - Noise (synthetic) is expressed as a fraction of each surface's output scale, so it is comparable across surfaces with different units.
 
@@ -179,7 +179,7 @@ Five recipes are proposed, the scientist starts them, some assays come back befo
 The runs still incubating have no outcome, so they cannot join the fit - and until the acquisition was told about them separately, it treated their region of the design space as unexplored and proposed them again.
 That is budget spent twice for one point of information, and it is invisible in a regret curve, because regret only counts what was measured.
 
-`kalos/bench/pending.py` measures it directly.
+`src/kalos/bench/pending.py` measures it directly.
 Fit a GP on a 4-factor design, propose a batch (the recipes that go into the incubator), then re-propose under a fresh optimizer seed - once blind, once with the first batch passed as `pending` - and count how many new recipes land within 0.05 (in the unit design box) of one already running.
 
 ```bash

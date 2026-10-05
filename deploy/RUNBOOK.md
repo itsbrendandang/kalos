@@ -1,13 +1,14 @@
 # kalos deployment runbook
 
-Covers the stack in `deploy/docker-compose.yaml`: the kalos engine
+Covers the stack in `deploy/compose.yaml`: the kalos engine
 (FastAPI/uvicorn, `python -m kalos.portal`), kalos-web (Next.js), and a
 SQLite backup sidecar.
-Read `deploy/docker-compose.yaml`'s header comment first if you have not -
+Read `deploy/compose.yaml`'s header comment first if you have not -
 it explains why the stack has a single host-published front door (`web`,
 which proxies to the engine with a bearer token) and why the engine needs
 real auth configured to start at all. Every container file and its build
-context is indexed in [README.md](README.md).
+context is listed under "Container files" below and indexed in
+[README.md](README.md).
 
 This is a v0 pack: the images have been built and run (the verified
 quickstart below; CI builds and boot-tests the engine image on every push),
@@ -39,7 +40,7 @@ Env knobs that exist because this deployment found the need for them:
   default: the bare-metal 4-thread pin measured a >12x pathological slowdown
   (47s -> 600s+) on this image's linux-aarch64 torch/OpenBLAS build.
 - One analysis at a time is enforced engine-side (HTTP 503 + Retry-After when
-  busy; kalos/portal/busy.py): a client that gives up cannot stack orphaned
+  busy; src/kalos/portal/busy.py): a client that gives up cannot stack orphaned
   fits against its own retry.
 
 ## Prerequisites
@@ -47,10 +48,47 @@ Env knobs that exist because this deployment found the need for them:
 - Docker with Compose v2 (`docker compose version`, not the standalone
   `docker-compose` v1 binary).
 - This repo (`kalos`) and `kalos-web` checked out as SIBLING directories,
-  e.g. both under `~/GitHub/`. `deploy/docker-compose.yaml`'s `web.build`
+  e.g. both under `~/GitHub/`. `deploy/compose.yaml`'s `web.build`
   section resolves `kalos-web`'s path as `../../kalos-web` relative to this
   file - if your checkout layout differs, that one path is the thing to
   edit, nothing else in this pack assumes a particular layout.
+  The web image is built from kalos-web's own `Containerfile`, at the root of
+  that checkout.
+
+## Container files
+
+One directory per image, each with a `Containerfile` (read by both Docker
+and Podman), plus one compose file:
+
+| Path | Image | Build context |
+|---|---|---|
+| `deploy/engine/Containerfile` | `kalos-engine` (FastAPI/BoTorch portal) | repo root |
+| `kalos-web/Containerfile` (in the kalos-web repo) | `kalos-web` (Next.js) | the sibling `kalos-web` checkout |
+| `deploy/backup/Containerfile` | `kalos-backup` (SQLite backup sidecar) | `deploy/backup/` |
+| `deploy/compose.yaml` | the whole stack | - |
+
+The repo-root `.containerignore` (with `.dockerignore` as a symlink to it)
+is an allowlist: the engine build context contains only `pyproject.toml`,
+`README.md` and `src/`. A local `.env`, `deploy/backups/`, `.venv` and
+`.git` never reach the builder. Add a path there only if the engine
+Containerfile starts to COPY it.
+
+### Podman
+
+The same files work under Podman:
+
+```bash
+podman build --format docker -f deploy/engine/Containerfile -t kalos-engine:local .
+podman compose -f deploy/compose.yaml up -d --build
+```
+
+Docker looks for a file named `Dockerfile` by default, so outside compose
+pass the file explicitly: `docker build -f deploy/engine/Containerfile .`
+(Podman finds `Containerfile` on its own).
+
+Use `--format docker`: Podman's default OCI image format drops the
+`HEALTHCHECK` instruction, and compose's `depends_on: service_healthy`
+gate and the CI boot test rely on it.
 
 ## Deploy
 
@@ -59,12 +97,13 @@ cd kalos/deploy
 
 # 1. Real environment, never committed.
 cp .env.example .env
-# Edit .env: fill in KALOS_AUTH_TOKENS, KALOS_ANON_SALT, KALOS_CORS_ORIGINS,
-# NEXT_PUBLIC_API_URL at minimum. See .env.example's inline comments for what
-# each does and how to generate a token/salt.
+# Edit .env: fill in KALOS_AUTH_TOKENS, KALOS_ENGINE_TOKEN, KALOS_ANON_SALT,
+# KALOS_CORS_ORIGINS at minimum. Leave NEXT_PUBLIC_API_URL unset unless you
+# want the dev-only direct-browser mode. See .env.example's inline comments
+# for what each does and how to generate a token/salt.
 
 # 2. The backup sidecar writes to a host-mounted directory (deliberately
-# outside the named `kalos-state` volume - see docker-compose.yaml) that
+# outside the named `kalos-state` volume - see compose.yaml) that
 # Docker will otherwise auto-create as root-owned, which the backup
 # container (uid 10001, unprivileged) cannot then write into.
 mkdir -p backups
@@ -85,7 +124,9 @@ docker compose logs engine | grep "security posture"
 
 # 6. Health.
 docker compose ps                    # both engine and web should show "healthy"
-curl -f http://localhost:${KALOS_ENGINE_PORT:-8050}/healthz
+# The engine publishes no host port; check it from inside its container with
+# the same stdlib probe its HEALTHCHECK uses.
+docker compose exec engine python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8050/healthz').read())"
 curl -f http://localhost:${KALOS_WEB_PORT:-3000}/
 ```
 
@@ -107,8 +148,8 @@ not baked into the image, so an upgrade never loses `experiments.db`,
 
 ## Rollback
 
-This pack does not push to a registry (out of scope - see "What was
-verified"), so rollback here means rebuilding the previous commit's image
+This pack does not push to a registry (images are built locally and
+tagged; a registry is out of scope for v0), so rollback here means rebuilding the previous commit's image
 under a distinct tag, not pulling one back down:
 
 ```bash
@@ -172,13 +213,14 @@ docker run --rm \
 # 3. Bring the engine back up and confirm the restored data is visible.
 docker compose start engine
 docker compose logs -f engine
-curl -sf -H "Authorization: Bearer <a real provisioned token>" \
-  http://localhost:${KALOS_ENGINE_PORT:-8050}/api/experiments | head -c 300
+docker compose exec engine python -c "import urllib.request as u; \
+  r = u.Request('http://127.0.0.1:8050/api/experiments', headers={'Authorization': 'Bearer <a real provisioned token>'}); \
+  print(u.urlopen(r).read()[:300])"
 ```
 
 The `latest/*.json` per-tenant analysis cache is intentionally NOT part of
 this drill - it is explicitly best-effort persistence in the source itself
-(`kalos/portal/app.py`'s `_save_latest`) and regenerates the moment a tenant
+(`src/kalos/portal/app.py`'s `_save_latest`) and regenerates the moment a tenant
 re-runs an analysis, so it does not need restore-grade rigor. The backup
 script still copies it opportunistically under
 `deploy/backups/latest-cache/` if you want it anyway.
@@ -212,13 +254,13 @@ needs outbound HTTPS to `api.typesafe.ai` for this tier.
   the file written and its size, or an explicit `FAILED` line that leaves
   prior backups untouched rather than clobbering them with a partial file).
 - Nothing is written to a host log directory by default; add a `logging:`
-  driver block per service in `docker-compose.yaml` if centralized log
+  driver block per service in `compose.yaml` if centralized log
   shipping is needed later - out of scope for v0.
 
 ## Health checks
 
 Both `engine` and `web` carry an image-level `HEALTHCHECK` (see
-`Dockerfile.engine` / `Dockerfile.web` for exactly what each checks and
+`deploy/engine/Containerfile` / `kalos-web/Containerfile` for exactly what each checks and
 why). The engine's hits `GET /healthz` (wave-2 fix; an earlier pass of this
 deploy pack used `GET /` as a stand-in because the route did not exist yet
 - see git history for that reasoning). `/healthz` is unauthenticated by
@@ -262,9 +304,9 @@ so it stays a pure liveness check. `docker compose ps` shows `healthy` /
       engine is compose-internal only (wave 2 - the web server proxies to
       it). Confirm with `docker compose ps` - no other service should show
       a `PORTS` column entry.
-- [ ] Exactly one `engine` replica. `kalos/runner/singleton.py`'s
+- [ ] Exactly one `engine` replica. `src/kalos/runner/singleton.py`'s
       `runner.lock` and the store's single-writer assumption
-      (`kalos/store/sqlite_store.py`'s own docstring: "there is never more
+      (`src/kalos/store/sqlite_store.py`'s own docstring: "there is never more
       than one writer at a time by design") are not safe under
       `docker compose up --scale engine=N` for N>1. This compose file does
       not set `deploy.replicas`, so this is the default, but it is worth
@@ -274,7 +316,7 @@ so it stays a pure liveness check. `docker compose ps` shows `healthy` /
 ## Changing the engine URL
 
 Because `NEXT_PUBLIC_API_URL` is compiled into kalos-web's client bundle at
-build time (see `Dockerfile.web`), moving the engine to a new host/port
+build time (see `kalos-web/Containerfile`), moving the engine to a new host/port
 means:
 
 ```bash
@@ -290,7 +332,7 @@ into the JS files on disk inside the image.
 ## What was verified vs. not
 
 **Verified:**
-- `deploy/docker-compose.yaml` parses and resolves correctly:
+- `deploy/compose.yaml` parses and resolves correctly:
   `docker compose config` (Compose v2, installed in this environment)
   succeeds against a filled-in `.env`, with all three build contexts
   resolving to the expected paths (`kalos` repo root for `engine`, the
@@ -298,17 +340,17 @@ into the JS files on disk inside the image.
   all `${VAR}` substitutions resolving as intended.
 - Every fact this pack's comments assert about the kalos source was
   confirmed by reading the actual files, not assumed, as of this task:
-  `kalos/portal/__main__.py`'s uvicorn entrypoint and `assert_safe_exposure`
-  call; `kalos/portal/config.py`'s bind/CORS/salt logic; `kalos/portal/
-  auth.py`'s token model; `kalos/portal/app.py`'s registered routes (no
+  `src/kalos/portal/__main__.py`'s uvicorn entrypoint and `assert_safe_exposure`
+  call; `src/kalos/portal/config.py`'s bind/CORS/salt logic; `src/kalos/portal/
+  auth.py`'s token model; `src/kalos/portal/app.py`'s registered routes (no
   `/healthz` at the time) and the `_refuse_open_remote_access` middleware;
-  `kalos/store/sqlite_store.py` and `kalos/portal/campaign.py`'s
+  `src/kalos/store/sqlite_store.py` and `src/kalos/portal/campaign.py`'s
   `KALOS_STATE_DIR` handling (and the `SqliteStore`/`runner.lock` gap where
   it was then ignored). **Both gaps were closed in a later wave**:
-  `kalos/portal/app.py` now has `GET /healthz`, and `SqliteStore`/
+  `src/kalos/portal/app.py` now has `GET /healthz`, and `SqliteStore`/
   `SingletonLock` now read `KALOS_STATE_DIR` too - see the "Health checks"
-  section above and this Dockerfile's `KALOS_STATE_DIR` comment for the
-  current state. `kalos/runner/singleton.py`'s single-writer lock;
+  section above and this Containerfile's `KALOS_STATE_DIR` comment for the
+  current state. `src/kalos/runner/singleton.py`'s single-writer lock;
   `kalos-web/package.json` and `next.config.ts` (no `output: "standalone"`
   today); `kalos-web/
   lib/api.ts` and its callers (all `"use client"`, no `Authorization`
@@ -327,14 +369,17 @@ into the JS files on disk inside the image.
   2026-09-10).
 - CI (`.github/workflows/ci.yml`, `docker-build`) builds the engine image and
   waits for its own `HEALTHCHECK` to report healthy on every push and PR.
-- `tests/test_deploy_config.py` checks that `.dockerignore` keeps every path
-  `Dockerfile.engine` copies while excluding `.venv`, `.git`, and `.env`.
+- The `.containerignore` allowlist sends only `pyproject.toml`, `README.md`,
+  and `src/` (`kalos/` before the 2026-10-05 src-layout move) as engine build context (~0.8 MB, verified under Docker and
+  Podman, 2026-09-24); `tests/test_deploy_config.py` fails if it stops
+  re-including any path `deploy/engine/Containerfile` copies or if
+  `.dockerignore` stops being a link to it.
 
 **Still NOT verified (stated plainly, not glossed over):**
-- The backup/restore drill below has not been run as written against a live
+- The "Backup / restore drill" above has not been run as written against a live
   volume, and `deploy/backup/backup.sh` has not been executed against a real
   SQLite file outside the reference deployment.
 - `shellcheck` has not been run on `backup.sh` (it is installed in the dev
-  container, `.devcontainer/Dockerfile`, for exactly this).
+  container, `.devcontainer/Containerfile`, for exactly this).
 - The `web` image is not built in CI (its context is the separate kalos-web
   repo).

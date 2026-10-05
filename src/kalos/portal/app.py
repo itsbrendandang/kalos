@@ -82,7 +82,7 @@ log = logging.getLogger("kalos.portal")
 # interacting with that build's OpenBLAS threading, measured 2026-09-10 on
 # the first real compose deployment. The 4-thread default is kept for bare
 # metal (where it was tuned and behaves); containers, which already isolate
-# CPU, should set 0 - deploy/docker-compose.yaml now does.
+# CPU, should set 0 - deploy/compose.yaml now does.
 _TORCH_THREADS = int(
     os.environ.get("KALOS_TORCH_THREADS", "").strip() or str(min(4, os.cpu_count() or 1))
 )
@@ -275,7 +275,7 @@ def index() -> str:
 
 @app.get("/healthz")
 def healthz() -> dict:
-    """Liveness probe for a deploy healthcheck (deploy/Dockerfile.engine).
+    """Liveness probe for a deploy healthcheck (deploy/engine/Containerfile).
 
     Unauthenticated BY DESIGN, and safe to leave that way: no
     `Depends(require_scope(...))`, the same pattern `/` above already uses.
@@ -413,7 +413,9 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
     }
 
 
-def _decide_roles(df: pd.DataFrame, target: str | None) -> tuple[ColumnRoles | None, dict]:
+def _decide_roles(
+    df: pd.DataFrame, target: str | None, *, anonymize: bool = False
+) -> tuple[ColumnRoles | None, dict]:
     """Decide column roles for `roles=auto` from a normalization plan.
 
     `propose_plan` uses the configured provider (`KALOS_LLM_PROVIDER`):
@@ -421,43 +423,73 @@ def _decide_roles(df: pd.DataFrame, target: str | None) -> tuple[ColumnRoles | N
     configured, or on any provider failure - the deterministic offline plan.
     The plan only ever sees the identity-screened payload.
 
-    Returns `(roles, decision)`. `roles` is `None` when the plan names no
-    target or cannot be built, and the caller then infers roles from the
+    Returns `(roles, decision)`. `roles` is `None` whenever the plan cannot
+    safely drive the analysis - no plan, no target, no feature columns, or
+    headers that are not text - and the caller then infers roles from the
     bioprocess profile exactly as without `roles=auto`; `decision` says which
-    happened and carries each column's role and rationale (column names and
-    probabilities only, never cell values). An explicit `target` form field
-    overrides the plan's target.
+    happened and lists each column's decided role.
+
+    The plan is built from the columns `_analyze` will actually see (all-empty
+    columns are dropped there first, so declaring one would be rejected). An
+    explicit `target` that is a column of the sheet overrides the plan's
+    target, and the plan's own target then moves to `ids` so a measured
+    outcome is never modeled as an input.
+
+    `decision` never carries cell values: notes are included only for the
+    `typesafe` and `offline` tiers, whose notes code builds from names and
+    probabilities; an `llm` tier's free-text rationale is withheld. With
+    `anonymize`, column names go through the same alias as the rest of the
+    response, and the note of an aliased column is dropped (it can name it).
     """
     from dataclasses import replace
 
     from kalos.normalize import plan_to_roles, propose_plan
+    from kalos.portal.analysis import alias_column_name
 
+    def fallback(reason: str, plan: object = None) -> tuple[None, dict]:
+        return None, {
+            "applied": False,
+            "created_by": getattr(plan, "created_by", None),
+            "model": getattr(plan, "model", None),
+            "columns": [],
+            "reason": f"{reason}; roles inferred from the bioprocess profile",
+        }
+
+    frame = df.dropna(axis=1, how="all")
+    if not all(isinstance(c, str) for c in frame.columns):
+        return fallback("the sheet has non-text column headers")
     try:
-        plan = propose_plan(df)
-    except ValueError as err:
-        # The offline fallback rejects a sheet it reads as having two outcome
-        # columns; that is a reason to infer roles the old way, not to fail.
+        plan = propose_plan(frame)
+    except Exception as err:  # noqa: BLE001 - roles=auto must never fail an upload
+        # e.g. the offline fallback rejects a sheet it reads as having two
+        # outcome columns; that is a reason to infer roles the old way.
         log.warning("roles=auto: no usable plan (%s); inferring roles", type(err).__name__)
-        return None, {"applied": False, "created_by": None, "model": None, "columns": [],
-                      "reason": "no consistent plan; roles inferred from the bioprocess profile"}
+        return fallback("no consistent plan")
+
     roles = plan_to_roles(plan)
-    if roles is not None and target:
+    if roles is not None and target and target in frame.columns and target != roles.target:
         roles = replace(
             roles,
             target=target,
             features=tuple(c for c in roles.features if c != target),
-            ids=tuple(c for c in roles.ids if c != target),
+            ids=tuple(c for c in roles.ids if c != target) + (roles.target,),
             groups=None if roles.groups == target else roles.groups,
         )
-    decision = {
-        "applied": roles is not None,
+    if roles is None:
+        return fallback("the plan named no target or no feature columns", plan)
+
+    code_built_notes = plan.created_by in ("typesafe", "offline")
+    columns = []
+    for c in plan.columns:
+        name = alias_column_name(c.raw_name) if anonymize else c.raw_name
+        note = c.note if code_built_notes and name == c.raw_name else None
+        columns.append({"column": name, "role": c.role, "note": note})
+    return roles, {
+        "applied": True,
         "created_by": plan.created_by,
         "model": plan.model,
-        "columns": [{"column": c.raw_name, "role": c.role, "note": c.note} for c in plan.columns],
+        "columns": columns,
     }
-    if roles is None:
-        decision["reason"] = "the plan named no target; roles inferred from the bioprocess profile"
-    return roles, decision
 
 
 def _run_uploaded_sync(
@@ -483,7 +515,7 @@ def _run_uploaded_sync(
     _ensure_torch_threads()
     df = _parse_upload(raw)
     if roles_json.strip().lower() == "auto":
-        roles, decision = _decide_roles(df, target)
+        roles, decision = _decide_roles(df, target, anonymize=anonymize)
         if roles is not None:
             result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
         else:

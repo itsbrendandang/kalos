@@ -597,6 +597,50 @@ def _alternative_scale_block(
     }
 
 
+def _xgboost_baseline_block(report: dict) -> dict:
+    """`xgboost_baseline_report` made JSON-safe and readable: floats rounded to
+    3 places, NaN -> None, plus a one-line interpretation of the paired verdict."""
+    if not report.get("available"):
+        return {"available": False, "reason": report.get("reason")}
+
+    def num(v: Any) -> float | None:
+        return None if v is None or v != v else round(float(v), 3)
+
+    vs = report.get("vs_gp")
+    vs_out = None
+    if vs is not None:
+        vs_out = {
+            "gp_spearman": num(vs["gp_spearman"]),
+            "delta": num(vs["delta"]),
+            "delta_ci95": [num(vs["delta_ci95"][0]), num(vs["delta_ci95"][1])],
+            "verdict": vs["verdict"],
+        }
+    interpretation = {
+        "gp_better": "The GP ranks held-out recipes better than gradient-boosted trees on this sheet.",
+        "xgboost_better": (
+            "Gradient-boosted trees rank held-out recipes better than the GP on this sheet; "
+            "treat the GP's proposals with extra caution."
+        ),
+        "no_detectable_difference": (
+            "No detectable difference between the GP and gradient-boosted trees at this sample size."
+        ),
+        # "not_computable" maps to None on purpose: `reason` carries why.
+    }.get(vs_out["verdict"] if vs_out else "", None)
+    return {
+        "available": True,
+        "model": report["model"],
+        "version": report["version"],
+        "spearman": num(report["spearman"]),
+        "ci95": [num(report["ci95"][0]), num(report["ci95"][1])],
+        "n_oof": report["n_oof"],
+        "n_groups": report["n_groups"],
+        "n_folds": report["n_folds"],
+        "vs_gp": vs_out,
+        "interpretation": interpretation,
+        "reason": report.get("reason"),
+    }
+
+
 def _physical_range(name: str, col: np.ndarray) -> tuple[float, float, int]:
     """Observed range of `col`, computed over PHYSICALLY POSSIBLE values only.
 
@@ -698,6 +742,7 @@ def _analyze(
         logo_report,
         producer_only_spearman,
         top_k_overlap,
+        xgboost_baseline_report,
     )
     from kalos.core.feasibility import FeasibilityClassifier, feasibility_cv_report, feasible_labels
     from kalos.core.gates import GatesConfig, check_gates
@@ -1507,6 +1552,15 @@ def _analyze(
         grouped_cv_report=grouped_cv_report, interval_calibration=interval_calibration,
     )
 
+    # Does the GP beat a strong tree model on this sheet? XGBoost scored on the
+    # SAME grouped-CV partition and rows as `rep` (repeat 0), so the comparison
+    # is paired. Also placed after every proposal-affecting step: it never
+    # touches torch's or numpy's global RNG, but keeping diagnostics last means
+    # adding one can never be what changes a proposed batch.
+    cv_xgboost_baseline = _xgboost_baseline_block(
+        xgboost_baseline_report(X, y, groups=groups, n_splits=5, gp_oof_pred=oof_p, gp_oof_actual=oof_a)
+    )
+
     # per-column provenance: what was kept as a feature, used as the target, or
     # dropped (id / other output / constant / sparse), so the client is never left
     # guessing about a silently dropped column. Mirrors the selection logic above.
@@ -1615,6 +1669,10 @@ def _analyze(
         "cv_logo": cv_logo,
         "cv_topk": cv_topk,
         "cv_group_mean_baseline": cv_group_mean_baseline,
+        # XGBoost under the same grouped CV as the GP, with a paired verdict on
+        # whether the GP's ranking is better, worse, or not distinguishable.
+        # `available: false` with a reason when xgboost is not installed.
+        "cv_xgboost_baseline": cv_xgboost_baseline,
         "best": round(best_single, 4),
         "noise": _noise_block(nr, best_single, best_reproducible, replicate_aware, het),
         # Explicit, labeled second evaluation pass on the log scale, run only
@@ -1751,6 +1809,14 @@ def _is_identifier_name(name: str) -> bool:
     return bool(identifier_pattern(_ID_HINT.pattern).match(str(name).strip()))
 
 
+def alias_column_name(name: str) -> str:
+    """The pseudonym `anonymize=true` gives a column name: `col_<hash>` for an
+    identifier-like name, the name itself otherwise. One function so every
+    field that names a column (here and the portal's `role_decision`) aliases
+    identically."""
+    return f"col_{_hash(name)[:8]}" if _is_identifier_name(name) else name
+
+
 def _anonymize_result(result: dict) -> dict:
     """Replace identifier-type column names in the response with stable pseudonyms.
 
@@ -1760,8 +1826,7 @@ def _anonymize_result(result: dict) -> dict:
     (same name -> same pseudonym) via the anonymizer's irreversible hash, so an
     anonymized report is still internally consistent across fields.
     """
-    def alias(name: str) -> str:
-        return f"col_{_hash(name)[:8]}" if _is_identifier_name(name) else name
+    alias = alias_column_name
 
     out = dict(result)
     if out.get("group_col"):

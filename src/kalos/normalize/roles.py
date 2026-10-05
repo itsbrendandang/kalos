@@ -20,7 +20,11 @@ if TYPE_CHECKING:
 
 
 def plan_to_roles(plan: NormalizationPlan) -> "ColumnRoles | None":
-    """The `ColumnRoles` a plan implies, or `None` when it names no target.
+    """The `ColumnRoles` a plan implies, or `None` when it names no target or
+    no feature columns. (With no declared features the analyze path would infer
+    them from every remaining numeric column - including a numeric group the
+    plan kept out of the inputs - so a plan without features does not decide
+    roles at all.)
 
       - `target`: the plan's target column (a valid plan has at most one).
       - `features`: every `feature` column. The analyze path still applies
@@ -36,6 +40,8 @@ def plan_to_roles(plan: NormalizationPlan) -> "ColumnRoles | None":
     if target is None:
         return None
     features = tuple(c.raw_name for c in plan.columns if c.role == "feature")
+    if not features:
+        return None
     group_cols = [c.raw_name for c in plan.columns if c.role == "group"]
     ids = tuple(
         c.raw_name for c in plan.columns if c.role in ("identity", "freetext", "metadata")

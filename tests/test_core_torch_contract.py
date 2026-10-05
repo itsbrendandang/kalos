@@ -22,7 +22,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-CORE_DIR = Path(__file__).resolve().parent.parent / "kalos" / "core"
+CORE_DIR = Path(__file__).resolve().parent.parent / "src" / "kalos" / "core"
 
 # Deliberate exceptions. Adding a file here is a deliberate decision about
 # the ~220 MB torch budget, not a quick fix for a failing test - only do it

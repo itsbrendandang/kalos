@@ -217,6 +217,18 @@ def test_second_target_is_kept_as_metadata_never_a_feature(typesafe_env):
     assert "second outcome column" in by_raw["Purity"].note
 
 
+def test_non_numeric_target_is_kept_as_metadata_and_never_demotes_the_real_one(typesafe_env):
+    df = _messy_df().assign(Vessel=["v1", "v2", "v3", "v1", "v2", "v3"])
+    payload, dropped = build_payload(df)
+    roles = {**_default_roles(), "Vessel": _role("target", confidence=0.97)}
+    roles["Titer (g/L)"] = _role("target", confidence=0.7)
+    plan = typesafe_tier.plan_from_answers(df, payload, dropped, _answers(payload, roles), load_config())
+    by_raw = {c.raw_name: c for c in plan.columns}
+    assert by_raw["Vessel"].role == "metadata"
+    assert "numeric" in by_raw["Vessel"].note
+    assert by_raw["Titer (g/L)"].role == "target"
+
+
 def test_duplicate_canonical_names_are_resolved(typesafe_env):
     df = _messy_df().assign(**{"Feed Pump": [5.0, 5.5, 6.0, 6.5, 7.0, 7.5]})
     payload, dropped = build_payload(df)
@@ -376,6 +388,16 @@ def test_plan_to_roles_maps_raw_names():
     assert set(roles.ids) == {"Operator", "Notes", "Run Date", "Lot"}
 
 
+def test_plan_to_roles_without_features_is_none():
+    # With no declared features the analyze path would infer them from every
+    # numeric column, including the group the plan kept out of the inputs.
+    plan = NormalizationPlan(
+        columns=[ColumnPlan("Lot", "lot", "group"), ColumnPlan("Titer", "titer", "target")],
+        created_by="typesafe",
+    )
+    assert plan_to_roles(plan) is None
+
+
 def test_plan_to_roles_without_a_target_is_none():
     plan = NormalizationPlan(columns=[ColumnPlan("Temp", "temperature", "feature")], created_by="offline")
     assert plan_to_roles(plan) is None
@@ -406,6 +428,95 @@ def test_decide_roles_uses_the_typesafe_plan(typesafe_env, monkeypatch):
     assert overridden is not None
     assert overridden.target == "Glucose Feed"
     assert "Glucose Feed" not in overridden.features
+
+
+def test_decide_roles_ignores_all_empty_columns(monkeypatch):
+    # _analyze drops all-empty columns before resolving declared roles, so a
+    # trailing-comma "Unnamed: 4" column must not become a declared id.
+    pytest.importorskip("fastapi")
+    from kalos.portal.app import _decide_roles
+
+    monkeypatch.setenv("KALOS_LLM_PROVIDER", "none")
+    df = pd.DataFrame({
+        "Campaign": ["a", "a", "b", "b", "c", "c"],
+        "Temp": [30.0, 31, 32, 33, 34, 35],
+        "Titer": [1.0, 2, 3, 4, 5, 6],
+        "Unnamed: 4": [np.nan] * 6,
+    })
+    roles, decision = _decide_roles(df, None)
+    assert roles is not None
+    assert "Unnamed: 4" not in roles.ids
+    assert "Unnamed: 4" not in {c["column"] for c in decision["columns"]}
+
+
+def test_decide_roles_non_text_headers_fall_back(monkeypatch):
+    pytest.importorskip("fastapi")
+    from kalos.portal.app import _decide_roles
+
+    monkeypatch.setenv("KALOS_LLM_PROVIDER", "none")
+    df = pd.DataFrame({"Campaign": ["a", "a", "b", "b"], 2024: [1.0, 2, 3, 4], "Titer": [1.0, 2, 3, 4]})
+    roles, decision = _decide_roles(df, None)
+    assert roles is None
+    assert decision["applied"] is False
+
+
+def test_decide_roles_target_override(typesafe_env, monkeypatch):
+    pytest.importorskip("fastapi")
+    from kalos.portal.app import _decide_roles
+
+    df = _messy_df()
+    payload, _ = build_payload(df)
+    canned = _answers(payload, _default_roles(), names={"Glucose Feed": _choice("glucose_feed", 0.8, {})})
+    monkeypatch.setattr(typesafe_tier, "_make_client", lambda config: _FakeClient(lambda s, q: canned))
+
+    unknown, _ = _decide_roles(df, "Not A Column")
+    assert unknown is not None and unknown.target == "Titer (g/L)"  # ignored, not a hard failure
+
+    overridden, _ = _decide_roles(df, "Glucose Feed")
+    assert overridden is not None
+    assert overridden.target == "Glucose Feed"
+    # The plan's own outcome moves to ids: a measured outcome is never an input.
+    assert "Titer (g/L)" in overridden.ids
+    assert "Titer (g/L)" not in overridden.features
+
+
+def test_decide_roles_anonymize_aliases_identifier_names(monkeypatch):
+    pytest.importorskip("fastapi")
+    from kalos.portal.analysis import alias_column_name
+    from kalos.portal.app import _decide_roles
+
+    monkeypatch.setenv("KALOS_LLM_PROVIDER", "none")
+    df = pd.DataFrame({
+        "Run ID": ["r1", "r2", "r3", "r4", "r5", "r6"],
+        "Temp": [30.0, 31, 32, 33, 34, 35],
+        "Titer": [1.0, 2, 3, 4, 5, 6],
+    })
+    assert alias_column_name("Run ID") != "Run ID"
+    _, decision = _decide_roles(df, None, anonymize=True)
+    names = {c["column"] for c in decision["columns"]}
+    assert "Run ID" not in names
+    assert alias_column_name("Run ID") in names
+    assert "Temp" in names  # process columns keep their names, as in provenance
+
+
+def test_decide_roles_withholds_llm_authored_notes(monkeypatch):
+    pytest.importorskip("fastapi")
+    import kalos.normalize as normalize
+    from kalos.portal.app import _decide_roles
+
+    plan = NormalizationPlan(
+        columns=[
+            ColumnPlan("Temp", "temperature", "feature", note="values like 34.6 suggest Celsius"),
+            ColumnPlan("Titer", "titer", "target", note="sample 3.2 g/L"),
+        ],
+        created_by="llm",
+        model="claude-sonnet-5",
+    )
+    monkeypatch.setattr(normalize, "propose_plan", lambda frame: plan)
+    df = pd.DataFrame({"Temp": [30.0, 31, 32], "Titer": [1.0, 2, 3]})
+    roles, decision = _decide_roles(df, None)
+    assert roles is not None
+    assert all(c["note"] is None for c in decision["columns"])
 
 
 def test_decide_roles_falls_back_when_no_consistent_plan(monkeypatch):

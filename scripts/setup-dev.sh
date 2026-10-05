@@ -8,9 +8,10 @@
 #   - a laptop: `bash scripts/setup-dev.sh && source .venv/bin/activate`.
 #
 # Installs kalos[ml,portal,dev,typesafe] - the set CI installs, plus the
-# TypeSafe tier - with CPU-only torch first so pip never resolves the
-# multi-GB CUDA build. Idempotent: an existing .venv is reused and only
-# missing packages are installed. Non-interactive.
+# TypeSafe tier. CPU-only torch is tried first (PyTorch's own index); when
+# that index is unreachable it falls back to PyPI's default torch, which on
+# Linux is the larger CUDA build. Idempotent: an existing .venv is reused and
+# only missing packages are installed. Non-interactive.
 #
 #   KALOS_EXTRAS   override the extras (default: ml,portal,dev,typesafe)
 #   KALOS_VENV     override the venv path (default: .venv)
@@ -27,6 +28,9 @@ if command -v uv >/dev/null 2>&1; then
   pip_install() { uv pip install -q --python "$VENV/bin/python" "$@"; }
 else
   [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+  # A venv uv created has no pip; bootstrap it rather than fail.
+  "$VENV/bin/python" -m pip --version >/dev/null 2>&1 || "$VENV/bin/python" -m ensurepip --upgrade >/dev/null \
+    || { echo "setup-dev: $VENV has no pip and uv is not installed; install uv or remove $VENV" >&2; exit 1; }
   "$VENV/bin/python" -m pip install -q --upgrade pip
   pip_install() { "$VENV/bin/python" -m pip install -q "$@"; }
 fi

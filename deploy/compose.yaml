@@ -1,5 +1,5 @@
 # kalos deployment stack: engine (FastAPI/uvicorn) + kalos-web (Next.js) +
-# a SQLite backup sidecar. See ../RUNBOOK.md for deploy/upgrade/rollback/
+# a SQLite backup sidecar. See RUNBOOK.md (same directory) for deploy/upgrade/rollback/
 # restore procedures and the security checklist.
 #
 # Why this differs from the reference Voyager topology (docs read for this
@@ -7,7 +7,7 @@
 #
 #   - No `postgres` service. kalos's data model is SQLite at
 #     `~/.kalos/{experiments,portal}.db` inside the engine container (see
-#     Dockerfile.engine's KALOS_STATE_DIR comment for exactly why that path
+#     deploy/engine/Containerfile's KALOS_STATE_DIR comment for exactly why that path
 #     is not arbitrary). The reference's Postgres+db-backup PATTERN (named
 #     volume for data, a separate backup sidecar on its own schedule with a
 #     host-mounted, non-compose-volume backup directory) is kept; the
@@ -19,15 +19,15 @@
 #     compose-internal network with `Authorization: Bearer
 #     $KALOS_ENGINE_TOKEN`, so the engine publishes no host port at all
 #     (tests/test_deploy_config.py enforces this). The engine's per-request
-#     "refuse open remote access" guard (kalos/portal/app.py's
+#     "refuse open remote access" guard (src/kalos/portal/app.py's
 #     `_refuse_open_remote_access` middleware) still sees the proxy as a
 #     REMOTE peer (Docker's bridge network address, not loopback) - which is
 #     exactly why the auth env below is not optional. The old direct-browser
 #     mode survives only as a dev escape hatch (NEXT_PUBLIC_API_URL below and
 #     RUNBOOK.md, "Security checklist").
 #
-#   - Still true here, matching the reference: only the two front-door
-#     services publish a host port; `restart: unless-stopped` (app
+#   - Still true here, matching the reference: only the front-door
+#     service (`web`) publishes a host port; `restart: unless-stopped` (app
 #     services) / `restart: always` (backup); a named volume for the data
 #     the engine owns, with backups written to a host-mounted directory
 #     OUTSIDE that volume so `docker compose down -v` cannot take backups
@@ -35,8 +35,9 @@
 #     hardcoded here.
 #
 # SECURITY: the engine is bound 0.0.0.0 inside its container (KALOS_HOST
-# below) so the browser's direct calls can reach it through the published
-# port. kalos/portal/config.py's `assert_safe_exposure` refuses to let
+# below) so the `web` service's server-side proxy can reach it over the
+# compose network; the engine sees that proxy as a remote peer.
+# src/kalos/portal/config.py's `assert_safe_exposure` refuses to let
 # uvicorn start on a non-loopback bind unless authentication is actually
 # configured AND KALOS_ANON_SALT is set (or the operator explicitly opts
 # into KALOS_ANON_SALT into open access via KALOS_ALLOW_OPEN_ACCESS=1 - see
@@ -52,14 +53,13 @@ services:
   engine:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.engine
+      dockerfile: deploy/engine/Containerfile
     image: kalos-engine:${KALOS_IMAGE_TAG:-local}
     restart: unless-stopped
     environment:
       # 0.0.0.0, not the image's loopback default - see the SECURITY note
-      # above. Required so the browser (via the published port below) and
-      # the `web` service's own server-side code (SSR/RSC, none of which
-      # exists on the hot path today but may later) can both reach it.
+      # above. Required so the `web` service's server-side proxy (the hot
+      # path for every browser call) can reach it over the compose network.
       - KALOS_HOST=0.0.0.0
       - KALOS_PORT=8050
       # REQUIRED for a non-loopback bind to start at all (assert_safe_exposure).
@@ -67,28 +67,28 @@ services:
       # the exact shape and how to generate a token_sha256.
       - KALOS_AUTH_TOKENS=${KALOS_AUTH_TOKENS}
       # REQUIRED for a non-loopback bind to start at all (assert_safe_exposure).
-      # Seeds identity-pseudonymization (kalos/data/anonymizer.py); unset it
+      # Seeds identity-pseudonymization (src/kalos/data/anonymizer.py); unset it
       # falls back to a published, dictionary-attackable dev salt.
       - KALOS_ANON_SALT=${KALOS_ANON_SALT}
       # REQUIRED to let kalos-web's browser origin call this engine at all -
       # unset, only http://localhost / http://127.0.0.1 origins are allowed
-      # (kalos/portal/config.py's dev/pilot default), which a deployed
+      # (src/kalos/portal/config.py's dev/pilot default), which a deployed
       # kalos-web almost never is. Must match the ORIGIN the browser loads
       # kalos-web from (see .env.example).
       - KALOS_CORS_ORIGINS=${KALOS_CORS_ORIGINS}
       # State dir - genuinely honored everywhere now (CampaignStore,
       # SqliteStore, SingletonLock, and app.py's `_LATEST` cache all read
-      # this at call time; see Dockerfile.engine's comment). Pointed at this
+      # this at call time; see deploy/engine/Containerfile's comment). Pointed at this
       # user's actual $HOME/.kalos rather than an arbitrary path purely for
       # simplicity - it needs no separate `mkdir`/`chown` beyond the
       # container's own home directory setup, and it is the one mount point
-      # docker-compose.yaml's volume below targets.
+      # compose.yaml's volume below targets.
       - KALOS_STATE_DIR=/home/kalos/.kalos
-      # Optional external-provider credentials (kalos/providers/, all
-      # keyless-by-default - see kalos/.env.example in the engine repo for
-      # the full list and what each unlocks). Passed through only if set;
+      # Optional external-provider credentials (src/kalos/providers/, all
+      # keyless-by-default - see the repo-root .env.example for the full
+      # list and what each unlocks). Passed through only if set;
       # kalos treats an unset var and an empty one the same
-      # (os.environ.get(X, "").strip() throughout kalos/providers/).
+      # (os.environ.get(X, "").strip() throughout src/kalos/providers/).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       # TypeSafe tier of kalos.normalize / POST /api/run roles=auto. The key
       # alone changes nothing: KALOS_LLM_PROVIDER=typesafe selects the tier.
@@ -110,7 +110,7 @@ services:
       - KALOS_TORCH_THREADS=${KALOS_TORCH_THREADS:-0}
     volumes:
       # Named volume: survives container recreation (rebuild, image update).
-      # Mounted at the engine's actual $HOME/.kalos - see Dockerfile.engine.
+      # Mounted at the engine's actual $HOME/.kalos - see deploy/engine/Containerfile.
       - kalos-state:/home/kalos/.kalos
     # No published port (wave-2 change): the browser no longer calls the
     # engine directly. kalos-web's server-side proxy
@@ -119,14 +119,14 @@ services:
     # front door instead of two. To restore the direct-browser escape hatch
     # (dev only), re-add "${KALOS_ENGINE_PORT:-8050}:8050" here and set
     # NEXT_PUBLIC_API_URL.
-    # HEALTHCHECK is baked into the image (Dockerfile.engine) - no override
+    # HEALTHCHECK is baked into the image (deploy/engine/Containerfile) - no override
     # needed here; compose reads the image-level healthcheck for
     # `condition: service_healthy` below.
 
   web:
     build:
       context: ../../kalos-web
-      dockerfile: ../kalos/deploy/Dockerfile.web
+      dockerfile: Containerfile
       args:
         # ESCAPE HATCH ONLY (wave-2): leave unset for the default posture,
         # where the browser calls same-origin /api/engine and kalos-web's
@@ -161,7 +161,7 @@ services:
   backup:
     build:
       context: ./backup
-      dockerfile: Dockerfile
+      dockerfile: Containerfile
     image: kalos-backup:${KALOS_IMAGE_TAG:-local}
     restart: always
     environment:

@@ -7,7 +7,7 @@ The closed optimization loop behind the kalos-web `/decide` surface.
 The engine proposes a batch of recipes, but until a scientist can run those recipes, record what they measured, and get the *next* batch that accounts for those results, kalos is a one-shot analysis viewer, not a product.
 This is the loop that closes: propose -> run -> log outcome -> re-propose.
 
-It deliberately reuses the existing analysis path (`_analyze` in `kalos/portal/analysis.py`) and adds no new engine capability.
+It deliberately reuses the existing analysis path (`_analyze` in `src/kalos/portal/analysis.py`) and adds no new engine capability.
 A campaign is just a growing dataset that gets re-analyzed each round.
 
 ## The loop at a glance
@@ -41,7 +41,7 @@ A **campaign** is one optimization target plus a growing table of (recipe -> mea
 - **base rows**: the dataset the analysis fits on. Seeded from the last `/api/run` upload, then grows as logged runs are folded in.
 - **pending runs**: recipes the scientist started from a proposed batch. Each is either *awaiting* a measured outcome (`result: null`) or *measured* (`result` filled), waiting to be folded into base on the next re-analyze.
 
-One campaign at a time (single local user). It lives in `~/.kalos/campaign.json`, guarded by a lock and written atomically, mirroring the `_LATEST` state pattern in `kalos/portal/app.py`.
+One campaign per tenant. Each tenant's campaign is one row of the SQLite table `campaigns(tenant, state, updated_at)` in `<KALOS_STATE_DIR>/portal.db` (default `~/.kalos`), with the state below stored as JSON in the `state` column (`src/kalos/portal/campaign.py`). A single lock serializes every read-modify-write and each write runs in one SQLite transaction, so a reader never sees a partial state. In open mode (no tokens configured) every request uses the `default` tenant.
 
 Every pending run walks a strict one-way lifecycle - and an *awaiting* run can never skip a step and silently become a data point:
 
@@ -60,7 +60,7 @@ stateDiagram-v2
     end note
 ```
 
-## State shape (`~/.kalos/campaign.json`)
+## State shape (one tenant's `state` column)
 
 ```json
 {
@@ -89,7 +89,7 @@ stateDiagram-v2
 ## Seeding
 
 The campaign base is seeded/replaced whenever `/api/run` succeeds.
-`_run_uploaded_sync` (`kalos/portal/app.py`) already holds the parsed `df` and calls `_analyze` then `_save_latest`; it also seeds the campaign from `(df, result["target"], result["proposal_features"])`.
+`_run_uploaded_sync` (`src/kalos/portal/app.py`) already holds the parsed `df` and calls `_analyze` then `_save_latest`; it also seeds the campaign from `(df, result["target"], result["proposal_features"])`.
 A fresh upload starts a fresh campaign (new base, empty pending, round 0).
 
 ## Endpoints (`/api/campaign` router, mounted like `/api/experiments`)
@@ -207,12 +207,12 @@ A run started in that gap is simply absent from the list, which costs the acquis
 
 ### A note on `/api/latest` and the residual window
 
-`campaign.json` is fully guarded by the `generation` token. `/api/latest` (`_LATEST`) is a *separate* resource with its own lock, and the upload path takes the two locks in the opposite order from the re-analyze path, so they cannot be spanned by a single lock without risking a deadlock.
+The tenant's campaign row is fully guarded by the `generation` token. `/api/latest` (`_LATEST`) is a *separate* resource with its own lock, and the upload path takes the two locks in the opposite order from the re-analyze path, so they cannot be spanned by a single lock without risking a deadlock.
 The route therefore re-checks the generation once more immediately before `_save_latest` and skips the write if a fresh upload reseeded in between (that upload already published its own newer analysis).
 This eliminates the entire multi-second race across `_analyze` and closes the upload-lands-after-commit case; a sub-millisecond window between the final re-check and `_save_latest` remains.
 
 `_LATEST` now carries a `campaign_generation` stamp (see "Analysis/campaign coherence" above), so a write landing in that residual window no longer goes undetected: the published analysis and the live campaign disagree, and `GET /api/campaign` reports `analysis_in_sync: false`.
-The stamp makes the divergence *visible*, which is what matters for a single-local-user localhost portal.
+The stamp makes the divergence *visible*.
 It does not yet *prevent* the write - refusing an out-of-order `_save_latest` outright would need the stamp to be ordered rather than a random token, which remains a deliberate follow-up.
 
 ## Honesty constraints (do not regress)

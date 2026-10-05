@@ -113,11 +113,11 @@ async def reanalyze_campaign(
     `/api/latest` — the loop closing (docs/CAMPAIGN_LOOP.md, "Re-analyze =
     the loop closing").
 
-    Transactional: the fold is committed to `campaign.json` only after
-    `_analyze` succeeds, and only if the campaign's `generation` is unchanged
-    (`plan_fold` → `_analyze` → `commit_fold`). A failed analysis or a
-    concurrent upload that reseeds mid-analysis leaves `campaign.json`
-    untouched and returns a retry (409).
+    Transactional: the fold is committed to the tenant's row in `portal.db`
+    (`campaigns` table) only after `_analyze` succeeds, and only if the
+    campaign's `generation` is unchanged (`plan_fold` → `_analyze` →
+    `commit_fold`). A failed analysis or a concurrent upload that reseeds
+    mid-analysis leaves that row untouched and returns a retry (409).
 
     `/api/latest` is a SEPARATE resource (`_LATEST`, its own lock) with no
     shared transaction, so its final write can only be guarded best-effort:

@@ -276,7 +276,7 @@ def test_constant_columns_flags_zero_variance():
 
 
 def _clean_frame() -> pd.DataFrame:
-    """A frame built to pass every one of the nine checks clean (INFO allowed)."""
+    """A frame built to pass every one of the eleven checks clean (INFO allowed)."""
     temps = [20.0, 20.0, 25.0, 25.0, 30.0, 30.0, 35.0, 35.0, 40.0, 40.0]
     titers = [5.0, 5.2, 6.0, 6.1, 7.0, 7.3, 8.0, 8.2, 9.0, 9.4]
     n = len(temps)

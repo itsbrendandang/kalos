@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # kalos engine image - FastAPI/uvicorn portal (`python -m kalos.portal`,
-# kalos/portal/__main__.py), not Flask/Gunicorn. See docker-compose.yaml and
+# src/kalos/portal/__main__.py), not Flask/Gunicorn. See compose.yaml and
 # ../RUNBOOK.md for how this image is wired up and why.
 #
 # Multi-stage: a `builder` stage does the pip/compile work into a venv, and
@@ -25,7 +25,7 @@ WORKDIR /build
 # Only the inputs `pip install -e .` (well, a real install, not editable -
 # see below) actually needs: package metadata + the package itself. Not
 # uv.lock - pip does not read it, and kalos does not vendor a requirements
-# lock for pip today; this Dockerfile pins nothing beyond what pyproject.toml
+# lock for pip today; this Containerfile pins nothing beyond what pyproject.toml
 # pins, which is the same story a fresh `pip install kalos[ml,portal]` tells
 # an operator outside Docker.
 RUN python -m venv /opt/venv
@@ -50,12 +50,13 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 COPY pyproject.toml README.md ./
-COPY kalos ./kalos
+COPY src ./src
 
 # `typesafe` is small (typesafe-sdk + httpx2) and lets an operator turn on the
 # TypeSafe normalization/roles tier with env vars alone (KALOS_LLM_PROVIDER=typesafe
-# + TYPESAFE_API_KEY) instead of rebuilding the image.
-RUN pip install --no-cache-dir ".[ml,portal,typesafe]"
+# + TYPESAFE_API_KEY) instead of rebuilding the image. `xgboost` resolves to the
+# ~6 MB CPU-only build on Linux and powers the `cv_xgboost_baseline` report.
+RUN pip install --no-cache-dir ".[ml,portal,typesafe,xgboost]"
 
 # ---------------------------------------------------------------------------
 # runtime
@@ -71,7 +72,7 @@ LABEL org.opencontainers.image.title="kalos-engine" \
 # top of a python:3.12-slim base, this image lands in the ~1.3-1.8GB range.
 # That is the honest floor for shipping a live BoTorch GP fit in a container
 # - `kalos.kit`'s torch-free core is far smaller, but that is not what
-# `python -m kalos.portal` serves (kalos/portal/app.py imports torch lazily
+# `python -m kalos.portal` serves (src/kalos/portal/app.py imports torch lazily
 # on first fit, per `_ensure_torch_threads`, but it is still a hard runtime
 # dependency of the `ml` extra this image installs). Shrinking below this
 # would mean dropping real functionality (the live GP fit), not just
@@ -88,8 +89,8 @@ COPY --from=builder /opt/venv /opt/venv
 # KALOS_STATE_DIR is set to the literal `~/.kalos` for this container's user.
 # It is now genuinely honored everywhere that persists state: campaign.py's
 # CampaignStore (portal.db), app.py's `_LATEST` cache (latest/*.json),
-# kalos/store/sqlite_store.py's `SqliteStore` (experiments.db), and
-# kalos/runner/singleton.py's `SingletonLock` (runner.lock) all read
+# src/kalos/store/sqlite_store.py's `SqliteStore` (experiments.db), and
+# src/kalos/runner/singleton.py's `SingletonLock` (runner.lock) all read
 # KALOS_STATE_DIR at construction time, falling back to `Path.home() /
 # ".kalos"` only when it is unset - the same convention, same default, in
 # all four places (wave-2 fix; previously the store and lock hardcoded
@@ -99,19 +100,19 @@ COPY --from=builder /opt/venv /opt/venv
 # follow it together. It is still pinned to this user's actual `$HOME/.kalos`
 # for simplicity: no extra directory to create or `chown` beyond the
 # container's own home setup, and it stays the one mount point
-# docker-compose.yaml's `kalos-state` volume targets (experiments.db,
+# compose.yaml's `kalos-state` volume targets (experiments.db,
 # portal.db, runner.lock, latest/ - all four artifacts, one directory).
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     KALOS_STATE_DIR=/home/kalos/.kalos
 
-# `KALOS_HOST` is deliberately NOT set here - kalos/portal/__main__.py
+# `KALOS_HOST` is deliberately NOT set here - src/kalos/portal/__main__.py
 # defaults it to 127.0.0.1 (loopback-only), which is the safe default for
-# "run this image standalone with no other configuration". docker-compose.yaml
+# "run this image standalone with no other configuration". compose.yaml
 # overrides it to 0.0.0.0 explicitly, alongside the auth env that
 # `assert_safe_exposure` requires before it will accept a non-loopback bind
-# (kalos/portal/config.py). See RUNBOOK.md, "Security checklist".
+# (src/kalos/portal/config.py). See RUNBOOK.md, "Security checklist".
 RUN mkdir -p /home/kalos/.kalos && chown -R kalos:kalos /home/kalos/.kalos
 
 USER kalos
@@ -119,7 +120,7 @@ WORKDIR /home/kalos
 
 EXPOSE 8050
 
-# kalos/portal/app.py now has a dedicated GET /healthz route (wave-2 fix; a
+# src/kalos/portal/app.py now has a dedicated GET /healthz route (wave-2 fix; a
 # previous pass of this deploy pack flagged its absence and used `GET /` as a
 # stand-in - see git history for that reasoning if it is ever needed again).
 # It carries no `Depends(require_scope(...))`, the same pattern `/` already

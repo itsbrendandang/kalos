@@ -1,6 +1,6 @@
 # Design notes — Kalos
 
-How the Kalos **engine portal** (`kalos/portal/index.html`, served at :8050) looks and feels.
+How the Kalos **engine portal** (`src/kalos/portal/index.html`, served at :8050) looks and feels.
 
 > **Current as of 2026-08-11, confirmed directly by the product owner: the engine portal is kalos blue on Satoshi, matching kalos-web.**
 > The emerald-and-clay direction below is **superseded**, including its "no cobalt" rule, and must not be reinstated.
@@ -12,7 +12,7 @@ How the Kalos **engine portal** (`kalos/portal/index.html`, served at :8050) loo
 > If a future note claims otherwise, it needs a date later than this one and its own owner confirmation.
 >
 > **`kalos-web/app/globals.css` `:root` is the single source of truth for live token values.**
-> The `:root` block in `kalos/portal/index.html` is a mirror of it, not a second source; when a brand value changes there, update the portal to match.
+> The `:root` block in `src/kalos/portal/index.html` is a mirror of it, not a second source; when a brand value changes there, update the portal to match.
 > Only the brand family and the type stack changed in this re-hue.
 > Layout, shape, spacing, motion, and the anti-slop rules below are untouched, so this is a re-hue rather than a redesign.
 
@@ -47,7 +47,7 @@ Two real typefaces, matching kalos-web (no Inter / Roboto / Arial / system defau
 
 - **Display and body — Satoshi** (`--head`, `--sans`), weight 400-700, headings tracked tight, body ~65ch max.
   One face across both roles, which is what ties the portal to the dashboard visually.
-  Satoshi is not on Google Fonts, so the portal serves it vendored from `kalos/portal/fonts/` under the Fontshare license (see the `/fonts` route in `kalos/portal/app.py`).
+  Satoshi is not on Google Fonts, so the portal serves it vendored from `src/kalos/portal/fonts/` under the Fontshare license (see the `/fonts` route in `src/kalos/portal/app.py`).
 - **Numbers, IDs, code — JetBrains Mono** (`--mono`), weight 500-600, always `tabular-nums`.
   Mono is reserved for figures, the one cue carried over from instrument UIs because scientists trust aligned, precise numerals.
 

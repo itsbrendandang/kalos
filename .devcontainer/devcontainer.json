@@ -2,12 +2,12 @@
 // tools, and the TypeSafe tier installed into .venv by scripts/setup-dev.sh
 // (the same script a cloud environment or a laptop uses). The venv lives in a
 // named volume, so rebuilding the container keeps the installed packages.
-// The image (./Dockerfile) carries tools only: uv, sqlite3, shellcheck.
-// Production images are separate: see deploy/README.md.
+// The image (./Containerfile, the same naming as deploy/) carries tools only:
+// uv, sqlite3, shellcheck. Production images are separate: see deploy/README.md.
 {
   "name": "kalos",
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "Containerfile",
     "context": "."
   },
   "mounts": [
@@ -15,15 +15,17 @@
     "source=kalos-state,target=/home/vscode/.kalos,type=volume",
     "source=kalos-hf-cache,target=/home/vscode/.cache/huggingface,type=volume"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode .venv /home/vscode/.kalos /home/vscode/.cache/huggingface && bash scripts/setup-dev.sh",
+  "postCreateCommand": "sudo chown -R vscode:vscode .venv && bash scripts/setup-dev.sh",
   "containerEnv": {
     "VIRTUAL_ENV": "${containerWorkspaceFolder}/.venv",
-    "PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}",
     "KALOS_STATE_DIR": "/home/vscode/.kalos"
   },
-  // Keys stay on the host: set them there and they are passed through, never
-  // written into the image. All are optional (see .env.example).
+  // PATH lives in remoteEnv, not containerEnv: ${containerEnv:PATH} is only
+  // substituted for remoteEnv, and in containerEnv it would reach `docker run`
+  // literally and wipe PATH. Keys stay on the host and are passed through,
+  // never written into the image; all are optional (see .env.example).
   "remoteEnv": {
+    "PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}",
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "TYPESAFE_API_KEY": "${localEnv:TYPESAFE_API_KEY}",
     "KALOS_LLM_PROVIDER": "${localEnv:KALOS_LLM_PROVIDER}"

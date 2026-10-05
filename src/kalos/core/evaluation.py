@@ -578,7 +578,157 @@ def group_mean_baseline_spearman(y, groups) -> dict:
     }
 
 
+# Gradient-boosted trees as an honest point of comparison for the GP. Shallow,
+# shrunk, subsampled trees are a strong default at tens to hundreds of rows. The
+# settings are fixed, NOT tuned per sheet: tuning on the same folds the baseline
+# is scored on would leak, and a leaky baseline flatters itself.
+XGB_BASELINE_PARAMS: dict = {
+    "n_estimators": 300,
+    "max_depth": 3,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 1.0,
+    "reg_lambda": 1.0,
+}
+
+
+def xgboost_baseline_report(
+    X, y, groups=None, n_splits: int = 5, *, gp_oof_pred=None, gp_oof_actual=None,
+    n_boot: int = 1000, random_state: int = 0,
+) -> dict:
+    """Does the GP beat a strong tree model on THIS sheet? An XGBoost regressor
+    scored with the same leakage-controlled grouped CV as the surrogate.
+
+    Same partition, same rows: folds come from the one splitter, unshuffled -
+    exactly `_oof`'s repeat-0 partition - with `_oof`'s skip rule (training fold
+    of fewer than 4 rows), so the pooled out-of-fold predictions line up row for
+    row with `grouped_cv_report`'s `oof_pred`/`oof_actual`. When the caller
+    passes those (`gp_oof_pred`, `gp_oof_actual`) and the held-out targets match,
+    the comparison is PAIRED: one group-level bootstrap resamples the same groups
+    for both models and reports a CI on (GP Spearman - XGBoost Spearman). The
+    verdict says a model is better only when that CI excludes zero; at a few
+    dozen rows "no detectable difference" is the common, honest answer. With
+    no usable bootstrap draws (under 3 held-out groups, or a constant target)
+    the verdict is "not_computable" and `reason` says why.
+
+    `xgboost` is an optional dependency (`kalos[xgboost]`) imported here only;
+    without it the report says so (`available: False`) instead of raising.
+    Fitting uses one thread and a fixed seed and never touches numpy's or
+    torch's global RNG, so it cannot perturb anything else in an analysis.
+    Values are plain floats; NaN means "not computable" (callers map it to null).
+    """
+    try:
+        import xgboost
+    except ImportError:
+        return {
+            "available": False,
+            "reason": "xgboost is not installed (pip install 'kalos[xgboost]')",
+        }
+
+    X_arr = np.asarray(X, float)
+    y_arr = np.asarray(y, float).reshape(-1)
+    if groups is None:
+        groups = row_hash_groups(pd.DataFrame(X_arr))
+    groups = np.asarray(groups)
+
+    pred: list[float] = []
+    actual: list[float] = []
+    grp: list = []
+    n_folds = 0
+    for tr, te in make_splits(X_arr, y_arr, groups, n_splits=n_splits):
+        if len(tr) < 4 or len(te) < 1:
+            continue
+        n_folds += 1
+        model = xgboost.XGBRegressor(
+            **XGB_BASELINE_PARAMS, random_state=random_state, n_jobs=1, tree_method="hist", verbosity=0,
+        )
+        model.fit(X_arr[tr], y_arr[tr])
+        pred.extend(np.asarray(model.predict(X_arr[te]), float).ravel().tolist())
+        actual.extend(y_arr[te].tolist())
+        grp.extend(groups[te].tolist())
+
+    p = np.asarray(pred)
+    a = np.asarray(actual)
+    g = np.asarray(grp, dtype=object)
+    rho = _spearman(p, a)
+
+    paired = (
+        gp_oof_pred is not None and gp_oof_actual is not None
+        and len(gp_oof_pred) == len(a) and len(a) > 0
+        and np.allclose(np.asarray(gp_oof_actual, float), a)
+    )
+    gp = np.asarray(gp_oof_pred, float) if paired else None
+
+    rng = np.random.default_rng(random_state)
+    boot_x: list[float] = []
+    boot_d: list[float] = []
+    uniq = np.unique(g) if len(g) else g
+    if len(uniq) >= 3 and len(p) >= 3:
+        for _ in range(int(n_boot)):
+            take = rng.choice(uniq, size=len(uniq), replace=True)
+            mask = np.concatenate([np.where(g == k)[0] for k in take])
+            rx = _spearman(p[mask], a[mask])
+            if rx == rx:
+                boot_x.append(rx)
+                if gp is not None:
+                    rg = _spearman(gp[mask], a[mask])
+                    if rg == rg:
+                        boot_d.append(rg - rx)
+
+    def ci(draws: list[float]) -> tuple[float, float]:
+        if not draws:
+            return (float("nan"), float("nan"))
+        return (float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5)))
+
+    vs_gp: dict | None = None
+    reason: str | None = None if n_folds else "too few groups for a grouped CV split"
+    if gp is not None:
+        gp_rho = _spearman(gp, a)
+        lo, hi = ci(boot_d)
+        if not (lo == lo and hi == hi):
+            # No paired bootstrap draws: too few held-out groups to resample, or
+            # a Spearman that is undefined (constant target or predictions).
+            # "No detectable difference" would claim a comparison that never ran.
+            verdict = "not_computable"
+            if reason is None:
+                reason = (
+                    "fewer than 3 held-out groups for a group bootstrap"
+                    if len(uniq) < 3
+                    else "rank correlation undefined (constant target or predictions)"
+                )
+        elif lo > 0:
+            verdict = "gp_better"
+        elif hi < 0:
+            verdict = "xgboost_better"
+        else:
+            verdict = "no_detectable_difference"
+        vs_gp = {
+            "gp_spearman": gp_rho,
+            "delta": gp_rho - rho if gp_rho == gp_rho and rho == rho else float("nan"),
+            "delta_ci95": (lo, hi),
+            "verdict": verdict,
+        }
+
+    return {
+        "available": True,
+        "model": "xgboost",
+        "version": str(getattr(xgboost, "__version__", "unknown")),
+        "params": dict(XGB_BASELINE_PARAMS),
+        "spearman": rho,
+        "ci95": ci(boot_x),
+        "n_oof": int(len(a)),
+        "n_groups": int(len(uniq)),
+        "n_folds": int(n_folds),
+        "paired": bool(paired),
+        "vs_gp": vs_gp,
+        "reason": reason,
+    }
+
+
 __all__ = [
+    "xgboost_baseline_report",
+    "XGB_BASELINE_PARAMS",
     "grouped_cv_spearman",
     "grouped_cv_report",
     "grouped_folds",

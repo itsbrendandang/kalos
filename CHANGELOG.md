@@ -2,9 +2,78 @@
 
 Newest first.
 
-## 2026-10-05 (TypeSafe column decisions, a reproducible dev environment, docs reorganized)
+## 2026-10-05 (TypeSafe column decisions, an XGBoost baseline, src layout, docs reorganized)
 
-### Added - the TypeSafe tier of kalos.normalize (kalos/normalize/typesafe_tier.py)
+### Changed - src layout, a Makefile, and a short README
+
+The package moved from `kalos/` to `src/kalos/` (`pyproject.toml` finds it
+under `src`, mypy uses `mypy_path = "src"`, CI lints `src/`, the engine
+Containerfile and the `.containerignore` allowlist copy `src/`). Imports are
+unchanged (`import kalos`); a src layout means tests always run against the
+installed package, never a stray copy on the working directory. Package-relative
+paths in code comments (e.g. `kalos/portal/app.py`) now mean `src/kalos/...`.
+**After pulling, reinstall once** (`make setup` or `pip install -e .`): an
+editable install made before the move still points at the old `kalos/`
+directory, and `import kalos` fails until it is rebuilt.
+A `Makefile` wraps the common commands (`make setup | lint | typecheck | test |
+check | run | image | up`). The README is down from 241 lines (main) to ~100: what
+Kalos does, how it works, quick start, layout, development, deploy, docs. The
+detail moved, unchanged in substance, to `docs/ARCHITECTURE.md` (module map,
+store, campaign loop, domains, device), `docs/API.md` (the upload path's
+guarantees), and `docs/TYPESAFE.md`; the old README roadmap is now
+`docs/ROADMAP.md`'s "Shipped" list and P2 items.
+
+### Added - an XGBoost baseline the GP is scored against (`cv_xgboost_baseline`)
+
+Every analysis now also scores an XGBoost regressor under the same
+leakage-controlled grouped CV as the GP - same unshuffled partition, same skip
+rule, so the held-out rows line up one for one - and reports a PAIRED verdict:
+one group-level bootstrap resamples the same groups for both models and puts a
+CI on (GP Spearman - XGBoost Spearman). `gp_better` / `xgboost_better` only
+when that CI excludes zero, else `no_detectable_difference`. Settings are fixed
+(300 shallow, shrunk, subsampled trees), not tuned per sheet, so the baseline
+cannot overfit the folds it is scored on. It is computed after every
+proposal-affecting step and a test proves the rest of the response is
+byte-identical with and without it. Optional `xgboost` extra: on Linux the
+6 MB CPU-only `xgboost-cpu` (the full wheel pulls ~200 MB of NCCL), elsewhere
+`xgboost`; without it the block reports `available: false`. The engine image
+installs it. Code: `src/kalos/core/evaluation.py::xgboost_baseline_report`.
+
+### Fixed - findings from an adversarial review of this branch
+
+- `roles=auto` could fail an upload it should fall back on: an all-empty
+  column (pandas' `Unnamed: N` from trailing commas) became a declared id that
+  `_analyze` then rejected; a non-text header (an int from Excel) raised
+  `KeyError`. Both now fall back to inferred roles, and any planning failure
+  does. An explicit `target` must be a column of the sheet, and the plan's own
+  outcome moves to `ids` so it is never modeled as an input; a plan with no
+  feature columns no longer decides roles (the analyze path would otherwise
+  infer them, numeric group included).
+- `role_decision` leaked identifier column names under `anonymize=true`; it
+  now uses the same alias as `provenance` (`alias_column_name`). An LLM tier's
+  free-text notes are withheld (they could echo sample cell values); only the
+  code-built `typesafe`/`offline` notes are returned.
+- The TypeSafe tier accepted a non-numeric column as the target and demoted
+  the real numeric outcome; a target must now parse as numeric in >=80% of
+  cells, else it is kept as metadata.
+- Dev container: `${containerEnv:PATH}` inside `containerEnv` reached
+  `docker run` literally and wiped `PATH` (the container died before setup ran)
+  - moved to `remoteEnv`; the named volumes are now pre-created vscode-owned so
+  uv's cache is writable. `setup-dev.sh` bootstraps pip into a uv-made venv
+  instead of failing when uv is absent.
+- Deploy notes: the RUNBOOK's health and restore steps curled an engine port
+  compose no longer publishes (now `docker compose exec engine ...`);
+  `NEXT_PUBLIC_API_URL` is documented as the dev escape hatch it has been since
+  wave 2 and `KALOS_ENGINE_TOKEN` is the required key (template, RUNBOOK, and
+  `tests/test_deploy_config.py` agree); `KALOS_ENGINE_TIMEOUT_MS` is documented;
+  stale two-front-door comments and broken `../RUNBOOK.md` /
+  `kalos/.env.example` paths fixed.
+- Other notes: campaign docs now describe per-tenant SQLite rows (not
+  `campaign.json`); the validation runner's docstring says eleven checks; the
+  root `.env.example` lists every variable the code reads (`KALOS_HOST`,
+  `KALOS_PORT`, `KALOS_ALLOW_OPEN_ACCESS`, `KALOS_VALIDATION_MODE`, Ollama).
+
+### Added - the TypeSafe tier of kalos.normalize (src/kalos/normalize/typesafe_tier.py)
 
 `KALOS_LLM_PROVIDER=typesafe` (+ `TYPESAFE_API_KEY`, `pip install -e ".[typesafe]"`)
 adds a fourth normalize provider. Where the Anthropic and Ollama tiers ask a
@@ -34,12 +103,14 @@ before; without the field nothing changes.
 
 ### Added - TypeSafe provider slot, deploy wiring
 
-`GET /api/providers` now lists `typesafe` (`kalos/providers/typesafe_provider.py`).
+`GET /api/providers` now lists `typesafe` (`src/kalos/providers/typesafe_provider.py`).
 The engine image installs the `typesafe` extra and compose passes
 `KALOS_LLM_PROVIDER` / `TYPESAFE_API_KEY` / `KALOS_TYPESAFE_*` through, so the
 tier is an env change, not a rebuild (`deploy/RUNBOOK.md`). `typesafe-sdk` is
 also in `dev`, so CI runs a wire test of the real SDK against an in-process
-mock transport. 27 new tests (25 in `tests/test_typesafe_tier.py`, 2 provider tests).
+mock transport. Tests for this whole entry: 32 in `tests/test_typesafe_tier.py`,
+8 in `tests/test_xgboost_baseline.py`, 2 provider tests, and the build-context
+allowlist test.
 
 ### Added - one dev-environment setup (scripts/setup-dev.sh, .devcontainer/)
 
@@ -55,35 +126,40 @@ experiment's requirements.
 `BENCHMARK.md` and `DESIGN.md` moved to `docs/` (every reference in code,
 tests, and the README updated; older entries below keep their original
 paths). New `docs/README.md` indexes the docs; `experiments/README.md` lists
-each prototype and its status. The README gained a pipeline-at-a-glance table,
-the TypeSafe section, dev-environment instructions, and a docs index, and now
-says eleven validation checks (it said nine in one place and eleven in
-another; `checks.py` has eleven).
+each prototype and its status. The validation-check count now reads eleven
+everywhere (it said nine in one place; `checks.py` has eleven). The README's
+final shape is described under "src layout, a Makefile, and a short README"
+above.
 
-### Added - container files organized (.dockerignore, .devcontainer/Dockerfile, deploy/README.md)
+### Merged - the `chore/containerfiles` layout (2026-09-24 entry below)
 
-There was no `.dockerignore`, and the engine image builds from the repo root,
-so a local `docker compose build` sent the whole checkout to the daemon - a
-dev `.venv` alone is ~6 GB, and a real `.env` would have ridden along. CI
-never saw it (fresh checkouts have no venv). The new `.dockerignore` keeps
-exactly what `Dockerfile.engine` copies, and `tests/test_deploy_config.py`
-now fails if it ever drops one of those paths or stops excluding `.venv`,
-`.git`, or `.env`. The dev container builds from its own tools-only
-Dockerfile (pinned uv, sqlite3, shellcheck). `deploy/README.md` indexes every
-container file, its build context, and the checks that guard it.
+This branch merges `chore/containerfiles` - one directory per image, each a
+`Containerfile`, plus `deploy/compose.yaml` and the `.containerignore`
+build-context allowlist - and carries this change's container edits onto it:
+the engine Containerfile installs the `typesafe` extra and `compose.yaml`
+passes the TypeSafe env through. This change had independently found the same
+missing-ignore-file problem (a dev `.venv` alone is ~6 GB); the allowlist from
+that branch is kept and this change's own `.dockerignore` is dropped.
+`tests/test_deploy_config.py` now guards the allowlist: it must start by
+excluding everything, re-include every path `engine/Containerfile` copies,
+never re-include `.env`/`.venv`/`.git`/`deploy`, and `.dockerignore` must
+stay a symlink to `.containerignore`. The dev container builds from its own
+tools-only `.devcontainer/Containerfile` (pinned uv, sqlite3, shellcheck),
+and `deploy/README.md` indexes every container file, production and dev.
 
 ### Changed - stale notes corrected
 
 - `deploy/RUNBOOK.md` and the compose header still described the original
-  two-front-door topology and "no image has been built"; both now describe
-  the wave-2 single front door and what has (and has not) been verified.
+  two-front-door topology (the 2026-09-24 rename kept that wording) and "no
+  image has been built"; both now describe the wave-2 single front door and
+  what has (and has not) been verified.
 - `deploy/.env.example` gains the `KALOS_ENGINE_TOKEN` line the RUNBOOK told
   operators to add by hand.
 - `docs/HARDENING.md`'s status log said P2-P5 were not started; `/healthz`,
   `/readyz`, and the backup sidecar exist, so P2 and P5 are marked partly done.
-- Docstrings: `kalos/portal/campaign_routes.py` called per-tenant campaign
+- Docstrings: `src/kalos/portal/campaign_routes.py` called per-tenant campaign
   isolation "the next slice" (it shipped in Phase 1b, and GET is read-scoped);
-  `kalos/portal/__main__.py` cited a function renamed to `assert_safe_exposure`.
+  `src/kalos/portal/__main__.py` cited a function renamed to `assert_safe_exposure`.
 - New `docs/ROADMAP.md`: the prioritized backlog from a read-through of the
   engine, portal, deploy pack, and CI, with the next three PRs.
 
@@ -97,7 +173,7 @@ reproduces identically on unmodified `main` with today's dependency resolution
 in this change touches the gated-acquisition path. Tracked as
 docs/ROADMAP.md item 19 (pin dependencies from `uv.lock`).
 
-The HTTP runner (`kalos/runner/adapter.py`, `HttpBackendAdapter`) sends no
+The HTTP runner (`src/kalos/runner/adapter.py`, `HttpBackendAdapter`) sends no
 credentials on `list_ready`/`fetch`/`set_status`, which have required
 `read`/`write` scope since the P1 tenancy work - against a hardened engine it
 gets 401 (docs/ROADMAP.md, P0 item 2).
@@ -107,6 +183,34 @@ columns (e.g. titer and purity): `guess_role` calls both `target` and
 `NormalizationPlan.validate` rejects two targets. The TypeSafe tier resolves
 this itself and `roles=auto` falls back cleanly, but a direct `offline_plan` /
 `propose_plan` call without a live tier still raises.
+## 2026-09-24 (proper container files)
+
+The deploy pack is now organized the way container tooling expects, and it
+builds the same under Docker and Podman.
+
+### Changed - one directory per image
+
+`deploy/engine/Containerfile` and `deploy/backup/Containerfile` replace
+`Dockerfile.engine` and `backup/Dockerfile`; the web image's Containerfile
+moved into the kalos-web repo itself (it builds that repo), so the kalos
+checkout no longer has to be named `kalos`. `deploy/compose.yaml` replaces
+`docker-compose.yaml`. Image contents are unchanged. Update any local
+scripts: `docker compose -f deploy/compose.yaml ...`.
+
+### Fixed - the engine build no longer ships the whole checkout to the builder
+
+There was no ignore file, so every engine build sent `.venv`, `.git`,
+agent worktrees and `deploy/backups/` (real database backups) as build
+context. A repo-root `.containerignore` allowlist (`.dockerignore` links to
+it) now sends only `pyproject.toml`, `README.md` and `kalos/`: about 0.8 MB,
+verified under both Docker and Podman.
+
+### Docs
+
+`deploy/RUNBOOK.md` gains a "Container files" section and Podman
+instructions (build with `--format docker`, or Podman silently drops the
+`HEALTHCHECK` the stack depends on). The web Containerfile's header now
+describes the same-origin engine proxy kalos-web actually uses.
 
 ## 2026-09-10 (the deploy pack meets reality)
 

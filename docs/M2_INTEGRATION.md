@@ -9,7 +9,7 @@ No Bioqore-org repo is touched.
 | Plan task | Where |
 | --- | --- |
 | 1. Status flag in the Experiment table for "ready to process" | `Experiment.status` enum in the store (`READY` is the flag) |
-| 2. Singleton process that pulls/pushes JSON, auto-runs flagged experiments, and can run any experiment on demand | `kalos/runner/singleton.py` + `BackendAdapter` |
+| 2. Singleton process that pulls/pushes JSON, auto-runs flagged experiments, and can run any experiment on demand | `src/kalos/runner/singleton.py` + `BackendAdapter` |
 | 3. Call the process manually on the server | `python -m kalos.runner` CLI + `POST /api/experiments/{id}/run` |
 | 4. OPTIONAL: button to run "all ready" | `POST /api/experiments/run-ready` |
 | 5. OPTIONAL: per-experiment run button that replaces existing output | `POST /api/experiments/{id}/run?force=true` |
@@ -83,7 +83,7 @@ Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_
 
 ## Singleton runner
 
-`kalos/runner/singleton.py`:
+`src/kalos/runner/singleton.py`:
 - Single-instance guard: a PID/lock file at `~/.kalos/runner.lock` so two runners cannot process the same experiment (the plan says "Singleton"). Stale-lock detection on start.
 - `run_one(exp_id, *, force=False)`: DRAFT/READY -> PROCESSING -> run `kalos.portal._analyze` on the payload -> push result -> DONE. On any `UploadRejected` or exception: FAILED with the message. `force` allows re-running a DONE experiment (discards prior result first).
 - `run_ready()`: reclaims any stale `PROCESSING` experiments back to `READY` first (`reclaim_stale`, orphan recovery - see below), then `list_ready()` then `run_one` for each; returns a per-experiment summary. Per-experiment resilient: one experiment raising unexpectedly is recorded as `FAILED` in the summary, not allowed to abort the batch.

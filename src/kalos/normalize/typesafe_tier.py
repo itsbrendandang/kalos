@@ -77,6 +77,10 @@ _COLUMNS_PER_REQUEST = 20
 
 _REQUEST_TIMEOUT = 30.0
 
+# A target must parse as a number in at least this share of its cells - the
+# same >=80% numeric convention the offline plan and the analyze path use.
+_NUMERIC_TARGET_MIN_PARSE = 0.8
+
 _TASK = (
     "Normalize the columns of a bioprocess experiment run sheet before modeling. "
     "Each entry in `columns` describes one column: its header, a coarse dtype, how many "
@@ -279,6 +283,23 @@ def plan_from_answers(
             continue
 
         role = role_answer.choice
+        unit_token, to_base, parse_rate = _unit_and_parse_rate(df[header], entry.get("dtype"))
+        if role == "target" and parse_rate < _NUMERIC_TARGET_MIN_PARSE:
+            # The optimizer can only maximize a number. A text column the model
+            # reads as "the outcome" is kept out of the inputs as metadata, and a
+            # real numeric outcome is never demoted in its favor.
+            columns.append(
+                ColumnPlan(
+                    raw_name=header,
+                    canonical_name=snake_canonical(header) or "column",
+                    role="metadata",
+                    note=(
+                        f"typesafe: target confidence {role_conf:.2f} ({probs}) but only "
+                        f"{parse_rate:.0%} of cells are numeric; kept as metadata"
+                    ),
+                )
+            )
+            continue
         if role == "freetext":
             columns.append(
                 ColumnPlan(
@@ -291,7 +312,6 @@ def plan_from_answers(
             )
             continue
 
-        unit_token, to_base, _ = _unit_and_parse_rate(df[header], entry.get("dtype"))
         base_name, name_note = _choose_base_name(header, i, answers, min_conf)
         columns.append(
             ColumnPlan(
