@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Reproduce the real-data pool retrospective from BENCHMARK.md.
+"""Reproduce the real-data pool retrospective from docs/BENCHMARK.md.
 
 The honest question: on the real media DoE, does the optimizer reach the best
-recipe in fewer experiments than random selection? BENCHMARK.md's resolved
+recipe in fewer experiments than random selection? docs/BENCHMARK.md's resolved
 answer is "yes, on the objective that matters" - the replicate-averaged
 (reproducible) titer, with the measured assay noise floor fed to the surrogate -
 but "no" on single measurements, which reward lucky noise spikes.

@@ -8,7 +8,7 @@ FEWER picks than random selection? The candidate set is the real rows; a strateg
 real assay), and we track the best titer found so far.
 
 The data is never committed here (it is client data); this module only takes a
-DataFrame, so the code stays reproducible and data-free. See BENCHMARK.md for the
+DataFrame, so the code stays reproducible and data-free. See docs/BENCHMARK.md for the
 result on the combined media DoE.
 """
 from __future__ import annotations

@@ -18,10 +18,23 @@ Pure Python / NumPy / scikit-learn — no GPU or deep-learning framework.
 
 ## 1. Install
 
+Standalone, in this directory:
+
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
+
+Or inside the kalos repo's shared dev environment (one `.venv` at the repo root,
+rebuilt the same way on a laptop, in the dev container, or in a cloud session):
+
+```bash
+KALOS_LEADGENE=1 bash ../../scripts/setup-dev.sh   # kalos[ml,portal,dev,typesafe] + requirements.txt
+../../.venv/bin/python -m pytest -q                # run from this directory
+```
+
+This pipeline is an off-path experiment (see [../README.md](../README.md)): kalos's CI
+does not run its tests, so run them yourself after changing it.
 
 ## 2. Data layout
 

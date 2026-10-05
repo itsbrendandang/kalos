@@ -1,6 +1,6 @@
 """PART 1 of the #1 backlog item: feasibility-gated PRODUCTION proposals.
 
-BENCHMARK.md proved plain BO loses to random search on zero-inflated titers
+docs/BENCHMARK.md proved plain BO loses to random search on zero-inflated titers
 (~21% non-producers), and that feasibility-gated EI fixes it - but, until this
 change, only inside `kalos/bench/pool.py`'s discrete candidate-pool re-ranking.
 The production path (`kalos.portal.analysis._analyze` -> `kalos.core.optimize.
@@ -48,7 +48,7 @@ from botorch.acquisition.logei import qLogNoisyExpectedImprovement  # noqa: E402
 def _zero_inflated_sheet(seed: int = 42, n: int = 100) -> pd.DataFrame:
     """Real signal (`titer` rises with both features) plus ~20-25% structured
     non-producers whose infeasibility depends on `Feat1` being large - the
-    same pathology BENCHMARK.md documents on the real media DoE (infeasibility
+    same pathology docs/BENCHMARK.md documents on the real media DoE (infeasibility
     correlated with a feature, not pure random zeroing), so the classifier has
     something learnable to gate on."""
     rng = np.random.default_rng(seed)
@@ -290,7 +290,7 @@ def test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool():
     gated run avoiding the infeasible region never trades away the true
     optimum to do so, matching this file's other zero-inflated sheet (real
     signal, infeasibility that depends on a feature, not pure random
-    zeroing - the BENCHMARK.md pathology).
+    zeroing - the docs/BENCHMARK.md pathology).
 
     Control, not a large-effect claim (same tolerance style as
     tests/test_feasibility.py's `bo_feas` check, `tol=1e-6`): gating the

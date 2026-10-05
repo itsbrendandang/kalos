@@ -259,7 +259,7 @@ GROUP_MEAN_BASELINE_MIN_GROUPS = 5
 GATE_MIN_N_INFEASIBLE = 5
 # PART 1 (feasibility-gated proposals) POLICY constant: the sheet must have at
 # least this many non-producer rows before the acquisition is gated by
-# P(feasible) at all - "zero-inflated enough" to be the pathology BENCHMARK.md
+# P(feasible) at all - "zero-inflated enough" to be the pathology docs/BENCHMARK.md
 # documents, not a producer-only sheet with a couple of stray zeros.
 # `FeasibilityClassifier.fit` already refuses to fit sklearn below 3
 # minority-class examples (its own cold-start guard), but 3-4 examples give an
@@ -438,7 +438,7 @@ def _noise_block(
     het: dict | None = None,
 ) -> dict:
     """The `noise` report for the analysis result: replicate structure + the
-    honest signal-to-noise picture (BENCHMARK.md, "the real lever is assay noise").
+    honest signal-to-noise picture (docs/BENCHMARK.md, "the real lever is assay noise").
 
     `icc` is the intraclass correlation - the fraction of titer variance that is
     real recipe-to-recipe signal rather than assay noise; a low ICC means most of
@@ -995,7 +995,7 @@ def _analyze(
     # row, producers and non-producers together, so a model can score well on it
     # by separating zeros from non-zeros - a feasibility classifier, not a ranking
     # of recipes. The client's question is "which of my producing recipes is
-    # best", and BENCHMARK.md shows the two can diverge badly: on the real media
+    # best", and docs/BENCHMARK.md shows the two can diverge badly: on the real media
     # DoE the pooled score looked like 0.37-0.52 while feasibility was never the
     # bottleneck, so most of that agreement was the easy half of the problem.
     #
@@ -1352,7 +1352,7 @@ def _analyze(
     drv.sort(key=lambda d: -abs(float(d["rho"])))
     drv = drv[:DRIVER_TOP_K]
 
-    # Replicate structure + assay noise floor (the "SNR lever", BENCHMARK.md).
+    # Replicate structure + assay noise floor (the "SNR lever", docs/BENCHMARK.md).
     # Media DoE sheets are frequently heavily replicated because the ASSAY is
     # noisy, not the process. Scoring/optimizing single measurements rewards
     # lucky noise spikes - which is why undirected search can out-score BO on

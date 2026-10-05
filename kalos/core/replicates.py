@@ -172,7 +172,7 @@ def heteroscedasticity_report(
 
     It matters because a single pooled variance is the wrong summary under
     multiplicative noise: high-titer recipes contribute large variances that
-    inflate the floor for everyone, which deflates the ICC. `BENCHMARK.md` reasons
+    inflate the floor for everyone, which deflates the ICC. `docs/BENCHMARK.md` reasons
     from ICC ~= 0.26 to "assay noise, not the optimizer, is the limiting factor",
     so if that ICC is partly a scale artifact then the conclusion drawn from it is
     too.

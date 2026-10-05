@@ -11,11 +11,12 @@ import json
 
 import pytest
 
-from kalos.providers import AnthropicProvider, BenchlingProvider, BioNemoProvider
+from kalos.providers import AnthropicProvider, BenchlingProvider, BioNemoProvider, TypesafeProvider
 from kalos.providers.registry import all_providers, get, provider_status
 
 _ALL_ENV_VARS = (
     "ANTHROPIC_API_KEY",
+    "TYPESAFE_API_KEY",
     "NVIDIA_API_KEY",
     "HF_TOKEN",
     "BENCHLING_API_KEY",
@@ -55,6 +56,24 @@ def test_anthropic_available_once_key_set(monkeypatch):
 def test_anthropic_missing_env_lists_exactly_the_absent_name():
     status = AnthropicProvider().status()
     assert status.missing_env == ("ANTHROPIC_API_KEY",)
+
+
+# --- typesafe ------------------------------------------------------------------ #
+
+def test_typesafe_available_once_key_set(monkeypatch):
+    provider = TypesafeProvider()
+    assert provider.available() is False
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-fake-key")
+    assert provider.available() is True
+    status = provider.status()
+    assert status.available is True
+    assert status.missing_env == ()
+    assert status.required_env == ("TYPESAFE_API_KEY",)
+
+
+def test_typesafe_whitespace_key_is_not_a_key(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "   ")
+    assert TypesafeProvider().available() is False
 
 
 # --- bionemo ------------------------------------------------------------------- #
@@ -115,13 +134,14 @@ def test_status_never_leaks_a_credential_value(monkeypatch):
 
 # --- registry ------------------------------------------------------------------- #
 
-def test_all_providers_returns_the_three_known_providers():
+def test_all_providers_returns_the_four_known_providers():
     names = {p.name for p in all_providers()}
-    assert names == {"anthropic", "bionemo", "benchling"}
+    assert names == {"anthropic", "typesafe", "bionemo", "benchling"}
 
 
 def test_get_returns_provider_by_name_or_none():
     assert get("anthropic") is not None
+    assert get("typesafe") is not None
     assert get("bionemo") is not None
     assert get("benchling") is not None
     assert get("does-not-exist") is None
@@ -130,11 +150,11 @@ def test_get_returns_provider_by_name_or_none():
 def test_provider_status_is_json_dumps_able():
     payload = provider_status()
     assert isinstance(payload, list)
-    assert len(payload) == 3
+    assert len(payload) == 4
     # must not raise
     text = json.dumps(payload)
     data = json.loads(text)
-    assert {entry["name"] for entry in data} == {"anthropic", "bionemo", "benchling"}
+    assert {entry["name"] for entry in data} == {"anthropic", "typesafe", "bionemo", "benchling"}
     for entry in data:
         assert set(entry) == {
             "name", "available", "required_env", "missing_env", "capability", "fallback",
@@ -157,7 +177,7 @@ def test_key_set_after_import_is_picked_up(monkeypatch):
 
 # --- GET /api/providers -------------------------------------------------------- #
 
-def test_providers_route_returns_all_three(monkeypatch):
+def test_providers_route_returns_all_four(monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -172,7 +192,7 @@ def test_providers_route_returns_all_three(monkeypatch):
     body = resp.json()
     assert "providers" in body
     names = {entry["name"] for entry in body["providers"]}
-    assert names == {"anthropic", "bionemo", "benchling"}
+    assert names == {"anthropic", "typesafe", "bionemo", "benchling"}
     anthropic_entry = next(e for e in body["providers"] if e["name"] == "anthropic")
     assert anthropic_entry["available"] is True
     # a live key must never leak into the response, even though it's set

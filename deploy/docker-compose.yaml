@@ -13,18 +13,18 @@
 #     host-mounted, non-compose-volume backup directory) is kept; the
 #     database engine it backs is not.
 #
-#   - TWO host-published front doors, not one. kalos-web's data-fetching code
-#     (lib/api.ts) runs entirely in "use client" components - confirmed by
-#     reading every app/*.tsx that imports it - so it is the BROWSER, not
-#     the Next.js server, that calls the engine's `/api/*` routes directly.
-#     That means the engine cannot be a docker-network-only backend the way
-#     the reference's Flask `backend` service was; it has to be reachable
-#     from wherever the browser sits, hence its own published port. This
-#     also means the engine's per-request "refuse open remote access" guard
-#     (kalos/portal/app.py's `_refuse_open_remote_access` middleware) sees
-#     every browser call as a REMOTE peer (Docker's bridge network address,
-#     not loopback) - which is exactly why the auth env below is not
-#     optional. See the security note further down.
+#   - ONE host-published front door: `web` (since wave 2; this pack first
+#     shipped with two). The browser calls kalos-web's same-origin
+#     `/api/engine/*`, and kalos-web's SERVER forwards to the engine over the
+#     compose-internal network with `Authorization: Bearer
+#     $KALOS_ENGINE_TOKEN`, so the engine publishes no host port at all
+#     (tests/test_deploy_config.py enforces this). The engine's per-request
+#     "refuse open remote access" guard (kalos/portal/app.py's
+#     `_refuse_open_remote_access` middleware) still sees the proxy as a
+#     REMOTE peer (Docker's bridge network address, not loopback) - which is
+#     exactly why the auth env below is not optional. The old direct-browser
+#     mode survives only as a dev escape hatch (NEXT_PUBLIC_API_URL below and
+#     RUNBOOK.md, "Security checklist").
 #
 #   - Still true here, matching the reference: only the two front-door
 #     services publish a host port; `restart: unless-stopped` (app
@@ -90,6 +90,12 @@ services:
       # kalos treats an unset var and an empty one the same
       # (os.environ.get(X, "").strip() throughout kalos/providers/).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # TypeSafe tier of kalos.normalize / POST /api/run roles=auto. The key
+      # alone changes nothing: KALOS_LLM_PROVIDER=typesafe selects the tier.
+      - KALOS_LLM_PROVIDER=${KALOS_LLM_PROVIDER:-}
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
+      - KALOS_TYPESAFE_MODEL=${KALOS_TYPESAFE_MODEL:-}
+      - KALOS_TYPESAFE_MIN_CONFIDENCE=${KALOS_TYPESAFE_MIN_CONFIDENCE:-}
       - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - BENCHLING_API_KEY=${BENCHLING_API_KEY:-}

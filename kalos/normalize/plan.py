@@ -1,8 +1,9 @@
 """A normalization plan: per-column decisions (rename/convert/hash/drop) plus
 the provenance of what actually happened when the plan was applied.
 
-A `NormalizationPlan` is the thing an LLM (or the offline fallback in
-`synonyms.guess_role`) proposes; `apply.apply_plan` is the thing that actually
+A `NormalizationPlan` is the thing an LLM, the TypeSafe tier (typed
+per-column judgments), or the offline fallback in `synonyms.guess_role`
+proposes; `apply.apply_plan` is the thing that actually
 executes it deterministically against a dataframe. Keeping the plan as its own
 serializable object means the same plan can be inspected, edited, and re-run,
 and a client audit can always answer "why does column X look like this" from
@@ -51,7 +52,7 @@ class NormalizationPlan:
     """The full per-column plan for one run sheet, plus who authored it."""
 
     columns: list[ColumnPlan]
-    created_by: Literal["llm", "offline"]
+    created_by: Literal["llm", "typesafe", "offline"]
     model: str | None = None
 
     def validate(self) -> None:

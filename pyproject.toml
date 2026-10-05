@@ -31,6 +31,11 @@ portal = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"
 # The torch-free deterministic core (units/synonyms/plan/apply) and the
 # offline fallback in llm.py need none of this.
 normalize = ["anthropic>=0.40"]
+# The TypeSafe tier of `kalos.normalize` (kalos/normalize/typesafe_tier.py):
+# typed per-column judgments from TypeSafe's System One model, selected with
+# KALOS_LLM_PROVIDER=typesafe. Imported lazily; without it (or without
+# TYPESAFE_API_KEY) normalization falls back to the offline plan.
+typesafe = ["typesafe-sdk>=0.7"]
 # `httpx` is the transport `starlette.testclient.TestClient` (used across the
 # portal tests) needs. It is not pulled in transitively by fastapi/starlette, so
 # a fresh `pip install -e ".[...,dev]"` (what CI does) leaves it absent and every
@@ -42,9 +47,13 @@ normalize = ["anthropic>=0.40"]
 # still needs the package present, and CI installs `.[ml,portal,dev]` only - so
 # without this the two mocked-live tests error out on a fresh CI checkout. Listing
 # it in `dev` keeps that path genuinely covered instead of silently skipped.
+# `typesafe-sdk` is in `dev` for the same reason as `anthropic`: the wire test
+# in tests/test_typesafe_tier.py drives the real SDK client against an
+# in-process mock transport (no network, no key), and CI installs
+# `.[ml,portal,dev]` only.
 dev = [
   "pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs",
-  "httpx>=0.27,<1", "anthropic>=0.40",
+  "httpx>=0.27,<1", "anthropic>=0.40", "typesafe-sdk>=0.7",
 ]
 
 [tool.setuptools.packages.find]

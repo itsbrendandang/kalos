@@ -68,7 +68,7 @@ from kalos.core.surrogate import (
 KINDS = ("single_task", "saas")
 
 # The portal's per-request analyze budget (see kalos/portal/analysis.py and
-# BENCHMARK.md). A candidate surrogate that cannot fit within this, on the row
+# docs/BENCHMARK.md). A candidate surrogate that cannot fit within this, on the row
 # counts kalos actually sees, cannot ship regardless of accuracy - the request
 # would just time out or feel broken. This is the absolute bar.
 ANALYZE_BUDGET_S = 2.0

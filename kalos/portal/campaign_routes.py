@@ -6,8 +6,9 @@ Auth posture: the mutating endpoints (`start`, `result`, `reanalyze`) require
 the `write` scope via `kalos.portal.auth` (docs/HARDENING.md, Phase 1). In open
 mode (no tokens configured) the anonymous principal holds read+write, so the
 local dev/pilot loop is unchanged; once tokens are provisioned these endpoints
-enforce them. `GET /api/campaign` stays open for now (read gating is a
-follow-up). Per-tenant isolation of the campaign store is the next slice.
+enforce them. `GET /api/campaign` requires the `read` scope. The campaign
+store is isolated per tenant (one row per tenant, `kalos.portal.campaign`;
+docs/HARDENING.md, Phase 1b), and every route passes the principal's tenant.
 """
 from __future__ import annotations
 

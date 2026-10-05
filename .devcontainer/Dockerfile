@@ -1,0 +1,18 @@
+# kalos development image (VS Code / Codespaces dev container).
+#
+# Tools only - no project code and no Python packages. The workspace is
+# bind-mounted and scripts/setup-dev.sh installs kalos into .venv (a named
+# volume, see devcontainer.json), so dependency changes never need an image
+# rebuild. Production images live in deploy/ and share nothing with this one.
+FROM mcr.microsoft.com/devcontainers/python:3.12
+
+# uv: scripts/setup-dev.sh uses it when present (several times faster than pip
+# for the torch/botorch install) and falls back to pip without it. Pinned so a
+# rebuild is reproducible; bump deliberately.
+COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
+
+# sqlite3: inspect the engine's state (~/.kalos/experiments.db, portal.db).
+# shellcheck: lint deploy/backup/backup.sh (deploy/RUNBOOK.md asks for it).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sqlite3 shellcheck \
+    && rm -rf /var/lib/apt/lists/*

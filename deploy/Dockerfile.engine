@@ -52,7 +52,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY pyproject.toml README.md ./
 COPY kalos ./kalos
 
-RUN pip install --no-cache-dir ".[ml,portal]"
+# `typesafe` is small (typesafe-sdk + httpx2) and lets an operator turn on the
+# TypeSafe normalization/roles tier with env vars alone (KALOS_LLM_PROVIDER=typesafe
+# + TYPESAFE_API_KEY) instead of rebuilding the image.
+RUN pip install --no-cache-dir ".[ml,portal,typesafe]"
 
 # ---------------------------------------------------------------------------
 # runtime

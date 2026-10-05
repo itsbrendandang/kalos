@@ -9,6 +9,27 @@ hand-rolled GP + EI.
 > Genuine, classical/probabilistic + deep-learning ML — not marketing. The BO
 > loop runs here today, and ESM-2 embeds protein sequences on the Mac's GPU.
 
+## The pipeline at a glance
+
+One uploaded run sheet flows through these stages. Every stage is a plain
+module you can call on its own; the portal (`POST /api/run`) and the Voyager
+runner just chain them. (Roles are normally inferred inside the analysis, after
+validation; with `roles=auto` stage 3 is decided first and handed to it.)
+
+| # | Stage | What it decides | Where |
+| --- | --- | --- | --- |
+| 1 | **Ingest** | parse CSV/TSV/Excel under hard size caps, sniff the filetype | `portal/uploads.py` |
+| 2 | **Validate** | eleven data-quality checks; unit conversion; physically-possible bounds | `validation/` |
+| 3 | **Normalize + roles** | which column is the target, a feature, a group, an id; canonical names | `normalize/` (offline, LLM, or **TypeSafe** tier), `domains/` |
+| 4 | **Analyze** | grouped-CV reliability, signed drivers, conformal bands, promotion verdict | `portal/analysis.py` over `core/` |
+| 5 | **Propose** | the next batch (qLogNEI / qLogNEHVI), feasibility-gated, in-flight-aware | `core/optimize.py`, `core/multiobjective.py`, `core/feasibility.py` |
+| 6 | **Loop** | log measured results, re-analyze on the grown dataset, re-propose | `portal/campaign.py` ([docs/CAMPAIGN_LOOP.md](docs/CAMPAIGN_LOOP.md)) |
+| 7 | **Store + run** | persist experiments, run READY ones, push results | `store/`, `runner/` ([docs/M2_INTEGRATION.md](docs/M2_INTEGRATION.md)) |
+
+Stage 3 is where TypeSafe makes typed decisions (see
+[TypeSafe decisions](#typesafe-decisions-for-the-normalize-and-roles-stage)); the
+statistics in stages 4-5 stay in code, where the honesty guarantees live.
+
 ## What's here
 
 ```
@@ -52,15 +73,27 @@ kalos/
   normalize/
     units.py           the canonical unit registry: parse "34.6 C", convert to a base unit
     synonyms.py        deterministic header -> canonical column mapping
-    llm.py             optional LLM-assisted mapping (needs ANTHROPIC_API_KEY; offline fallback always works)
+    payload.py         the privacy boundary: identity columns removed, free text redacted before any model sees it
+    llm.py             offline plan + optional LLM tier (Anthropic or self-hosted Ollama); offline fallback always works
+    typesafe_tier.py   optional TypeSafe tier: per-column typed judgments (role / identity / canonical name)
+    roles.py           plan -> ColumnRoles, so a plan can drive /api/run (roles=auto)
+    apply.py           execute a plan deterministically (drop, hash, rename, convert)
   providers/
-    registry.py        external-provider credential slots (Anthropic / BioNeMo / Benchling), all keyless-by-default
+    registry.py        external-provider credential slots (Anthropic / TypeSafe / BioNeMo / Benchling), all keyless-by-default
+  bench/               closed-loop benchmarks with known optima (docs/BENCHMARK.md)
   portal/
     app.py             FastAPI app: live-engine views + /api/experiments + the "run your own data" upload path
+    analysis.py        `_analyze`: the stage-4/5 pipeline behind /api/run and campaign re-analysis
+    campaign.py        the closed loop's state + re-analysis (campaign_routes.py mounts /api/campaign)
     validate.py        ingestion preflight + per-column provenance (what was kept/dropped and why)
 examples/            demos + run_on_media_data.py
-experiments/         off-path research prototypes; NOT part of the shipped package or its guarantees (e.g. missingness_indicator/)
-tests/               pytest
+experiments/         off-path research prototypes; NOT part of the shipped package or its guarantees (see experiments/README.md)
+tests/               pytest (CI gate)
+docs/                design, benchmark, campaign-loop, M2, and hardening write-ups (docs/README.md is the index)
+deploy/              production images, compose stack, backup sidecar (deploy/README.md indexes them; RUNBOOK.md operates them)
+scripts/setup-dev.sh one idempotent dev-environment setup for laptops, the devcontainer, and cloud sessions
+.devcontainer/       VS Code / Codespaces dev container: Dockerfile (tools) + devcontainer.json (runs scripts/setup-dev.sh)
+.dockerignore        keeps the engine image's root build context to pyproject.toml, README.md, kalos/
 ```
 
 A lot of the honest-evaluation and data machinery was carried over from a prior
@@ -123,9 +156,9 @@ batch). Because the sheet comes from an external client, the upload path is guar
   (`dropped_constant_on_fitted_rows`), never silently pinned to a zero-width bound. No more silent
   column drops.
 - **Data validation gate.** Before any column is typed or dropped, the sheet runs through
-  `kalos.validation`: nine checks covering unit consistency, physical bounds, duplicates vs
-  replicates, missingness, outliers, provenance metadata, replicate adequacy, controls presence,
-  and constant columns. The report is returned as `validation`, with `status` one of `pass`,
+  `kalos.validation`: eleven checks covering unit consistency, physical bounds, duplicates vs
+  replicates, missingness, informative missingness, outliers, provenance metadata, replicate
+  adequacy, controls presence, constant columns, and columns constant within a group. The report is returned as `validation`, with `status` one of `pass`,
   `pass_with_warnings`, or `fail`. An **error** is a physics violation (pH 40, a negative titer, one
   column mixing g/L and mg/mL); a **warning** is possible but operationally suspect. Row lists are
   capped at 20 with the true total in `detail.n_rows_affected`, so a finding never implies its list
@@ -149,6 +182,42 @@ batch). Because the sheet comes from an external client, the upload path is guar
 - **Opt-in anonymization.** Pass the form field `anonymize=true` to pseudonymize identifier-type
   columns in the response. Feature and target names are kept as-is (the owner UI legitimately shows
   drivers like "Methanol").
+- **Decided roles (`roles=auto`).** Pass the form field `roles=auto` to have the normalize tier
+  decide target / features / group / ids instead of the bioprocess header patterns (a JSON
+  `roles` object still declares them by hand). The response gains a `role_decision` block: which
+  tier decided (`typesafe`, `llm`, or `offline`), whether the decision was applied, and each
+  column's role with its rationale and probabilities - column names only, never cell values. If no
+  consistent plan names a target, roles are inferred exactly as without the field. An explicit
+  `target` field always wins over the decided one.
+
+## TypeSafe decisions for the normalize and roles stage
+
+[TypeSafe](https://typesafe.ai)'s System One model (Jev) returns typed judgments with
+probabilities instead of generated text. Kalos uses it where ordinary code needs semantic
+understanding - reading what a client's column *means* - and nowhere else:
+
+| Question per column | TypeSafe primitive | How code uses the answer |
+| --- | --- | --- |
+| What role does it play: target, feature, group, metadata, free text? | **Choice** | acted on only above `KALOS_TYPESAFE_MIN_CONFIDENCE` (default 0.6); below it the offline guess is kept |
+| Does it identify a client, a person, or a sample? | **Noul** | dropped as identity at p >= 0.5 - a privacy gate, not a preference |
+| Which known canonical name is it (or its own)? | **Choice** over names code builds | select, never generate; exact aliases are resolved in code and never asked |
+
+Code keeps the rules: units are an exact registry lookup, at most one target survives (a second
+"outcome" becomes metadata, never an input), name collisions are resolved deterministically, and
+every decision's probabilities are written into the plan's `note` for audit. The model only ever
+sees the identity-screened payload from `normalize/payload.py`. Any failure (no key, network,
+malformed answer) falls back to the offline plan - TypeSafe can improve the decision, never block
+an upload.
+
+```bash
+python -m pip install -e ".[typesafe]"     # typesafe-sdk
+export KALOS_LLM_PROVIDER=typesafe TYPESAFE_API_KEY=...
+python -c "import pandas as pd; from kalos.normalize import propose_plan; print(propose_plan(pd.read_csv('sheet.csv')).to_json())"
+curl -F file=@sheet.csv -F roles=auto http://127.0.0.1:8050/api/run   # TypeSafe-decided roles
+```
+
+`GET /api/providers` reports whether the key is present. The Claude Code plugin
+(`typesafe@typesafe-ai`) carries TypeSafe's own design guidance for extending this tier.
 
 ## Install / run
 
@@ -170,16 +239,35 @@ python -m pytest                        # tests (KALOS_TEST_ESM=1 to include ESM
 
 python -m pip install -e ".[ml,portal]" # the web portal (FastAPI) drives the live GP, so it needs [ml] too
 python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
+
+python -m pip install -e ".[typesafe]"  # + the TypeSafe normalize/roles tier (typesafe-sdk)
+python -m pip install -e ".[normalize]" # + the Anthropic LLM normalize tier
 ```
+
+### Development environment (survives new sessions)
+
+`scripts/setup-dev.sh` rebuilds the full environment - `.venv` with
+`kalos[ml,portal,dev,typesafe]`, CPU torch first - in one idempotent command, so a fresh machine
+or a fresh session is ready in one step:
+
+| Where | How |
+| --- | --- |
+| Laptop | `bash scripts/setup-dev.sh && source .venv/bin/activate` |
+| VS Code / Codespaces | open in the dev container (`.devcontainer/`); it runs the script, keeps `.venv` in a named volume, and forwards the portal port 8050 |
+| Claude Code cloud session | put `bash scripts/setup-dev.sh` in the cloud environment's setup script; the container is cached after it runs |
+| Production | not this script - build the images in `deploy/` (see `deploy/README.md` and `deploy/RUNBOOK.md`) |
+
+`KALOS_EXTRAS=ml,portal,dev` narrows the install; `KALOS_LEADGENE=1` also installs the
+leadgene experiment's requirements. Copy `.env.example` to `.env` for optional keys.
 
 ### Development checks
 
 CI runs the same three gates on every push and pull request (`.github/workflows/ci.yml`).
-Reproduce them from a clean `.[ml,portal,dev]` install:
+Reproduce them from a clean `.[ml,portal,dev]` install (or `bash scripts/setup-dev.sh`):
 
 ```bash
 python -m pip install -e ".[ml,portal,dev]"  # + ruff, mypy, and type stubs
-ruff check kalos/                            # lint
+ruff check kalos/ tests/ examples/           # lint
 mypy                                          # types (config in pyproject [tool.mypy])
 python -m pytest -q                           # tests
 ```
@@ -234,8 +322,26 @@ into a new profile) and, if it has discrete choices, list them under
   Reported, never enforced: the verdict cannot reject an upload.)
 - ~~Replicate-aware aggregation + assay noise-floor estimation + optional
   fixed-noise GP.~~ **Done** (`core/replicates.py`, `Surrogate.fit(..., noise=...)`,
-  `pool_from_frame(..., aggregate=True)`) — the SNR lever from `BENCHMARK.md`.
+  `pool_from_frame(..., aggregate=True)`) — the SNR lever from `docs/BENCHMARK.md`.
+- ~~Semantic column-role decisions beyond header regexes.~~ **Done** (`normalize/typesafe_tier.py`,
+  `roles=auto` on `/api/run`). Next: evaluate the confidence threshold on real client sheets.
 - Larger ESM-2 / full NVIDIA BioNeMo backend behind the same embedder interface.
+
+## Documentation
+
+| Doc | Read it for |
+| --- | --- |
+| [docs/README.md](docs/README.md) | the index of everything below |
+| [docs/CAMPAIGN_LOOP.md](docs/CAMPAIGN_LOOP.md) | the propose -> run -> log -> re-propose contract |
+| [docs/M2_INTEGRATION.md](docs/M2_INTEGRATION.md) | the experiment store, runner, and Voyager seam |
+| [docs/BENCHMARK.md](docs/BENCHMARK.md) | does BO beat space-filling designs, and why noise decides it |
+| [docs/HARDENING.md](docs/HARDENING.md) | auth, tenancy, CORS, and the production track |
+| [docs/DESIGN.md](docs/DESIGN.md) | the engine portal's visual design system |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | what to work on next: known bugs, refactors, product gaps, ops, CI |
+| [deploy/README.md](deploy/README.md) | every container file (production + dev) and its build context |
+| [deploy/RUNBOOK.md](deploy/RUNBOOK.md) | deploying, upgrading, backing up |
+| [experiments/README.md](experiments/README.md) | off-path research prototypes |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, newest first |
 
 No proprietary data lives in this repo; the demos use synthetic data and public
 protein sequences.

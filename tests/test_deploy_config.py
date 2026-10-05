@@ -252,6 +252,26 @@ def test_dockerfiles_declare_a_healthcheck():
         assert "HEALTHCHECK" in text, f"{name} has no HEALTHCHECK"
 
 
+def test_dockerignore_keeps_engine_inputs_and_drops_heavy_or_secret_paths():
+    """The engine builds from the repo root, so `.dockerignore` decides what is
+    sent to the daemon: it must keep every path Dockerfile.engine COPYs, and
+    must drop the dev venv (GBs), the git dir, and any real `.env`."""
+    ignore = (DEPLOY_DIR.parent / ".dockerignore").read_text().splitlines()
+    patterns = {line.strip() for line in ignore if line.strip() and not line.startswith("#")}
+    for must_drop in (".venv/", ".git/", ".env"):
+        assert must_drop in patterns, f".dockerignore does not exclude {must_drop}"
+    engine = (DEPLOY_DIR / "Dockerfile.engine").read_text()
+    copied = []
+    for line in engine.splitlines():
+        parts = line.split()
+        if parts[:1] == ["COPY"] and not any(p.startswith("--from") for p in parts):
+            copied.extend(parts[1:-1])
+    assert copied, "found no COPY sources in Dockerfile.engine"
+    for src in copied:
+        name = src.rstrip("/")
+        assert name not in {p.rstrip("/") for p in patterns}, f".dockerignore drops {src}, which Dockerfile.engine COPYs"
+
+
 def test_backup_script_is_syntactically_valid_posix_sh():
     script = DEPLOY_DIR / "backup" / "backup.sh"
     result = subprocess.run(["sh", "-n", str(script)], capture_output=True, text=True)

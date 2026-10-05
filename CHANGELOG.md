@@ -2,6 +2,112 @@
 
 Newest first.
 
+## 2026-10-05 (TypeSafe column decisions, a reproducible dev environment, docs reorganized)
+
+### Added - the TypeSafe tier of kalos.normalize (kalos/normalize/typesafe_tier.py)
+
+`KALOS_LLM_PROVIDER=typesafe` (+ `TYPESAFE_API_KEY`, `pip install -e ".[typesafe]"`)
+adds a fourth normalize provider. Where the Anthropic and Ollama tiers ask a
+generative model to write a whole plan as JSON, this one asks TypeSafe's System
+One model (Jev) narrow typed questions per column - role (Choice), identity
+(Noul), canonical name (Choice over names code builds; exact aliases are never
+asked) - and code composes the plan. The policy is explicit and tested: a role
+or name below `KALOS_TYPESAFE_MIN_CONFIDENCE` (default 0.6, a starting point to
+evaluate on real sheets, not a calibrated constant) keeps the offline guess;
+identity drops at p >= 0.5; at most one target survives and a second "outcome"
+becomes metadata, never an input; name collisions resolve deterministically;
+units stay an exact registry lookup shared with the offline plan. Each
+decision's probabilities are written into the plan's `note`. The model sees
+only the identity-screened payload, wide sheets are chunked at 20 columns per
+request over the same state, and any failure falls back to the offline plan.
+Plans record `created_by="typesafe"`.
+
+### Added - `roles=auto` on POST /api/run, and `plan_to_roles`
+
+`kalos.normalize.plan_to_roles` turns any plan into the `ColumnRoles` the
+analyze path already accepts. `/api/run` with `roles=auto` uses the configured
+tier's plan to decide target / features / group / ids, and returns a
+`role_decision` block (tier, applied or not, per-column role + rationale;
+names only, never cell values). An explicit `target` field still wins. With
+no consistent plan, roles are inferred from the bioprocess profile exactly as
+before; without the field nothing changes.
+
+### Added - TypeSafe provider slot, deploy wiring
+
+`GET /api/providers` now lists `typesafe` (`kalos/providers/typesafe_provider.py`).
+The engine image installs the `typesafe` extra and compose passes
+`KALOS_LLM_PROVIDER` / `TYPESAFE_API_KEY` / `KALOS_TYPESAFE_*` through, so the
+tier is an env change, not a rebuild (`deploy/RUNBOOK.md`). `typesafe-sdk` is
+also in `dev`, so CI runs a wire test of the real SDK against an in-process
+mock transport. 27 new tests (25 in `tests/test_typesafe_tier.py`, 2 provider tests).
+
+### Added - one dev-environment setup (scripts/setup-dev.sh, .devcontainer/)
+
+`scripts/setup-dev.sh` rebuilds `.venv` with `kalos[ml,portal,dev,typesafe]`
+idempotently, for a laptop, the new dev container, or a cloud session's setup
+script. It installs CPU torch first and falls back to PyPI's torch when
+PyTorch's own index is unreachable (found on a sandbox whose egress policy
+blocks `download.pytorch.org`). `KALOS_LEADGENE=1` adds the leadgene
+experiment's requirements.
+
+### Changed - docs reorganized, none removed
+
+`BENCHMARK.md` and `DESIGN.md` moved to `docs/` (every reference in code,
+tests, and the README updated; older entries below keep their original
+paths). New `docs/README.md` indexes the docs; `experiments/README.md` lists
+each prototype and its status. The README gained a pipeline-at-a-glance table,
+the TypeSafe section, dev-environment instructions, and a docs index, and now
+says eleven validation checks (it said nine in one place and eleven in
+another; `checks.py` has eleven).
+
+### Added - container files organized (.dockerignore, .devcontainer/Dockerfile, deploy/README.md)
+
+There was no `.dockerignore`, and the engine image builds from the repo root,
+so a local `docker compose build` sent the whole checkout to the daemon - a
+dev `.venv` alone is ~6 GB, and a real `.env` would have ridden along. CI
+never saw it (fresh checkouts have no venv). The new `.dockerignore` keeps
+exactly what `Dockerfile.engine` copies, and `tests/test_deploy_config.py`
+now fails if it ever drops one of those paths or stops excluding `.venv`,
+`.git`, or `.env`. The dev container builds from its own tools-only
+Dockerfile (pinned uv, sqlite3, shellcheck). `deploy/README.md` indexes every
+container file, its build context, and the checks that guard it.
+
+### Changed - stale notes corrected
+
+- `deploy/RUNBOOK.md` and the compose header still described the original
+  two-front-door topology and "no image has been built"; both now describe
+  the wave-2 single front door and what has (and has not) been verified.
+- `deploy/.env.example` gains the `KALOS_ENGINE_TOKEN` line the RUNBOOK told
+  operators to add by hand.
+- `docs/HARDENING.md`'s status log said P2-P5 were not started; `/healthz`,
+  `/readyz`, and the backup sidecar exist, so P2 and P5 are marked partly done.
+- Docstrings: `kalos/portal/campaign_routes.py` called per-tenant campaign
+  isolation "the next slice" (it shipped in Phase 1b, and GET is read-scoped);
+  `kalos/portal/__main__.py` cited a function renamed to `assert_safe_exposure`.
+- New `docs/ROADMAP.md`: the prioritized backlog from a read-through of the
+  engine, portal, deploy pack, and CI, with the next three PRs.
+
+### Known, not fixed here
+
+The full suite here is 817 passed, 5 skipped, 1 failed. The failure,
+`test_gated_vs_ungated_best_found_so_far_not_worse_on_zero_inflated_pool`,
+reproduces identically on unmodified `main` with today's dependency resolution
+(torch 2.14.1, numpy 2.5.3, scipy 1.18.1) - main's CI last passed on
+2026-09-16 with older wheels. Bisected: not botorch, not scikit-learn. Nothing
+in this change touches the gated-acquisition path. Tracked as
+docs/ROADMAP.md item 19 (pin dependencies from `uv.lock`).
+
+The HTTP runner (`kalos/runner/adapter.py`, `HttpBackendAdapter`) sends no
+credentials on `list_ready`/`fetch`/`set_status`, which have required
+`read`/`write` scope since the P1 tenancy work - against a hardened engine it
+gets 401 (docs/ROADMAP.md, P0 item 2).
+
+`offline_plan` raises `ValueError` on any sheet with two outcome-looking
+columns (e.g. titer and purity): `guess_role` calls both `target` and
+`NormalizationPlan.validate` rejects two targets. The TypeSafe tier resolves
+this itself and `roles=auto` falls back cleanly, but a direct `offline_plan` /
+`propose_plan` call without a live tier still raises.
+
 ## 2026-09-10 (the deploy pack meets reality)
 
 The wave-2 deploy pack was written and config-tested but its images were never

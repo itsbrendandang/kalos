@@ -65,7 +65,7 @@ def test_feasible_labels_strict_threshold_boundary():
 def test_zero_inflated_pool_feasibility_gating_does_not_hurt():
     # Build a smooth positive response surface, then zero out ~25% of rows at
     # random to simulate zero-inflated non-producers (independent of the
-    # underlying surface value) - the same pathology BENCHMARK.md documents on
+    # underlying surface value) - the same pathology docs/BENCHMARK.md documents on
     # the real media DoE data.
     rng = np.random.default_rng(42)
     n = 100

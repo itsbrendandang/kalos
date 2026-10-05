@@ -4,13 +4,16 @@ Covers the stack in `deploy/docker-compose.yaml`: the kalos engine
 (FastAPI/uvicorn, `python -m kalos.portal`), kalos-web (Next.js), and a
 SQLite backup sidecar.
 Read `deploy/docker-compose.yaml`'s header comment first if you have not -
-it explains why this stack has two host-published front doors instead of
-one, and why the engine needs real auth configured to start at all.
+it explains why the stack has a single host-published front door (`web`,
+which proxies to the engine with a bearer token) and why the engine needs
+real auth configured to start at all. Every container file and its build
+context is indexed in [README.md](README.md).
 
-This is a v0 pack: builds are unverified (no image has actually been built
-- see "What was verified" at the bottom), and TLS termination is explicitly
-out of scope, delegated to a host-level reverse proxy placed in front of
-both published ports. Nothing here does TLS itself.
+This is a v0 pack: the images have been built and run (the verified
+quickstart below; CI builds and boot-tests the engine image on every push),
+and TLS termination is explicitly out of scope, delegated to a host-level
+reverse proxy placed in front of the published `web` port. Nothing here
+does TLS itself.
 
 
 ## Verified quickstart (first real deployment, 2026-09-10)
@@ -180,6 +183,25 @@ re-runs an analysis, so it does not need restore-grade rigor. The backup
 script still copies it opportunistically under
 `deploy/backups/latest-cache/` if you want it anyway.
 
+## Optional: TypeSafe column decisions
+
+The engine image installs the `typesafe` extra, so the TypeSafe tier is an env
+change, not a rebuild. In `deploy/.env`:
+
+```bash
+KALOS_LLM_PROVIDER=typesafe
+TYPESAFE_API_KEY=...                  # never commit; same handling as the other keys
+# KALOS_TYPESAFE_MIN_CONFIDENCE=0.6   # below this, a role/name decision falls back to the offline guess
+```
+
+Then `docker compose up -d engine`. `GET /api/providers` shows `typesafe` as
+available once the key is present. It only affects uploads sent with
+`roles=auto` and direct `kalos.normalize.propose_plan` calls; every other path is
+unchanged. If the TypeSafe API is unreachable, the engine logs
+`normalize: live plan failed (...); falling back to offline` and carries on with
+the offline plan - an outage degrades the decision, never the upload. The engine
+needs outbound HTTPS to `api.typesafe.ai` for this tier.
+
 ## Log locations
 
 - `docker compose logs engine` - uvicorn access/error output plus kalos's
@@ -229,9 +251,8 @@ so it stays a pure liveness check. `docker compose ps` shows `healthy` /
       never in the client bundle), and the engine no longer publishes a host
       port at all - one front door. Setup: mint a `KALOS_AUTH_TOKENS` entry
       (subject e.g. "kalos-web-service") and set `KALOS_ENGINE_TOKEN` in
-      `deploy/.env` to its PLAINTEXT counterpart. (`.env.example` could not be
-      auto-edited - this workspace hard-denies `.env*` writes - add the
-      `KALOS_ENGINE_TOKEN=` line there by hand.) The old direct-browser mode
+      `deploy/.env` to its PLAINTEXT counterpart (`.env.example` carries the
+      `KALOS_ENGINE_TOKEN=` line and how to mint it). The old direct-browser mode
       survives as an explicit dev escape hatch: set `NEXT_PUBLIC_API_URL` and
       re-publish the engine port in the compose. The previous option of
       `KALOS_ALLOW_OPEN_ACCESS=1` + network-perimeter control remains the
@@ -299,13 +320,21 @@ into the JS files on disk inside the image.
   Docker daemon to run its image) to run a real lint pass - worth doing
   before this script sees production.
 
-**NOT verified (stated plainly, not glossed over):**
-- No image was actually built (`docker build`/`docker compose build`) -
-  this task's brief explicitly excludes that as heavy; a real build could
-  still surface a missed system package, a pip resolution conflict, or (for
-  `web`) the `output: "standalone"` gap actually failing the build as
-  documented.
-- No container was actually run; the healthchecks, the auth-refusal
-  startup path, and the backup/restore drill are reasoned from reading the
-  source, not exercised end-to-end.
-- `deploy/backup/backup.sh` was not executed against a real SQLite file.
+**Verified since (2026-09-10 onward):**
+- All three images were built and the stack run end to end (the "Verified
+  quickstart" at the top, including the authed proxy and the 503 busy path),
+  which surfaced and fixed three container-only defects (CHANGELOG
+  2026-09-10).
+- CI (`.github/workflows/ci.yml`, `docker-build`) builds the engine image and
+  waits for its own `HEALTHCHECK` to report healthy on every push and PR.
+- `tests/test_deploy_config.py` checks that `.dockerignore` keeps every path
+  `Dockerfile.engine` copies while excluding `.venv`, `.git`, and `.env`.
+
+**Still NOT verified (stated plainly, not glossed over):**
+- The backup/restore drill below has not been run as written against a live
+  volume, and `deploy/backup/backup.sh` has not been executed against a real
+  SQLite file outside the reference deployment.
+- `shellcheck` has not been run on `backup.sh` (it is installed in the dev
+  container, `.devcontainer/Dockerfile`, for exactly this).
+- The `web` image is not built in CI (its context is the separate kalos-web
+  repo).

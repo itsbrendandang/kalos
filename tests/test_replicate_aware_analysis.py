@@ -1,7 +1,7 @@
 """The production analysis path (`_analyze`) is replicate-aware: when a run
 sheet has replicated recipes it proposes on the reproducible (replicate-averaged)
 titer with the measured assay noise floor fed to the GP - the "SNR lever" that
-BENCHMARK.md shows is what actually makes BO beat random on real, noisy data -
+docs/BENCHMARK.md shows is what actually makes BO beat random on real, noisy data -
 and reports an honest `noise` block. Non-replicated sheets are unchanged.
 """
 from __future__ import annotations

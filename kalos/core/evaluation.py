@@ -246,7 +246,7 @@ def producer_only_spearman(
     feasibility classifier, not a ranking of recipes. The client's decision is
     "which of my producing recipes is best", and that is a different question.
 
-    `BENCHMARK.md` documents this concretely: on the real media DoE the pooled
+    `docs/BENCHMARK.md` documents this concretely: on the real media DoE the pooled
     held-out Spearman was a plausible-looking 0.37-0.52 while feasibility was
     "mostly a stable property" and never the bottleneck, so most of that pooled
     agreement was the easy part of the problem.
@@ -448,7 +448,7 @@ def top_k_overlap(oof_actual, oof_pred, k: int) -> dict:
     held-out point, weighted equally from the top of the distribution to the
     bottom. The client's actual decision is narrower: "which N recipes do I
     advance to the next round". On a zero-inflated target (most of the
-    response mass sitting at or near zero, BENCHMARK.md's media DoE being the
+    response mass sitting at or near zero, docs/BENCHMARK.md's media DoE being the
     running example in this module) a model can post a respectable pooled
     Spearman by ranking the large flat region of near-zero rows correctly
     relative to each other, while getting the handful of rows that actually

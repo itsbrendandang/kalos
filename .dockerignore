@@ -1,0 +1,44 @@
+# Build context hygiene for images built from the repo root
+# (deploy/Dockerfile.engine: `docker build -f deploy/Dockerfile.engine .`, and
+# compose's `context: ..`). That Dockerfile COPYs only pyproject.toml,
+# README.md, and kalos/ - everything below would otherwise be sent to the
+# Docker daemon on every build: a dev checkout's .venv alone is ~6 GB, and a
+# real .env would ship secrets into the build context.
+# deploy/backup/ and kalos-web build from their own contexts and ignore this.
+
+# Secrets - never in a build context
+.env
+.env.*
+!.env.example
+deploy/.env
+
+# Local environments, caches, build output
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+models/
+
+# VCS, editor, and agent state
+.git/
+.github/
+.devcontainer/
+.claude/
+.gstack/
+.DS_Store
+
+# Not needed by any image
+tests/
+examples/
+experiments/
+docs/
+scripts/
+uv.lock
+CHANGELOG.md

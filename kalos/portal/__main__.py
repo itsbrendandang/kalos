@@ -8,7 +8,7 @@ checked instead of merely being impossible.
 
 Serving unauthenticated on a non-loopback interface fails fast with an actionable
 message rather than starting and hoping the operator reads a warning. See
-`kalos.portal.config.assert_safe_bind`. The peer-address guard in
+`kalos.portal.config.assert_safe_exposure`. The peer-address guard in
 `kalos.portal.app` covers the case where uvicorn is launched directly and this
 check never runs at all.
 """

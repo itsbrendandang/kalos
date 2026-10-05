@@ -2,7 +2,7 @@
 does the model rank the recipes that actually produced?
 
 BOTH exist because a single pooled number can look acceptable while the product
-fails, and `BENCHMARK.md` documents exactly that happening on the real media DoE.
+fails, and `docs/BENCHMARK.md` documents exactly that happening on the real media DoE.
 
 1. PRODUCER-ONLY RANKING. `cv_spearman` is taken over every held-out row,
    producers and non-producers together. On a sheet with a meaningful fraction of
@@ -16,7 +16,7 @@ fails, and `BENCHMARK.md` documents exactly that happening on the real media DoE
    by zero, and on the real data the noise sd exceeds the signal sd - the
    signature of multiplicative noise near a floor. Under multiplicative noise a
    single pooled variance is the wrong summary, and it deflates the ICC that
-   `BENCHMARK.md` reasons from.
+   `docs/BENCHMARK.md` reasons from.
 
 Neither check transforms or gates anything. They report, because changing the
 target's scale would change every number in the response and tightening a gate

@@ -15,6 +15,10 @@ never persisted anywhere in this package.
     live path is always attempted (reachability is checked at CALL time via
     a health-check, never here), and any failure falls back to the offline
     plan exactly like an Anthropic API failure does.
+  - `"typesafe"`: TypeSafe System One typed judgments (see
+    `typesafe_tier.py`). Live path gated on `TYPESAFE_API_KEY` being present,
+    read the same presence-only way as the Anthropic key; the value itself is
+    read by the `typesafe-sdk` client from the environment, never here.
   - `"none"`: forces `enabled_live = False` unconditionally, regardless of
     `ANTHROPIC_API_KEY` - a hard "never call any LLM, deterministic only"
     switch.
@@ -23,6 +27,7 @@ as a malformed `max_sample` falls back to its default.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -33,14 +38,17 @@ _API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 _PROVIDER_ENV_VAR = "KALOS_LLM_PROVIDER"
 _OLLAMA_URL_ENV_VAR = "KALOS_OLLAMA_URL"
 _OLLAMA_MODEL_ENV_VAR = "KALOS_OLLAMA_MODEL"
+_TYPESAFE_KEY_ENV_VAR = "TYPESAFE_API_KEY"
+_TYPESAFE_MODEL_ENV_VAR = "KALOS_TYPESAFE_MODEL"
+_TYPESAFE_MIN_CONFIDENCE_ENV_VAR = "KALOS_TYPESAFE_MIN_CONFIDENCE"
 
 _DEFAULT_MODEL = "claude-sonnet-5"
 _DEFAULT_MAX_SAMPLE = 5
 _MIN_MAX_SAMPLE = 1
 _MAX_MAX_SAMPLE = 20
 
-Provider = Literal["anthropic", "ollama", "none"]
-_PROVIDERS: tuple[Provider, ...] = ("anthropic", "ollama", "none")
+Provider = Literal["anthropic", "ollama", "typesafe", "none"]
+_PROVIDERS: tuple[Provider, ...] = ("anthropic", "ollama", "typesafe", "none")
 _DEFAULT_PROVIDER: Provider = "anthropic"
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 # llama3.1 is a widely-available general-purpose Ollama model (a single
@@ -48,6 +56,13 @@ _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 # JSON instruction - a sensible default for self-hosters who have not pulled
 # anything task-specific, not a claim that it is the best available model.
 _DEFAULT_OLLAMA_MODEL = "llama3.1"
+# `jev-latest` is the typesafe-sdk's own default model alias. Pinned here so a
+# plan's `model` field records what was asked for, not an SDK-version default.
+_DEFAULT_TYPESAFE_MODEL = "jev-latest"
+# Below this Choice confidence a column's TypeSafe role is not acted on: the
+# deterministic offline guess is kept instead and the note says so. A
+# starting point to evaluate on real run sheets, not a calibrated constant.
+_DEFAULT_TYPESAFE_MIN_CONFIDENCE = 0.6
 
 
 @dataclass(frozen=True)
@@ -61,8 +76,9 @@ class NormalizeConfig:
         health-check + try/except, not here).
       - `provider == "anthropic"`: `credentials_available()` at load time,
         unchanged from before `provider` existed.
-    The Anthropic API key itself is never stored on this object - only the
-    boolean presence check.
+      - `provider == "typesafe"`: `typesafe_credentials_available()`.
+    No API key is ever stored on this object - only the boolean presence
+    check.
     """
 
     model: str
@@ -71,6 +87,8 @@ class NormalizeConfig:
     provider: Provider = _DEFAULT_PROVIDER
     ollama_url: str = _DEFAULT_OLLAMA_URL
     ollama_model: str = _DEFAULT_OLLAMA_MODEL
+    typesafe_model: str = _DEFAULT_TYPESAFE_MODEL
+    typesafe_min_confidence: float = _DEFAULT_TYPESAFE_MIN_CONFIDENCE
 
 
 def credentials_available() -> bool:
@@ -83,6 +101,15 @@ def credentials_available() -> bool:
     """
     key = os.environ.get(_API_KEY_ENV_VAR)
     return bool(key)
+
+
+def typesafe_credentials_available() -> bool:
+    """Return `True` iff `TYPESAFE_API_KEY` is set to a non-empty string.
+
+    Same contract as `credentials_available`: the value is checked for
+    presence and discarded, never logged, printed, or returned.
+    """
+    return bool((os.environ.get(_TYPESAFE_KEY_ENV_VAR) or "").strip())
 
 
 def load_config() -> NormalizeConfig:
@@ -101,6 +128,10 @@ def load_config() -> NormalizeConfig:
     - `ollama_url` / `ollama_model`: `KALOS_OLLAMA_URL` (default
       `"http://localhost:11434"`) / `KALOS_OLLAMA_MODEL` (default
       `"llama3.1"`) - only consulted when `provider == "ollama"`.
+    - `typesafe_model` / `typesafe_min_confidence`: `KALOS_TYPESAFE_MODEL`
+      (default `"jev-latest"`) / `KALOS_TYPESAFE_MIN_CONFIDENCE` (default
+      `0.6`, clamped to `[0, 1]`, malformed falls back to the default) - only
+      consulted when `provider == "typesafe"`.
     - `enabled_live`: see `NormalizeConfig`'s docstring for the per-provider
       rule. The Anthropic key value itself is never read into this object.
     """
@@ -119,10 +150,24 @@ def load_config() -> NormalizeConfig:
     ollama_url = os.environ.get(_OLLAMA_URL_ENV_VAR, _DEFAULT_OLLAMA_URL) or _DEFAULT_OLLAMA_URL
     ollama_model = os.environ.get(_OLLAMA_MODEL_ENV_VAR, _DEFAULT_OLLAMA_MODEL) or _DEFAULT_OLLAMA_MODEL
 
+    typesafe_model = os.environ.get(_TYPESAFE_MODEL_ENV_VAR, _DEFAULT_TYPESAFE_MODEL) or _DEFAULT_TYPESAFE_MODEL
+    raw_min_confidence = os.environ.get(_TYPESAFE_MIN_CONFIDENCE_ENV_VAR)
+    try:
+        typesafe_min_confidence = (
+            float(raw_min_confidence) if raw_min_confidence else _DEFAULT_TYPESAFE_MIN_CONFIDENCE
+        )
+    except ValueError:
+        typesafe_min_confidence = _DEFAULT_TYPESAFE_MIN_CONFIDENCE
+    if math.isnan(typesafe_min_confidence):
+        typesafe_min_confidence = _DEFAULT_TYPESAFE_MIN_CONFIDENCE
+    typesafe_min_confidence = max(0.0, min(1.0, typesafe_min_confidence))
+
     if provider == "none":
         enabled_live = False
     elif provider == "ollama":
         enabled_live = True
+    elif provider == "typesafe":
+        enabled_live = typesafe_credentials_available()
     else:
         enabled_live = credentials_available()
 
@@ -133,7 +178,15 @@ def load_config() -> NormalizeConfig:
         provider=provider,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
+        typesafe_model=typesafe_model,
+        typesafe_min_confidence=typesafe_min_confidence,
     )
 
 
-__all__ = ["NormalizeConfig", "Provider", "load_config", "credentials_available"]
+__all__ = [
+    "NormalizeConfig",
+    "Provider",
+    "load_config",
+    "credentials_available",
+    "typesafe_credentials_available",
+]

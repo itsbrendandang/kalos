@@ -62,6 +62,8 @@ Follow-up: a secrets-provider abstraction so `KALOS_*` secrets can come from a f
 | `KALOS_RUNNER_TOKEN` | Legacy single-token gate for the machine-to-machine `/api/experiments/{id}/result` channel. Subsumed by the token layer over time. | unset |
 | `KALOS_CORS_ORIGINS` | Comma-separated explicit CORS allowlist (e.g. `https://app.acme.com`). When set, replaces the permissive localhost default. | unset (dev localhost) |
 
+Optional external-provider keys (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`, `NVIDIA_API_KEY`, `BENCHLING_API_KEY`) follow the same rule as the secrets above: environment only, never logged, never returned. `GET /api/providers` reports each one's presence by variable name, not value. The model-backed normalize tiers (`KALOS_LLM_PROVIDER`) only ever receive the identity-screened payload built by `kalos/normalize/payload.py`; the full list of variables is in `.env.example`.
+
 When neither `KALOS_AUTH_TOKENS_FILE` nor `KALOS_AUTH_TOKENS` is set, the API runs in **open mode** (anonymous `default` tenant, read+write, admin withheld) and logs a warning at startup.
 
 ### Provisioned-principal shape
@@ -101,4 +103,7 @@ A review of progress against the readiness scorecard surfaced that campaign + la
 - Phase 1b tenant-scoped persistence: **done** (merged) - campaign -> SQLite rows per tenant; `/api/latest` per tenant; every store call keyed by `Principal.tenant`.
 - Phase 1c transport/CORS: **done** on `feat/hardening-1c` - CORS allowlist via `KALOS_CORS_ORIGINS`, startup security-posture logging, TLS-via-proxy deployment note. Secrets-provider abstraction deferred.
 - P1 experiments store tenant-scope + auth-gate: **done** on `feat/hardening-experiments-tenancy` - closes the cross-tenant leak the review found; the tenancy guarantee now covers all three stores (campaign, latest, experiments).
-- P2 observability, P3 async job queue, P4 latest->SQLite, P5 backups: planned, not started (see "Next backbone" above).
+- P2 observability: **partly done** - `/healthz` (liveness, never touches the DB) and `/readyz` (`SELECT 1`) exist in `kalos/portal/app.py`; the request-id + JSON logging middleware and `/metrics` do not yet.
+- P5 backups: **partly done** - the `deploy/backup` sidecar takes scheduled SQLite `.backup` snapshots to a host directory outside the state volume, with a restore drill in `deploy/RUNBOOK.md`; the drill itself has not been run as written (RUNBOOK, "Still NOT verified"). The per-tenant latest cache is still files, which is why P4 should come first.
+- P3 async job queue, P4 latest->SQLite: not started (`_analyze` runs in a threadpool under the single analysis slot, `kalos/portal/busy.py`; `_LATEST` is an in-memory map over per-tenant files).
+- The prioritized cross-cutting backlog (engine, ops, docs) lives in [ROADMAP.md](ROADMAP.md).

@@ -12,11 +12,12 @@ from kalos.providers.anthropic_provider import AnthropicProvider
 from kalos.providers.base import Provider
 from kalos.providers.benchling_provider import BenchlingProvider
 from kalos.providers.bionemo_provider import BioNemoProvider
+from kalos.providers.typesafe_provider import TypesafeProvider
 
 
 def all_providers() -> tuple[Provider, ...]:
     """Every provider slot, in a fixed, stable order."""
-    return (AnthropicProvider(), BioNemoProvider(), BenchlingProvider())
+    return (AnthropicProvider(), TypesafeProvider(), BioNemoProvider(), BenchlingProvider())
 
 
 def provider_status() -> list[dict]:

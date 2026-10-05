@@ -320,7 +320,7 @@ def readyz(store: SqliteStore = Depends(get_store)) -> JSONResponse:
 def satoshi_font() -> FileResponse:
     """Serve the one brand typeface the portal page needs.
 
-    Satoshi is the kalos brand face (DESIGN.md) and is not on Google Fonts, so
+    Satoshi is the kalos brand face (docs/DESIGN.md) and is not on Google Fonts, so
     it ships vendored beside index.html under the Fontshare license in
     `fonts/SATOSHI-LICENSE.txt`. Served as a single explicit route rather than
     a StaticFiles mount so the portal never exposes a browsable directory.
@@ -413,6 +413,53 @@ def run_multi(rounds: int = 5, q: int = 2) -> dict:
     }
 
 
+def _decide_roles(df: pd.DataFrame, target: str | None) -> tuple[ColumnRoles | None, dict]:
+    """Decide column roles for `roles=auto` from a normalization plan.
+
+    `propose_plan` uses the configured provider (`KALOS_LLM_PROVIDER`):
+    TypeSafe's per-column typed judgments, an LLM, or - with no provider
+    configured, or on any provider failure - the deterministic offline plan.
+    The plan only ever sees the identity-screened payload.
+
+    Returns `(roles, decision)`. `roles` is `None` when the plan names no
+    target or cannot be built, and the caller then infers roles from the
+    bioprocess profile exactly as without `roles=auto`; `decision` says which
+    happened and carries each column's role and rationale (column names and
+    probabilities only, never cell values). An explicit `target` form field
+    overrides the plan's target.
+    """
+    from dataclasses import replace
+
+    from kalos.normalize import plan_to_roles, propose_plan
+
+    try:
+        plan = propose_plan(df)
+    except ValueError as err:
+        # The offline fallback rejects a sheet it reads as having two outcome
+        # columns; that is a reason to infer roles the old way, not to fail.
+        log.warning("roles=auto: no usable plan (%s); inferring roles", type(err).__name__)
+        return None, {"applied": False, "created_by": None, "model": None, "columns": [],
+                      "reason": "no consistent plan; roles inferred from the bioprocess profile"}
+    roles = plan_to_roles(plan)
+    if roles is not None and target:
+        roles = replace(
+            roles,
+            target=target,
+            features=tuple(c for c in roles.features if c != target),
+            ids=tuple(c for c in roles.ids if c != target),
+            groups=None if roles.groups == target else roles.groups,
+        )
+    decision = {
+        "applied": roles is not None,
+        "created_by": plan.created_by,
+        "model": plan.model,
+        "columns": [{"column": c.raw_name, "role": c.role, "note": c.note} for c in plan.columns],
+    }
+    if roles is None:
+        decision["reason"] = "the plan named no target; roles inferred from the bioprocess profile"
+    return roles, decision
+
+
 def _run_uploaded_sync(
     raw: bytes, target: str | None, anonymize: bool, filename: str, roles_json: str = "",
     *, tenant: str = "default",
@@ -428,12 +475,21 @@ def _run_uploaded_sync(
 
     When `roles_json` is a non-empty JSON object it is parsed into a `ColumnRoles`
     schema and the analysis runs domain-neutrally (the generic profile) instead of
-    inferring bioprocess roles from column names. Omitted, the bioprocess profile
-    infers roles exactly as before.
+    inferring bioprocess roles from column names. The literal `"auto"` asks
+    `kalos.normalize.propose_plan` to decide the roles (TypeSafe typed judgments
+    when `KALOS_LLM_PROVIDER=typesafe` and a key is set; see `_decide_roles`).
+    Omitted, the bioprocess profile infers roles exactly as before.
     """
     _ensure_torch_threads()
     df = _parse_upload(raw)
-    if roles_json.strip():
+    if roles_json.strip().lower() == "auto":
+        roles, decision = _decide_roles(df, target)
+        if roles is not None:
+            result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
+        else:
+            result = _analyze(df, target, anonymize=anonymize, profile=BIOPROCESS_PROFILE)
+        result["role_decision"] = decision
+    elif roles_json.strip():
         roles = ColumnRoles.from_dict(json.loads(roles_json))
         result = _analyze(df, target, anonymize=anonymize, roles=roles, profile=GENERIC_PROFILE)
     else:

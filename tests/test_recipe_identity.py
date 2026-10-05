@@ -14,7 +14,7 @@ distinct recipes were merged into one replicate group. That fabricates
 within-recipe variance, which inflates the estimated assay-noise floor and
 deflates the reported ICC.
 
-That matters beyond a wrong field: `BENCHMARK.md` reasons from ICC ~= 0.26 to the
+That matters beyond a wrong field: `docs/BENCHMARK.md` reasons from ICC ~= 0.26 to the
 conclusion that assay noise, not the optimizer, is the limiting factor. An
 inflated noise floor is exactly the artifact that would manufacture that number.
 

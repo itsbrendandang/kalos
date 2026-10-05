@@ -1,6 +1,6 @@
 """Feasibility classifier: producer vs non-producer, to gate acquisition.
 
-Motivation (see BENCHMARK.md): the real media DoE titer is zero-inflated
+Motivation (see docs/BENCHMARK.md): the real media DoE titer is zero-inflated
 (~21% non-producers, titer at/near zero). A single GP over that response tries
 to fit a spiky feasible/infeasible surface and over-exploits a noisy
 incumbent, which is why plain BO loses to random search on that dataset. The

@@ -75,7 +75,13 @@ def _canonical_name_with_unit(raw_name: str, unit_token: str | None, to_base: bo
     -> "temperature_c"). No suffix is added for unit-less/unconverted
     columns, and a base name that already ends with the suffix is not
     doubled up."""
-    base_name = _canonical_base_name(raw_name)
+    return _with_unit_suffix(_canonical_base_name(raw_name), unit_token, to_base)
+
+
+def _with_unit_suffix(base_name: str, unit_token: str | None, to_base: bool) -> str:
+    """`base_name` plus the unit's canonical suffix when converting to base
+    (shared by the offline plan and the TypeSafe tier, which picks its base
+    name differently but must suffix it identically)."""
     if not to_base:
         return base_name
     suffix = canonical_suffix(unit_token)
@@ -170,6 +176,34 @@ def _columns_from_llm_items(items: Iterable[Any]) -> list[ColumnPlan]:
     return columns
 
 
+def _unit_and_parse_rate(series: pd.Series, dtype: str | None) -> tuple[str | None, bool, float]:
+    """`(unit_token, to_base, parse_rate)` for one column - the deterministic
+    unit detection both the offline plan and the TypeSafe tier rely on (unit
+    lookup is an exact rule, so it stays in code on every path).
+
+    For a `"numeric+unit"` column the parse rate is unit-aware: these cells
+    fail a plain `pd.to_numeric` (the unit suffix makes them non-numeric
+    strings) but DO parse via `units.parse_value` once the unit is stripped
+    off - use that as the numeric signal `guess_role` sees, or a unit-bearing
+    column like "Temp" would be misclassified as free-text.
+    """
+    non_null = series.dropna()
+    unit_token: str | None = None
+    if dtype == "numeric+unit":
+        n_parsed = 0
+        for raw in non_null:
+            value, token = parse_value(raw)
+            if value is not None:
+                n_parsed += 1
+                if unit_token is None:
+                    unit_token = token
+        parse_rate = n_parsed / len(non_null) if len(non_null) else 0.0
+        return unit_token, unit_token is not None, parse_rate
+    numeric = pd.to_numeric(series, errors="coerce")
+    parse_rate = float(numeric.notna().sum()) / len(non_null) if len(non_null) else 0.0
+    return None, False, parse_rate
+
+
 def offline_plan(
     df: pd.DataFrame,
     *,
@@ -202,8 +236,26 @@ def offline_plan(
     `redacted=True`. Every other column gets a canonical name, a guessed
     role, and - if it looks unit-bearing - a `unit_token`/`to_base=True`.
 
-    `created_by="offline"`, `model=None`. Always passes `plan.validate()`.
+    `created_by="offline"`, `model=None`. Raises `ValueError` from
+    `plan.validate()` when `guess_role` reads two columns as targets (e.g. a
+    titer and a purity column) - a known gap; the TypeSafe tier resolves
+    that case itself.
     """
+    columns = _offline_columns(df, anonymizer=anonymizer, max_sample=max_sample)
+    plan = NormalizationPlan(columns=columns, created_by="offline", model=None)
+    plan.validate()
+    return plan
+
+
+def _offline_columns(
+    df: pd.DataFrame,
+    *,
+    anonymizer: Anonymizer | None = None,
+    max_sample: int = 5,
+) -> list[ColumnPlan]:
+    """The per-column guesses behind `offline_plan`, before plan-level
+    validation - the TypeSafe tier falls back to these one column at a time,
+    and resolves plan-level conflicts (two targets) itself."""
     payload, dropped_identity = build_payload(df, anonymizer=anonymizer, max_sample=max_sample)
     dropped_identity_set = set(dropped_identity)
     dtype_by_header = {entry["header"]: entry["dtype"] for entry in payload["columns"]}
@@ -226,28 +278,7 @@ def offline_plan(
 
         dtype = dtype_by_header.get(raw_name)
         series = df[raw_name]
-        non_null = series.dropna()
-        unit_token: str | None = None
-        to_base = False
-
-        if dtype == "numeric+unit":
-            # Unit-aware parse rate: these cells fail a plain `pd.to_numeric`
-            # (the unit suffix makes them non-numeric strings) but DO parse
-            # via `units.parse_value` once the unit is stripped off - use
-            # that as the numeric signal `guess_role` sees, or a unit-bearing
-            # column like "Temp" would be misclassified as free-text.
-            n_parsed = 0
-            for raw in non_null:
-                value, token = parse_value(raw)
-                if value is not None:
-                    n_parsed += 1
-                    if unit_token is None:
-                        unit_token = token
-            parse_rate = n_parsed / len(non_null) if len(non_null) else 0.0
-            to_base = unit_token is not None
-        else:
-            numeric = pd.to_numeric(series, errors="coerce")
-            parse_rate = float(numeric.notna().sum()) / len(non_null) if len(non_null) else 0.0
+        unit_token, to_base, parse_rate = _unit_and_parse_rate(series, dtype)
 
         is_numeric = parse_rate >= 0.8
         role = guess_role(raw_name, is_numeric=is_numeric, parse_rate=parse_rate)
@@ -280,9 +311,7 @@ def offline_plan(
             )
         )
 
-    plan = NormalizationPlan(columns=columns, created_by="offline", model=None)
-    plan.validate()
-    return plan
+    return columns
 
 
 def _merge_dropped_identity(
@@ -514,20 +543,21 @@ def propose_plan(
 
     Steps:
       1. Resolve `config` (`config.load_config()` if not given) -
-         `config.provider` selects `"anthropic"` (default), `"ollama"`, or
-         `"none"`; see `NormalizeConfig`'s docstring for the per-provider
+         `config.provider` selects `"anthropic"` (default), `"ollama"`,
+         `"typesafe"`, or `"none"`; see `NormalizeConfig`'s docstring for the per-provider
          `enabled_live` rule.
       2. Build the identity-screened payload via `payload.build_payload`,
          using `config.max_sample`. This happens regardless of provider -
          it is a local, network-free screening step.
       3. If `not config.enabled_live` (`provider == "none"`, or
-         `provider == "anthropic"` with no API key): return
+         `provider == "anthropic"`/`"typesafe"` with no API key): return
          `offline_plan(df, ...)`.
-      4. Otherwise call the configured provider (`_live_plan_anthropic` or
-         `_live_plan_ollama`; lazy `anthropic`/`pydantic` import in both).
+      4. Otherwise call the configured provider (`_live_plan_anthropic`,
+         `_live_plan_ollama`, or `typesafe_tier.live_plan_typesafe`; each
+         lazily imports its own SDK).
          On success, merge the model's per-column proposals with the
          deterministically pre-screened identity columns and return a plan
-         with `created_by="llm"`. On ANY failure (an Anthropic SDK error, an
+         with `created_by="llm"` (`"typesafe"` for the TypeSafe tier). On ANY failure (an Anthropic SDK error, an
          unreachable Ollama server, a malformed/off-schema JSON response, or
          any other exception), log a warning containing no raw data and no
          key/URL payload, and fall back to `offline_plan(df, ...)`.
@@ -541,6 +571,10 @@ def propose_plan(
     try:
         if config.provider == "ollama":
             return _live_plan_ollama(df, config, payload, dropped_identity)
+        if config.provider == "typesafe":
+            from .typesafe_tier import live_plan_typesafe
+
+            return live_plan_typesafe(df, config, payload, dropped_identity, anonymizer=anonymizer)
         return _live_plan_anthropic(df, config, payload, dropped_identity, anonymizer)
     except Exception as err:  # noqa: BLE001 - must never hard-fail the caller
         log.warning(
