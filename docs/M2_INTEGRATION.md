@@ -77,9 +77,9 @@ class BackendAdapter(Protocol):
 ```
 
 - `LocalStoreAdapter` (default): backed by the SQLite store. Ships in M2.
-- `HttpBackendAdapter` (documented stub): base-URL + token from config; the four methods map to REST calls on a future portal. Not wired to a live server in M2; it exists so the seam is real, has a typed signature, and has a contract test against a mock. `push_result` sends its token as `Authorization: Bearer <token>`, matching the portal's token-gated `/result` endpoint (see "Security note" below); the other three methods hit endpoints that are not token-gated and send no Authorization header.
+- `HttpBackendAdapter` (documented stub): base-URL + token from config; the four methods map to REST calls on a future portal. Not wired to a live server in M2; it exists so the seam is real, has a typed signature, and has a contract test against a mock. Since the P1 tenancy hardening (docs/HARDENING.md) every experiments route is scope-gated, so all four methods send the runner's provisioned API token as `Authorization: Bearer <token>`: a `KALOS_AUTH_TOKENS` principal with `read` and `runner` scopes on the runner's tenant (plus `write` only for `--id` re-queues). `push_result` falls back to the legacy `/result` token when no API token is set (see "Security note" below).
 
-Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_URL=...`, and a token from `KALOS_RUNNER_TOKEN` (falling back to the already-documented `KALOS_BACKEND_TOKEN`). One factory `get_adapter()`.
+Selection via config: `KALOS_BACKEND=local` (default) or `http`, `KALOS_BACKEND_URL=...`, the API token from `KALOS_RUNNER_API_TOKEN`, and the legacy `/result` token from `KALOS_RUNNER_TOKEN` (falling back to the already-documented `KALOS_BACKEND_TOKEN`). One factory `get_adapter()`.
 
 ## Singleton runner
 
@@ -101,10 +101,10 @@ Thin wrappers over store + runner; every existing endpoint stays unchanged.
 | `GET /api/experiments` | list `{id, name, status, updated_at}`; optional `?status=` filters to one status (omitted = all) |
 | `POST /api/experiments` | create from an uploaded run sheet -> DRAFT |
 | `GET /api/experiments/{id}` | full experiment incl. `result` |
-| `PATCH /api/experiments/{id}` | set status - client allowlist: only `READY` is settable (from `DRAFT`/`FAILED` freely, from `DONE` only with `force`); any other target, or any request while the experiment is `PROCESSING`, is a 409 |
+| `PATCH /api/experiments/{id}` | set status - client allowlist: only `READY` is settable (from `DRAFT`/`FAILED` freely, from `DONE` only with `force`); any other target, or any request while the experiment is `PROCESSING`, is a 409. A `runner`-scoped principal may also make the runner transitions `READY -> PROCESSING` and `PROCESSING -> FAILED`; `DONE` is never PATCH-able |
 | `POST /api/experiments/{id}/run` | run one now (`?force=true` to replace output) |
 | `POST /api/experiments/run-ready` | run all READY now |
-| `POST /api/experiments/{id}/result` | ingest `{result, provenance}` and mark DONE (only legal from `PROCESSING`, and rejected 409 if a result is already present) - the push endpoint `HttpBackendAdapter.push_result` targets. Token-gated and off by default: 404 unless `KALOS_RUNNER_TOKEN` is set on the portal, then requires a matching `Authorization: Bearer <token>` (401 otherwise) |
+| `POST /api/experiments/{id}/result` | ingest `{result, provenance}` and mark DONE (only legal from `PROCESSING`, and rejected 409 if a result is already present) - the push endpoint `HttpBackendAdapter.push_result` targets. Gated and off by default: 404 unless `KALOS_RUNNER_TOKEN` or auth tokens are configured on the portal, then requires `Authorization: Bearer` with either a `runner`-scoped principal (its tenant) or the matching `KALOS_RUNNER_TOKEN` (the `default` tenant only); 401 for a missing/wrong token, 403 for a principal without `runner` |
 
 ## kalos-web (Polaris front end)
 
@@ -119,8 +119,10 @@ Replace the Voyager surface's client-side localStorage mock **data source** with
 ### Security note: `/result` is a privileged write, closed by default
 
 `/result` marks a `PROCESSING` experiment `DONE` from a client-supplied `{result, provenance}` body - unlike `PATCH .../{id}`, it is not restricted to the `READY` flag, so an unauthenticated version of it would let anyone race a fabricated result in ahead of (or instead of) the genuine one.
-The local M2 loop (`LocalStoreAdapter`) never calls this endpoint at all - it writes results to the store directly - so it is disabled (404) unless an operator explicitly sets `KALOS_RUNNER_TOKEN`, which only a remote/HTTP runner (`HttpBackendAdapter`) needs.
-When set, the endpoint requires `Authorization: Bearer <token>` (constant-time compare); missing or wrong is a 401.
+The local M2 loop (`LocalStoreAdapter`) never calls this endpoint at all - it writes results to the store directly - so it is disabled (404) unless an operator explicitly configures a credential for it, which only a remote/HTTP runner (`HttpBackendAdapter`) needs.
+Two credentials are accepted: a provisioned principal holding the `runner` scope, which writes to its own tenant, and the legacy `KALOS_RUNNER_TOKEN` (constant-time compare), which carries no identity and so reaches the `default` tenant only.
+A missing or wrong token is a 401, and a principal without `runner` (such as a plain read+write client token) is a 403, so a client can never fabricate a result.
+The `runner` scope is never granted in open mode.
 It also refuses to overwrite an experiment that already has a non-null `result` (409), independent of the `PROCESSING`-only rule, so a stray or racing push can never silently clobber a genuine result.
 
 ## Acceptance criteria

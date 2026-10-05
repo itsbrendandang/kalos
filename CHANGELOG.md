@@ -2,6 +2,70 @@
 
 Newest first.
 
+## 2026-10-04 (the remote runner can authenticate)
+
+`python -m kalos.runner` with `KALOS_BACKEND=http` could not complete a single
+run against a portal with `KALOS_AUTH_TOKENS` provisioned - which is every
+real deployment, since the portal refuses a non-loopback bind without them.
+Reproduced against a live portal on loopback, it failed three ways in turn:
+the first poll got 401, a client token got 409 on the runner's own claim, and
+the result push only ever looked on the `default` tenant. Now the same
+reproduction takes an experiment on a non-default tenant from READY to DONE.
+
+### Fixed - the runner sends a provisioned API token
+
+Since the P1 tenancy hardening the experiments routes require `read`/`write`
+scope, but `HttpBackendAdapter` sent no credential on `list_ready`, `fetch`,
+or `set_status` (its docstring still said those routes were not token-gated).
+`get_adapter()` now reads `KALOS_RUNNER_API_TOKEN` - the plaintext of a
+`KALOS_AUTH_TOKENS` principal with `["read", "runner"]` on the runner's
+tenant (plus `write` only for `--id` re-queues) - and every runner call
+sends it as the bearer.
+
+### Added - a `runner` scope (kalos/portal/auth.py)
+
+The `PATCH` client allowlist only lets a client set READY, which also blocked
+the runner from claiming (READY -> PROCESSING) or failing (PROCESSING ->
+FAILED) an experiment. A `runner`-scoped principal may now make exactly those
+two transitions; the lifecycle is still enforced, and DONE is still reachable
+only through `/result`, which carries the result. `/result` accepts the same
+principal and writes to its tenant. The legacy `KALOS_RUNNER_TOKEN` still
+works, for the `default` tenant only, and a plain read+write token gets 403,
+so a client still cannot claim an experiment or fabricate its result. Like
+`admin`, `runner` is never granted in open mode. `PATCH` now checks scope per
+transition, so the runner needs no `write` at all: its principal cannot
+upload, flip READY, or touch the campaign. The local runner
+(`KALOS_BACKEND=local`) is unaffected.
+
+### Security - the runner's credentials stay where they belong
+
+- The runner never follows a redirect. Stock urllib re-sends `Authorization`
+  to wherever a 3xx points - another host, or an https -> http downgrade -
+  which a real-socket test now demonstrates and then proves closed.
+- `get_adapter()` refuses to send a token over plain `http` to a non-loopback
+  host (`KALOS_RUNNER_ALLOW_INSECURE_HTTP=1` is the deliberate override), and
+  rejects non-http(s) URLs and URLs with `user:password@` embedded. Its errors
+  name the scheme and host only.
+- `/result` compares the legacy `KALOS_RUNNER_TOKEN` as bytes. As a `str`
+  compare, `hmac.compare_digest` raised TypeError on a non-ASCII header, so
+  any caller could turn a wrong guess into a 500.
+
+docs/HARDENING.md gains "Security notes: the remote runner": the threat model,
+what the `runner` scope does and does not grant, token rotation without a
+restart, and the known limits.
+
+### Fixed - the HTTP transport could hang forever
+
+`urlopen` had no timeout, so one stalled connection wedged `--watch` for
+good. Each request now times out after 30s, and a failure to connect is
+retried once. Only that case is retried: `urlopen` raises a bare
+`TimeoutError` once the request has been sent (checked against a real
+socket), so a PATCH or POST the portal may already have applied is never
+sent twice.
+
+`tests/test_m2_runner_auth.py` drives the real Singleton (`run_ready`) through
+the FastAPI app with auth enforced, and pins each failure mode above.
+
 ## 2026-09-10 (the deploy pack meets reality)
 
 The wave-2 deploy pack was written and config-tested but its images were never
