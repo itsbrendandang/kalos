@@ -56,9 +56,19 @@ def test_generator_is_deterministic_for_a_fixed_seed():
 
 
 def test_committed_csv_matches_a_fresh_generation(tmp_path):
-    """The generator is seeded; running it must reproduce the committed CSV
-    byte-for-byte, not just approximately - anything else means the fixture
-    on disk has drifted from the script that is supposed to produce it."""
+    """The generator is seeded; running it must reproduce the committed CSV -
+    anything else means the fixture on disk has drifted from the script that
+    is supposed to produce it.
+
+    Compared as parsed values to a relative tolerance of 1e-9, not
+    byte-for-byte. The CSV was generated on macOS arm64, and numpy's float
+    results are not bit-identical across CPU architectures and platform math
+    libraries: Linux x86_64 CI with the same numpy 2.5.3 / pandas 3.0.6
+    reproduces it only to within a few ulps (30 cells differ, max relative
+    difference 2.8e-15), and pandas prints a 1-ulp difference as different
+    digits. 1e-9 sits about six orders of magnitude above that noise and far
+    below what a real change to the seed, parameters, formula or export
+    format produces, so genuine drift still fails here."""
     script = FIXTURE_DIR / "make_synthetic.py"
     out_dir = tmp_path / "synthetic_scaleup"
     out_dir.mkdir()
@@ -68,9 +78,8 @@ def test_committed_csv_matches_a_fresh_generation(tmp_path):
     script_copy.write_text(script.read_text())
     runpy.run_path(str(script_copy), run_name="__main__")
 
-    generated = (out_dir / "synthetic_scaleup.csv").read_text()
-    committed = CSV_PATH.read_text()
-    assert generated == committed
+    generated = pd.read_csv(out_dir / "synthetic_scaleup.csv")
+    pd.testing.assert_frame_equal(generated, _load_committed(), check_exact=False, rtol=1e-9, atol=0.0)
 
 
 # --- shape the Scale-Up Readout depends on --------------------------------- #
