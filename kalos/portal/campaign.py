@@ -499,16 +499,15 @@ class CampaignStore:
             return state
 
 
-# --- module-level singleton, mirroring kalos.portal.experiments.get_store --- #
+# --- module-level singleton ------------------------------------------------- #
 _STORE: CampaignStore | None = None
 
 
 def get_campaign_store() -> CampaignStore:
     """The module-level `CampaignStore` at the default `~/.kalos/portal.db`.
 
-    Tests override this via `app.dependency_overrides[get_campaign_store]`
-    (same pattern as `kalos.portal.experiments.get_store`), pointing at a
-    fresh `CampaignStore(tmp_path)` so they never touch the real
+    Tests override this via `app.dependency_overrides[get_campaign_store]`,
+    pointing at a fresh `CampaignStore(tmp_path)` so they never touch the real
     `~/.kalos/portal.db`.
     """
     global _STORE

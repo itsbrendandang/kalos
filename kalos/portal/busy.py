@@ -9,7 +9,7 @@ CPU with zero connected clients, and every request slower than the proxy
 timeout that spawned the previous orphan. A one-user thundering herd.
 
 The gate is a single slot, matching the engine's own architecture (one
-single-writer store, one Singleton runner, one uvicorn worker): a second
+single-writer store, one uvicorn worker): a second
 analysis arriving while one runs gets an honest HTTP 503 with Retry-After,
 never a silent queue. The slot is released BY THE WORKER THREAD when the
 analysis actually finishes - not when the request's await unwinds - so a

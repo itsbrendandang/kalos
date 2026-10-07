@@ -1,6 +1,5 @@
 """Kalos platform: BoTorch Bayesian optimization for bioprocess development, with
-NVIDIA BioNeMo / ESM-2 protein features, an experiment store + Singleton runner
-(the Voyager integration), and a FastAPI portal.
+NVIDIA BioNeMo / ESM-2 protein features and a FastAPI portal.
 """
 from .core.gates import GatesConfig, PromotionResult, check_gates
 from .core.splits import row_hash_groups, make_splits, assert_no_group_leakage

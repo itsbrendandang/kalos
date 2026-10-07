@@ -59,7 +59,6 @@ Follow-up: a secrets-provider abstraction so `KALOS_*` secrets can come from a f
 | --- | --- | --- |
 | `KALOS_AUTH_TOKENS_FILE` | Path to a JSON file of provisioned principals (see below). Takes precedence over the env var. | unset |
 | `KALOS_AUTH_TOKENS` | Inline JSON array of provisioned principals. | unset |
-| `KALOS_RUNNER_TOKEN` | Legacy single-token gate for the machine-to-machine `/api/experiments/{id}/result` channel. Subsumed by the token layer over time. | unset |
 | `KALOS_CORS_ORIGINS` | Comma-separated explicit CORS allowlist (e.g. `https://app.acme.com`). When set, replaces the permissive localhost default. | unset (dev localhost) |
 
 When neither `KALOS_AUTH_TOKENS_FILE` nor `KALOS_AUTH_TOKENS` is set, the API runs in **open mode** (anonymous `default` tenant, read+write, admin withheld) and logs a warning at startup.
@@ -91,7 +90,7 @@ A review of progress against the readiness scorecard surfaced that campaign + la
 
 - **P1 - Tenant-scope + auth-gate the experiments store: DONE** (`feat/hardening-experiments-tenancy`). `kalos/store/sqlite_store.py` gains a `tenant` column (+ index + one-time backfill migration) and every query filters by it; `kalos/portal/experiments.py` routes require `read`/`write` and pass `Principal.tenant`; `LocalStoreAdapter` is tenant-bound so the runner only touches the caller's experiments. Remote-runner `/result` still operates on the `default` tenant (machine channel, off by default) - multi-tenant remote runners are a follow-up.
 - **P2 - Observability**: `/healthz` (liveness) + `/readyz` (`SELECT 1` against the DBs), a request-id + JSON logging middleware that never logs bodies/tokens, optional `/metrics`. Moves the Operational-maturity dimension off BLOCKING; low cost, high review value.
-- **P3 - Async job queue for `_analyze`**: a `jobs(id, tenant, kind, status, result_ref, ...)` table + submit/poll API so `/api/run` and `/reanalyze` enqueue and return a job id, taking the CPU-bound GP fit off the request path and making in-flight work restart-durable. Reuse the Singleton runner pattern.
+- **P3 - Async job queue for `_analyze`**: a `jobs(id, tenant, kind, status, result_ref, ...)` table + submit/poll API so `/api/run` and `/reanalyze` enqueue and return a job id, taking the CPU-bound GP fit off the request path and making in-flight work restart-durable.
 - **P4 - Move `_LATEST` into SQLite**: a `latest(tenant, state, updated_at)` row in `portal.db`, retiring the per-tenant file cache; lets the reanalyze latest-write carry a generation stamp in one transaction, closing the documented sub-ms race. Prerequisite for P5 (one DB file = complete tenant state).
 - **P5 - Backups + restore/DR**: scheduled SQLite online `.backup()` into `KALOS_BACKUP_DIR` + a documented restore runbook. Do P4 first so a snapshot captures all state.
 
