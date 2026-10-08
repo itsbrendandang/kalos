@@ -14,62 +14,37 @@ repo's v1 report for how this result was used in the promotion decision.
 """
 from __future__ import annotations
 
-import numpy as np
+import importlib.util
+from pathlib import Path
+
 import pandas as pd
 from scipy.stats import spearmanr
 
 from kalos.scale.candidates import MultiFidelitySurrogate, PhysicsMeanSurrogate
 from kalos.scale.evaluation import leave_one_scale_out_report
 
-_RNG_SEED = 20260825
-_SCALES = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 5000.0)
-_N_PER_SCALE = 10
-_PROCESS_COLUMNS = ["ph_setpoint", "temperature_C"]
-_TARGET_COLUMN = "titer_g_per_L"
+# The generator this module tests now lives in `examples/synthetic_scaleup`
+# (promoted there so the Scale-Up Readout demo dataset and this test fixture
+# are the same code, not two copies that can drift apart). It is loaded by
+# file path, under a unique module name, rather than a plain `import
+# make_synthetic` - `examples/synthetic_bioprocess` also ships a
+# `make_synthetic.py`, and a bare import would collide with it in
+# `sys.modules`.
+_EXAMPLE_PATH = (
+    Path(__file__).resolve().parents[1] / "examples" / "synthetic_scaleup" / "make_synthetic.py"
+)
+_spec = importlib.util.spec_from_file_location(
+    "examples_synthetic_scaleup_make_synthetic", _EXAMPLE_PATH
+)
+assert _spec is not None and _spec.loader is not None
+_make_synthetic = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_make_synthetic)
 
-# The optimal pH shifts linearly (in log10-scale-normalized units) from 6.6
-# at the smallest scale to 7.4 at the largest - a swing wide enough, against
-# a ph_setpoint sampling range of [6.4, 7.6], to flip which end of the range
-# wins between the two extremes.
-_OPTIMAL_PH_AT_SMALLEST_SCALE = 6.6
-_OPTIMAL_PH_AT_LARGEST_SCALE = 7.4
-
-
-def fabricate_harder_synthetic(
-    scales: tuple[float, ...] = _SCALES, n_per_scale: int = _N_PER_SCALE, seed: int = _RNG_SEED
-) -> pd.DataFrame:
-    """Fabricate the dataset described in this module's docstring.
-    Deterministic for a fixed `(scales, n_per_scale, seed)`."""
-    rng = np.random.default_rng(seed)
-    log_scales = np.log10(np.asarray(scales, dtype=float))
-    lmin, lmax = log_scales.min(), log_scales.max()
-
-    rows = []
-    for s, log_s in zip(scales, log_scales):
-        l_norm = (log_s - lmin) / (lmax - lmin)
-        optimal_ph = _OPTIMAL_PH_AT_SMALLEST_SCALE + (
-            _OPTIMAL_PH_AT_LARGEST_SCALE - _OPTIMAL_PH_AT_SMALLEST_SCALE
-        ) * l_norm
-        for _ in range(n_per_scale):
-            ph = float(rng.uniform(6.4, 7.6))
-            temp = float(rng.uniform(36.0, 38.0))  # nuisance feature, no interaction
-            rpm = float(rng.uniform(80, 250))
-            airflow = float(max(s * 0.05, 0.05) * rng.uniform(0.8, 1.2))
-            # Genuine recipe x scale interaction: titer peaks near the
-            # scale-dependent optimal pH (a quadratic penalty for being off
-            # it), plus a mild overall scale trend and observation noise.
-            titer = 6.0 - 4.0 * (ph - optimal_ph) ** 2 + 0.3 * l_norm + float(rng.normal(0, 0.15))
-            rows.append(
-                {
-                    "scale_L": s,
-                    "agitation_rpm": rpm,
-                    "airflow_L_per_min": airflow,
-                    "ph_setpoint": ph,
-                    "temperature_C": temp,
-                    "titer_g_per_L": titer,
-                }
-            )
-    return pd.DataFrame(rows)
+fabricate_harder_synthetic = _make_synthetic.make_synthetic_scaleup
+_SCALES = _make_synthetic.SCALES
+_N_PER_SCALE = _make_synthetic.N_PER_SCALE
+_PROCESS_COLUMNS = _make_synthetic.PROCESS_COLUMNS
+_TARGET_COLUMN = _make_synthetic.TARGET_COLUMN
 
 
 def test_the_planted_interaction_is_a_genuine_rank_crossing():

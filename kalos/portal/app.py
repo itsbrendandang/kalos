@@ -50,6 +50,7 @@ from kalos.portal.config import (
 from kalos.portal.campaign_routes import router as _campaign_router
 from kalos.portal.experiments import get_lock_path, get_store
 from kalos.portal.experiments import router as _experiments_router
+from kalos.portal.scale_routes import router as _scale_router
 from kalos.portal.uploads import (
     MAX_COLUMNS,
     MAX_CSV_ROWS,
@@ -530,6 +531,12 @@ app.include_router(_experiments_router)
 # in `kalos.portal.campaign_routes`; mounted here so they are served by this
 # app, same pattern as the experiments router above.
 app.include_router(_campaign_router)
+
+# --- Scale-Up Readout: /api/scale/readout (stateless, D6) - a one-page HTML
+# readout over an uploaded multi-scale run sheet. Routes live in
+# `kalos.portal.scale_routes`; mounted here, same pattern as the routers
+# above.
+app.include_router(_scale_router)
 
 __all__ = [
     "app",

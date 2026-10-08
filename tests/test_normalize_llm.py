@@ -295,3 +295,35 @@ def test_max_sample_clamped(monkeypatch):
 
     monkeypatch.setenv("KALOS_NORMALIZE_MAX_SAMPLE", "not-a-number")
     assert load_config().max_sample == 5
+
+
+def test_offline_plan_production_phase_headers_do_not_break_validation():
+    """Bioprocess sheets name process conditions after the production phase
+    ("temp_production_C", "pH_production"). The outcome heuristic matches
+    "product" inside those headers; without a named target the plan must
+    still validate (no target, every candidate kept as a feature) instead
+    of raising "more than one target column"."""
+    df = pd.DataFrame(
+        {
+            "temp_production_C": [25.0, 25.0, 30.0],
+            "pH_production": [6.0, 7.0, 7.0],
+            "lipase_g.L": [0.6, 1.59, 1.31],
+        }
+    )
+    plan = offline_plan(df)
+    assert [c.raw_name for c in plan.columns if c.role == "target"] == []
+    notes = {c.raw_name: c.note for c in plan.columns}
+    assert "caller must name the target" in notes["lipase_g.L"]
+
+
+def test_offline_plan_explicit_target_wins_over_the_header_heuristic():
+    df = pd.DataFrame(
+        {
+            "temp_production_C": [25.0, 25.0, 30.0],
+            "pH_production": [6.0, 7.0, 7.0],
+            "lipase_g.L": [0.6, 1.59, 1.31],
+        }
+    )
+    plan = offline_plan(df, target_column="lipase_g.L")
+    roles = {c.raw_name: c.role for c in plan.columns}
+    assert roles == {"temp_production_C": "feature", "pH_production": "feature", "lipase_g.L": "target"}

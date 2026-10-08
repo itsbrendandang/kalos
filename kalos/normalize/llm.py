@@ -40,6 +40,8 @@ value observed from data.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import logging
 import re
@@ -175,8 +177,17 @@ def offline_plan(
     *,
     anonymizer: Anonymizer | None = None,
     max_sample: int = 5,
+    target_column: str | None = None,
 ) -> NormalizationPlan:
     """Build a `NormalizationPlan` with zero network access.
+
+    `target_column` (optional): the caller's explicit response column. When
+    given, it is the plan's only target, and any other column whose header
+    merely LOOKS like an outcome (`_OUTCOME_HINT` matches "product" inside
+    "temp_production_C") is kept as a feature. When omitted and the header
+    heuristic flags more than one outcome, the plan names no target rather
+    than guessing: every flagged column is kept as a feature with a note,
+    and the caller must name the target. Either way the plan validates.
 
     Reuses Phase 1 exactly:
       - identity pre-screen via `payload.build_payload` (same rules as the
@@ -280,9 +291,33 @@ def offline_plan(
             )
         )
 
+    columns = _resolve_target_role(columns, target_column)
     plan = NormalizationPlan(columns=columns, created_by="offline", model=None)
     plan.validate()
     return plan
+
+
+def _resolve_target_role(columns: list[ColumnPlan], target_column: str | None) -> list[ColumnPlan]:
+    """Enforce at most one target. An explicit `target_column` wins over the
+    header heuristic; without one, an ambiguous guess (several outcome-like
+    headers) yields no target instead of an invalid plan."""
+    guessed = [c.raw_name for c in columns if c.role == "target"]
+    if target_column is None and len(guessed) <= 1:
+        return columns
+    resolved: list[ColumnPlan] = []
+    for c in columns:
+        if target_column is not None and c.raw_name == target_column and c.canonical_name is not None:
+            resolved.append(replace(c, role="target", note="target named by the caller"))
+        elif c.role == "target":
+            reason = (
+                f"outcome-like header, but the caller named {target_column!r} as the target"
+                if target_column is not None
+                else f"ambiguous outcome guess ({len(guessed)} candidates); caller must name the target"
+            )
+            resolved.append(replace(c, role="feature", note=reason))
+        else:
+            resolved.append(c)
+    return resolved
 
 
 def _merge_dropped_identity(
