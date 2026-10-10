@@ -54,7 +54,7 @@ from kalos.data.anonymizer import Anonymizer
 from .config import NormalizeConfig, load_config
 from .payload import build_payload
 from .plan import ColumnPlan, NormalizationPlan
-from .synonyms import SYNONYMS, guess_role, snake_canonical
+from .synonyms import SYNONYMS, guess_role, preferred_target, snake_canonical
 from .units import canonical_suffix, parse_value
 
 log = logging.getLogger("kalos.normalize.llm")
@@ -185,9 +185,12 @@ def offline_plan(
     given, it is the plan's only target, and any other column whose header
     merely LOOKS like an outcome (`_OUTCOME_HINT` matches "product" inside
     "temp_production_C") is kept as a feature. When omitted and the header
-    heuristic flags more than one outcome, the plan names no target rather
-    than guessing: every flagged column is kept as a feature with a note,
-    and the caller must name the target. Either way the plan validates.
+    heuristic flags more than one outcome, exactly one is kept as the target,
+    picked the way `kalos.portal.analysis` infers one: the first flagged
+    header in sheet order matching titer/titre/lipase/yield, else the first
+    flagged header (`synonyms.preferred_target`). Every other flagged column
+    becomes `role="metadata"` with a note, never a feature, so an outcome is
+    never used as a model input. Either way the plan validates.
 
     Reuses Phase 1 exactly:
       - identity pre-screen via `payload.build_payload` (same rules as the
@@ -299,22 +302,28 @@ def offline_plan(
 
 def _resolve_target_role(columns: list[ColumnPlan], target_column: str | None) -> list[ColumnPlan]:
     """Enforce at most one target. An explicit `target_column` wins over the
-    header heuristic; without one, an ambiguous guess (several outcome-like
-    headers) yields no target instead of an invalid plan."""
+    header heuristic, and other outcome-like headers stay features. Without
+    one, several outcome-like headers resolve to one target via
+    `synonyms.preferred_target`, and the rest become metadata so an outcome
+    is never used as a model input."""
     guessed = [c.raw_name for c in columns if c.role == "target"]
     if target_column is None and len(guessed) <= 1:
         return columns
+    if target_column is not None:
+        keep, keep_note = target_column, "target named by the caller"
+    else:
+        keep = preferred_target(guessed)
+        keep_note = f"target picked from {len(guessed)} outcome-like headers (titer/titre/lipase/yield, else sheet order)"
     resolved: list[ColumnPlan] = []
     for c in columns:
-        if target_column is not None and c.raw_name == target_column and c.canonical_name is not None:
-            resolved.append(replace(c, role="target", note="target named by the caller"))
+        if c.raw_name == keep and c.canonical_name is not None:
+            resolved.append(replace(c, role="target", note=keep_note))
+        elif c.role == "target" and target_column is not None:
+            note = f"outcome-like header, but the caller named {target_column!r} as the target"
+            resolved.append(replace(c, role="feature", note=note))
         elif c.role == "target":
-            reason = (
-                f"outcome-like header, but the caller named {target_column!r} as the target"
-                if target_column is not None
-                else f"ambiguous outcome guess ({len(guessed)} candidates); caller must name the target"
-            )
-            resolved.append(replace(c, role="feature", note=reason))
+            note = f"outcome-like header; {keep!r} is the target, so this is metadata, never a model input"
+            resolved.append(replace(c, role="metadata", note=note))
         else:
             resolved.append(c)
     return resolved

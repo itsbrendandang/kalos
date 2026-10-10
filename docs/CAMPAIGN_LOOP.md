@@ -92,7 +92,7 @@ The campaign base is seeded/replaced whenever `/api/run` succeeds.
 `_run_uploaded_sync` (`kalos/portal/app.py`) already holds the parsed `df` and calls `_analyze` then `_save_latest`; it also seeds the campaign from `(df, result["target"], result["proposal_features"])`.
 A fresh upload starts a fresh campaign (new base, empty pending, round 0).
 
-## Endpoints (`/api/campaign` router, mounted like `/api/experiments`)
+## Endpoints (`/api/campaign` router)
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |

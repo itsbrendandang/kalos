@@ -2,8 +2,8 @@
 # a SQLite backup sidecar. See ../RUNBOOK.md for deploy/upgrade/rollback/
 # restore procedures and the security checklist.
 #
-# Why this differs from the reference Voyager topology (docs read for this
-# task, itsbrendandang/voyager-app-deployment):
+# Why this differs from the reference deployment it was modeled on (docs read
+# for this task, itsbrendandang/voyager-app-deployment):
 #
 #   - No `postgres` service. kalos's data model is SQLite at
 #     `~/.kalos/{experiments,portal}.db` inside the engine container (see

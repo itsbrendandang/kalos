@@ -14,7 +14,7 @@ Two independent jobs live here:
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, Sequence
 
 from kalos.data.anonymizer import DROP_EXACT, DROP_SUBSTR, HASH_EXACT, HASH_SUBSTR
 
@@ -73,8 +73,8 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
 
 # --- role guessing (deterministic offline fallback) ------------------------ #
 
-# Mirrored from `kalos.portal.analysis` (`_OUTCOME_HINT`, `_ID_HINT`,
-# `_GROUP_HINT`). Not imported directly: those names are module-private
+# Mirrored from `kalos.portal.analysis` (`_OUTCOME_HINT`, `_TARGET_PREF`,
+# `_ID_HINT`, `_GROUP_HINT`). Not imported directly: those names are module-private
 # (leading underscore, no `__all__` entry) in a module that transitively pulls
 # in torch on other code paths, and this package must stay import-light (see
 # `kalos/normalize/__init__.py`). Keep these patterns byte-identical to the
@@ -83,6 +83,7 @@ _OUTCOME_HINT = re.compile(
     r"titer|titre|yield|conc|purity|lipase|biomass|od\d|product|response|output|score|kda|activity|titer",
     re.I,
 )
+_TARGET_PREF = re.compile(r"titer|titre|lipase|yield", re.I)
 _GROUP_HINT = re.compile(r"medium|strain|recipe|batch|campaign|group|lot", re.I)
 
 
@@ -122,4 +123,15 @@ def guess_role(header: str, *, is_numeric: bool, parse_rate: float) -> Role:
     return "metadata"
 
 
-__all__ = ["Role", "SYNONYMS", "snake_canonical", "guess_role"]
+def preferred_target(candidates: Sequence[str]) -> str:
+    """Deterministically pick one target from `candidates`: a non-empty
+    sequence of headers `guess_role` called "target", in sheet order.
+
+    Mirrors `kalos.portal.analysis`'s inferred target: the first candidate
+    matching `_TARGET_PREF` (titer/titre/lipase/yield), else the first
+    candidate. Same headers in the same order always give the same pick.
+    """
+    return next((c for c in candidates if _TARGET_PREF.search(c)), candidates[0])
+
+
+__all__ = ["Role", "SYNONYMS", "snake_canonical", "guess_role", "preferred_target"]

@@ -13,8 +13,7 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     Missing cells arrive from pandas as float NaN; Starlette's JSONResponse
     encodes with allow_nan=False, so an un-sanitized NaN 500s the response.
     Coerce every non-finite float and NaT to JSON null, so both the stored
-    payload and the HTTP response are valid JSON. None round-trips back to NaN
-    when `_payload_to_frame` rebuilds the DataFrame for the Singleton.
+    payload and the HTTP response are valid JSON.
     """
     safe = df.astype(object).where(pd.notna(df), None)
     # column labels are strings here; to_dict types them as Hashable

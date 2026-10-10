@@ -42,9 +42,8 @@ from kalos.validation.checks import _RUN_ID_RE
 
 # NOTE: `kalos.core.evaluation` (which imports `kalos.core.surrogate`),
 # `kalos.core.optimize`, and `torch` itself are intentionally NOT imported at
-# module level. This module is imported by `kalos.runner.singleton` (the
-# `--watch` poller) and `kalos.portal.app` (the portal), so a top-level torch
-# import here would tax the idle poller and portal boot with the whole
+# module level. This module is imported by `kalos.portal.app` (the portal),
+# so a top-level torch import here would tax portal boot with the whole
 # torch/botorch/gpytorch stack (~220 MB) before any analysis ever runs. They
 # are imported lazily inside `_analyze`/`_seed_everything`, the only places
 # that actually need them. `kalos.domains` above is torch-free by contract.

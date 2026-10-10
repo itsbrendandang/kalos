@@ -3,12 +3,12 @@
 Before this, the only unauthenticated route the deploy healthcheck could hit
 was `/`, which renders the full portal page - heavier than a healthcheck
 needs, and coupled to the UI. `/healthz` is a liveness probe (process is up,
-never touches the database); `/readyz` is a readiness probe (the store is
-actually reachable).
+never touches the database); `/readyz` is a readiness probe (the campaign
+store is actually reachable).
 
-Every test here uses a `tmp_path` store via `app.dependency_overrides`, per
-tests/test_m2_portal.py's convention - the real `~/.kalos/experiments.db` is
-never touched.
+Every test here uses a `tmp_path` `CampaignStore` via `app.dependency_overrides`,
+per tests/test_tenant_isolation.py's convention - the real `~/.kalos/portal.db`
+is never touched.
 """
 from __future__ import annotations
 
@@ -17,18 +17,18 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from kalos.portal.app import app, get_store  # noqa: E402
-from kalos.store import SqliteStore  # noqa: E402
+from kalos.portal.app import app, get_campaign_store  # noqa: E402
+from kalos.portal.campaign import CampaignStore  # noqa: E402
 
 
 @pytest.fixture
 def client(tmp_path):
-    store = SqliteStore(tmp_path / "experiments.db")
-    app.dependency_overrides[get_store] = lambda: store
+    store = CampaignStore(tmp_path)
+    app.dependency_overrides[get_campaign_store] = lambda: store
     try:
         yield TestClient(app)
     finally:
-        app.dependency_overrides.pop(get_store, None)
+        app.dependency_overrides.pop(get_campaign_store, None)
 
 
 @pytest.fixture(autouse=True)
@@ -81,8 +81,7 @@ def test_healthz_does_not_touch_the_database(client, monkeypatch):
     def _boom(*args, **kwargs):
         raise AssertionError("healthz must never touch the store")
 
-    monkeypatch.setattr(SqliteStore, "list", _boom)
-    monkeypatch.setattr(SqliteStore, "get", _boom)
+    monkeypatch.setattr(CampaignStore, "get", _boom)
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
@@ -101,7 +100,7 @@ def test_readyz_degrades_to_503_with_a_reason_when_the_store_is_broken(client, m
     def _boom(*args, **kwargs):
         raise RuntimeError("database disk image is malformed")
 
-    monkeypatch.setattr(SqliteStore, "list", _boom)
+    monkeypatch.setattr(CampaignStore, "get", _boom)
     resp = client.get("/readyz")
     assert resp.status_code == 503
     body = resp.json()
@@ -109,11 +108,10 @@ def test_readyz_degrades_to_503_with_a_reason_when_the_store_is_broken(client, m
     assert "malformed" in body["reason"]
 
 
-def test_readyz_performs_a_read_not_a_write(client, tmp_path):
-    """Readiness must not mutate the store it is checking - no new experiment
-    rows should appear as a side effect of polling /readyz."""
-    store = app.dependency_overrides[get_store]()
-    before = len(store.list())
+def test_readyz_performs_a_read_not_a_write(client):
+    """Readiness must not mutate the store it is checking - no campaign
+    should appear as a side effect of polling /readyz."""
+    store = app.dependency_overrides[get_campaign_store]()
+    assert store.get() is None  # nothing seeded yet
     client.get("/readyz")
-    after = len(store.list())
-    assert after == before
+    assert store.get() is None  # /readyz did not seed one
