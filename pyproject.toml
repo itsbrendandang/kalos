@@ -43,7 +43,7 @@ normalize = ["anthropic>=0.40"]
 # without this the two mocked-live tests error out on a fresh CI checkout. Listing
 # it in `dev` keeps that path genuinely covered instead of silently skipped.
 dev = [
-  "pytest>=7", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs",
+  "pytest>=9.1.1", "ruff>=0.6", "mypy>=1.11", "pandas-stubs", "scipy-stubs",
   "httpx>=0.27,<1", "anthropic>=0.40",
 ]
 
