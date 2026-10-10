@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       # ml carries the optional torch stack the engine tests need; portal so the
       # portal tests actually run (they importorskip fastapi) and mypy checks them
