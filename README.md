@@ -1,6 +1,6 @@
 # Kalos
 
-[![CI](https://github.com/itsbrendandang/kalos/actions/workflows/ci.yml/badge.svg)](https://github.com/itsbrendandang/kalos/actions/workflows/ci.yml)
+[![CI](https://github.com/itsbrendandang/kalos-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/itsbrendandang/kalos-engine/actions/workflows/ci.yml)
 
 A Bayesian-optimization platform for bioprocess development, built on **BoTorch** (a real GP surrogate + acquisition) with **NVIDIA BioNeMo / ESM-2** protein features.
 Honest by construction: leakage-controlled cross-validation and fail-closed promotion gates, on a production BoTorch core rather than a hand-rolled GP + EI.
