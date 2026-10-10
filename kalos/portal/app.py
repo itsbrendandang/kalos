@@ -1,15 +1,15 @@
-"""Kalos Engine portal — a small web view that runs the real engine.
+"""Kalos Engine portal — the JSON API over the real engine (the UI is kalos-web).
 
 A FastAPI app that, on request, runs the BoTorch optimization (single- and
-multi-objective) on a synthetic bioprocess surface and returns the results, plus
-a single page that charts them. It is a *viewer over the live engine*, not a
-mock: every number comes from an actual BoTorch fit + acquisition.
+multi-objective) on a synthetic bioprocess surface or an uploaded run sheet and
+returns the results. Not a mock: every number comes from an actual BoTorch fit +
+acquisition.
 
-Run:  python -m kalos.portal   (then open http://127.0.0.1:8050)
+Run:  python -m kalos.portal   (serves http://127.0.0.1:8050)
 Needs the portal extra:  pip install -e ".[portal]"
 
-This module wires up the FastAPI app, CORS, the `/` HTML route, and the
-legacy `/api/run|latest|single|multi` routes. The rest of the portal lives in
+This module wires up the FastAPI app, CORS, and the legacy
+`/api/run|latest|single|multi` routes. The rest of the portal lives in
 sibling modules:
   - `kalos.portal.uploads` - the untrusted-input boundary (`_parse_upload`,
     `UploadRejected`, the upload size/shape caps).
@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
@@ -156,7 +156,6 @@ app.add_middleware(CORSMiddleware, **cors_config())
 # Log the effective security posture (auth + CORS) once at import/startup.
 log_security_posture(auth_enforced=get_authenticator().enforces())
 
-_HTML = (Path(__file__).parent / "index.html").read_text()
 BOUNDS = np.array([[0, 0, 0], [1, 1, 1]], float)
 TITER_OPT = np.array([0.7, 0.3, 0.5])
 PURITY_OPT = np.array([0.2, 0.8, 0.4])  # different recipe -> titer/purity trade off
@@ -266,23 +265,18 @@ def providers(principal: Principal = Depends(require_scope(READ))) -> dict:
     return {"providers": provider_status()}
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return _HTML
-
-
 @app.get("/healthz")
 def healthz() -> dict:
     """Liveness probe for a deploy healthcheck (deploy/Dockerfile.engine).
 
     Unauthenticated BY DESIGN, and safe to leave that way: no
-    `Depends(require_scope(...))`, the same pattern `/` above already uses.
+    `Depends(require_scope(...))`.
     The response is fixed to exactly `{"status": "ok"}` - no tenant data, no
     config echo, no store contents, nothing beyond "this process is up and
     answering HTTP requests". `engine_version` is deliberately NOT included:
     verified by reading every route in this module that `kalos.__version__`
-    is not exposed anywhere unauthenticated today (not `/`'s index.html, not
-    any other public route), so this stays the minimal liveness fact rather
+    is not exposed anywhere unauthenticated today (no public route returns
+    it), so this stays the minimal liveness fact rather
     than becoming the first place the version leaves the process without a
     token.
 
@@ -313,23 +307,6 @@ def readyz(store: CampaignStore = Depends(get_campaign_store)) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001 - any store failure means "not ready", not a 500
         return JSONResponse({"status": "unavailable", "reason": str(exc)}, status_code=503)
     return JSONResponse({"status": "ok"})
-
-
-@app.get("/fonts/Satoshi-Variable.woff2")
-def satoshi_font() -> FileResponse:
-    """Serve the one brand typeface the portal page needs.
-
-    Satoshi is the kalos brand face (DESIGN.md) and is not on Google Fonts, so
-    it ships vendored beside index.html under the Fontshare license in
-    `fonts/SATOSHI-LICENSE.txt`. Served as a single explicit route rather than
-    a StaticFiles mount so the portal never exposes a browsable directory.
-    Immutable + long max-age: the filename changes if the font ever does.
-    """
-    return FileResponse(
-        Path(__file__).parent / "fonts" / "Satoshi-Variable.woff2",
-        media_type="font/woff2",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
 
 
 @app.get("/api/single")

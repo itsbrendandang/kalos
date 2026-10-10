@@ -239,7 +239,7 @@ def test_no_secret_looking_literal_in_any_deploy_file():
 
 
 def test_dockerfiles_run_as_non_root_user():
-    for name in ("Dockerfile.engine", "Dockerfile.web", "backup/Dockerfile"):
+    for name in ("Dockerfile.engine", "backup/Dockerfile"):
         text = (DEPLOY_DIR / name).read_text()
         user_lines = [line for line in text.splitlines() if line.strip().startswith("USER ")]
         assert user_lines, f"{name} never switches to a non-root USER"
@@ -247,7 +247,7 @@ def test_dockerfiles_run_as_non_root_user():
 
 
 def test_dockerfiles_declare_a_healthcheck():
-    for name in ("Dockerfile.engine", "Dockerfile.web"):
+    for name in ("Dockerfile.engine",):
         text = (DEPLOY_DIR / name).read_text()
         assert "HEALTHCHECK" in text, f"{name} has no HEALTHCHECK"
 
