@@ -19,9 +19,6 @@ Design (deliberately self-hosted, no external identity provider):
   (today's behavior) - and a warning is logged once at startup. `admin` is never
   granted in open mode. The moment tokens are provisioned, enforcement turns on;
   there is no half-authenticated state.
-
-This generalizes the single-token `_check_runner_token` gate in
-`kalos.portal.experiments`; that legacy channel is subsumed over time.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 Centralizes the security-relevant configuration read from the environment so the
 running posture is explicit, testable, and logged once at startup rather than
 scattered across the app. Today that is the CORS origin policy; secrets (auth
-tokens, the runner token) are read in `kalos.portal.auth` / `experiments`.
+tokens) are read in `kalos.portal.auth`.
 
 Backward compatible: with nothing configured the portal keeps its permissive
 localhost CORS (dev/pilot). Setting `KALOS_CORS_ORIGINS` switches to an explicit

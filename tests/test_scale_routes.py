@@ -2,8 +2,8 @@
 FastAPI's `TestClient`. Follows the auth-setup pattern in
 `tests/test_auth.py`/`tests/test_tenant_isolation.py` (env-configured tokens
 for 401/403; open mode otherwise) and the store-override pattern in
-`tests/test_m2_portal.py` (a `tmp_path` `SqliteStore`, never the real
-`~/.kalos/experiments.db`).
+`tests/test_healthz.py` (a `tmp_path` `CampaignStore`, never the real
+`~/.kalos/portal.db`).
 """
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from kalos.portal.app import app, get_lock_path, get_store  # noqa: E402
+from kalos.portal.app import app, get_campaign_store  # noqa: E402
 from kalos.portal.auth import READ, WRITE  # noqa: E402
+from kalos.portal.campaign import CampaignStore  # noqa: E402
 from kalos.portal.scale_routes import INTENDED_USE_STATEMENT  # noqa: E402
-from kalos.store import SqliteStore  # noqa: E402
 
 _DEMO_CSV = "examples/synthetic_scaleup/synthetic_scaleup.csv"
 
@@ -36,15 +36,12 @@ def _configure_tokens(monkeypatch, records: list[dict]) -> None:
 
 @pytest.fixture
 def client(tmp_path):
-    store = SqliteStore(tmp_path / "experiments.db")
-    lock_path = tmp_path / "runner.lock"
-    app.dependency_overrides[get_store] = lambda: store
-    app.dependency_overrides[get_lock_path] = lambda: lock_path
+    store = CampaignStore(tmp_path)
+    app.dependency_overrides[get_campaign_store] = lambda: store
     try:
         yield TestClient(app), store
     finally:
-        app.dependency_overrides.pop(get_store, None)
-        app.dependency_overrides.pop(get_lock_path, None)
+        app.dependency_overrides.pop(get_campaign_store, None)
 
 
 def _demo_bytes() -> bytes:
@@ -234,13 +231,12 @@ def test_valid_write_token_succeeds(client, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_readout_writes_nothing_to_the_experiments_store(client):
+def test_readout_writes_nothing_to_the_campaign_store(client):
     tc, store = client
-    before = len(store.list())
+    assert store.get() is None
     r = _post(tc, target_json=_target_json())
     assert r.status_code == 200
-    after = len(store.list())
-    assert after == before == 0
+    assert store.get() is None
 
 
 def test_readout_creates_no_new_files_on_disk(client, tmp_path):
