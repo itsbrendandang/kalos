@@ -29,7 +29,7 @@ from starlette.concurrency import run_in_threadpool
 
 from kalos.portal.auth import WRITE, Principal, require_scope
 from kalos.portal.busy import RETRY_AFTER_SECONDS, AnalysisBusy, run_exclusively
-from kalos.portal.uploads import _ERR_PARSE, UploadRejected, _parse_upload
+from kalos.portal.uploads import _ERR_PARSE, MAX_UPLOAD_BYTES, UploadRejected, _parse_upload
 from kalos.scale.readout import MIN_RESIDUALS, MIN_RUNG_N_FOR_LICENSE, NUMBER, NUMBER_WITH_WARNING, REFUSAL, TargetSpec, build_readout
 from kalos.scale.readout import format_liters_plain as _format_liters_plain
 
@@ -471,7 +471,7 @@ async def scale_readout(
     except _TargetJsonError as exc:
         return JSONResponse({"failed_check": "invalid_target", "detail": str(exc)}, status_code=422)
 
-    raw = await file.read()
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)  # one past the cap: `_parse_upload` rejects it
     try:
         df = await run_in_threadpool(_parse_upload, raw)
     except UploadRejected as rej:

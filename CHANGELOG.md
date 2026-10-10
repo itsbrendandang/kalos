@@ -2,6 +2,24 @@
 
 Newest first.
 
+## 2026-10-10 (one request can no longer stall the engine)
+
+### Fixed - the demo routes did unbounded work for anyone
+
+`GET /api/single` and `/api/multi` took `rounds` and `q` straight from the URL
+with no limit and no token, outside the one-analysis slot - and kalos-web's
+proxy forwards them with the query string. `?rounds=100000&q=64` queued hours
+of GP fits; `rounds=0` crashed with a 500. Now `rounds` is 1-12 and `q` is 1-4
+(422 otherwise, defaults unchanged), and both need the `read` scope like every
+other data route (open mode still serves them on loopback).
+
+### Fixed - uploads were read whole before the size check
+
+`/api/run` and `/api/scale/readout` read the entire body into memory, then
+rejected anything over the cap (`KALOS_MAX_UPLOAD_MB`, 25 MB by default). A multi-GB upload could
+exhaust the single engine process for every tenant. They now read at most one
+byte past the cap, which is all the check needs.
+
 ## 2026-09-23 (the Scale-Up Readout)
 
 You can now hand a prospect one page that answers "what will this process do at the next scale,
