@@ -120,7 +120,8 @@ services:
   web:
     build:
       context: ../../kalos-web
-      dockerfile: ../kalos/deploy/Dockerfile.web
+      # kalos-web owns its image; this file only wires it into the stack.
+      dockerfile: Dockerfile
       args:
         # ESCAPE HATCH ONLY (wave-2): leave unset for the default posture,
         # where the browser calls same-origin /api/engine and kalos-web's
