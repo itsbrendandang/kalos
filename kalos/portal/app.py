@@ -1,15 +1,15 @@
-"""Kalos Engine portal — a small web view that runs the real engine.
+"""Kalos Engine portal — the JSON API over the real engine (the UI is kalos-web).
 
 A FastAPI app that, on request, runs the BoTorch optimization (single- and
-multi-objective) on a synthetic bioprocess surface and returns the results, plus
-a single page that charts them. It is a *viewer over the live engine*, not a
-mock: every number comes from an actual BoTorch fit + acquisition.
+multi-objective) on a synthetic bioprocess surface or an uploaded run sheet and
+returns the results. Not a mock: every number comes from an actual BoTorch fit +
+acquisition.
 
-Run:  python -m kalos.portal   (then open http://127.0.0.1:8050)
+Run:  python -m kalos.portal   (serves http://127.0.0.1:8050)
 Needs the portal extra:  pip install -e ".[portal]"
 
-This module wires up the FastAPI app, CORS, the `/` HTML route, and the
-legacy `/api/run|latest|single|multi` routes. The rest of the portal lives in
+This module wires up the FastAPI app, CORS, and the legacy
+`/api/run|latest|single|multi` routes. The rest of the portal lives in
 sibling modules:
   - `kalos.portal.uploads` - the untrusted-input boundary (`_parse_upload`,
     `UploadRejected`, the upload size/shape caps).
