@@ -60,15 +60,15 @@ def test_committed_csv_matches_a_fresh_generation(tmp_path):
     anything else means the fixture on disk has drifted from the script that
     is supposed to produce it.
 
-    Compared as parsed values to a relative tolerance of 1e-9, not
-    byte-for-byte. The CSV was generated on macOS arm64, and numpy's float
-    results are not bit-identical across CPU architectures and platform math
-    libraries: Linux x86_64 CI with the same numpy 2.5.3 / pandas 3.0.6
-    reproduces it only to within a few ulps (30 cells differ, max relative
-    difference 2.8e-15), and pandas prints a 1-ulp difference as different
-    digits. 1e-9 sits about six orders of magnitude above that noise and far
-    below what a real change to the seed, parameters, formula or export
-    format produces, so genuine drift still fails here."""
+    Compared as parsed frames, not bytes. The draws and the titer formula are
+    plain float64 arithmetic whose last bit depends on the platform (libm,
+    SIMD paths, FMA contraction), so with the same seed and the same
+    numpy/pandas versions, Linux (CI) writes a CSV whose last printed digit
+    differs from macOS arm64 (where the fixture was generated) on 25 lines:
+    up to 15 ULPs, about 3e-15 relative. So shape, column names and order,
+    dtypes and non-float columns must match exactly, and float columns must
+    agree to rtol=1e-12 - a few hundred times that platform noise, and far
+    tighter than any real change (a new seed, formula or output format)."""
     script = FIXTURE_DIR / "make_synthetic.py"
     out_dir = tmp_path / "synthetic_scaleup"
     out_dir.mkdir()
@@ -79,7 +79,14 @@ def test_committed_csv_matches_a_fresh_generation(tmp_path):
     runpy.run_path(str(script_copy), run_name="__main__")
 
     generated = pd.read_csv(out_dir / "synthetic_scaleup.csv")
-    pd.testing.assert_frame_equal(generated, _load_committed(), check_exact=False, rtol=1e-9, atol=0.0)
+    committed = _load_committed()
+    # atol=0 so pandas' default absolute slack (1e-8) cannot loosen the check
+    # on small values such as airflow at 1 L (~0.05).
+    pd.testing.assert_frame_equal(generated, committed, check_exact=False, rtol=1e-12, atol=0.0)
+    # Passing a tolerance applies it to integer columns too, so hold every
+    # non-float column to exact equality on its own.
+    non_float = committed.select_dtypes(exclude="float").columns
+    pd.testing.assert_frame_equal(generated[non_float], committed[non_float], check_exact=True)
 
 
 # --- shape the Scale-Up Readout depends on --------------------------------- #
