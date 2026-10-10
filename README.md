@@ -181,8 +181,8 @@ python examples/run_multiobjective.py   # multi-objective (titer + purity) Paret
 python examples/run_protein_embed.py    # ESM-2 embedding demo (downloads a small model)
 python -m pytest                        # tests (KALOS_TEST_ESM=1 to include ESM-2)
 
-python -m pip install -e ".[ml,portal]" # the web portal (FastAPI) drives the live GP, so it needs [ml] too
-python -m kalos.portal                # -> http://127.0.0.1:8050  (live BO + Pareto view)
+python -m pip install -e ".[ml,portal]" # the engine API (FastAPI) drives the live GP, so it needs [ml] too
+python -m kalos.portal                # -> http://127.0.0.1:8050  (JSON API; the UI is kalos-web)
 ```
 
 ### Development checks
