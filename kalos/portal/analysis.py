@@ -944,7 +944,19 @@ def _analyze(
     recipe_key = row_hash_groups(recipe_gf)
 
     if gcol:
-        groups = df.loc[keep_index, gcol].astype(str).tolist()
+        # fillna("") before astype(str), matching every other cast of this
+        # column family in this file (recipe_gf just above, and the label
+        # casts below) - NOT redundant here. Under pandas 3.x's default
+        # string-backed dtype, .astype(str) on a Series that mixes real
+        # strings with NaN no longer stringifies the NaN (legacy object-dtype
+        # behavior); it leaves it as a bare float, so `groups` silently
+        # carries one float among strings. That is invisible until
+        # np.unique's sort at line ~1200 (LOGO group counting) raises
+        # `TypeError: '<' not supported between instances of 'float' and
+        # 'str'` - found live via a campaign reanalyze, since a folded
+        # campaign row has no value for a declared group column like
+        # `medium_base` (it is not a proposable numeric feature).
+        groups = df.loc[keep_index, gcol].fillna("").astype(str).tolist()
     else:
         # No declared barrier, so the recipe itself is the safest CV group: two
         # replicates of one recipe must never straddle a fold.
