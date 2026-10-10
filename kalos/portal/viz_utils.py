@@ -132,7 +132,7 @@ def _correlation_spearman(
         n_labels = len(labels)
         matrix: list[list] = []
         for i in range(n_labels):
-            row = []
+            row: list[float | None] = []
             for j in range(n_labels):
                 if i == j:
                     row.append(1.0)
