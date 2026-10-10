@@ -2,7 +2,9 @@
 reproducibility, and bounds-sanity for the client-facing /api/run path."""
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import re
 import zipfile
 
@@ -13,6 +15,7 @@ import torch
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.datastructures import UploadFile  # noqa: E402
 
 from kalos.core.optimize import propose  # noqa: E402
 from kalos.core.surrogate import Surrogate, sanitize_bounds  # noqa: E402
@@ -61,6 +64,63 @@ def test_oversized_upload_rejected_400():
     resp = _post(big)
     assert resp.status_code == 400
     assert resp.json()["error"] == "The uploaded file is too large."
+
+
+_SCALE_TARGET = json.dumps({
+    "scale_L": 7500.0, "agitation_rpm": 150.0, "airflow_L_per_min": 300.0,
+    "target_column": "titer_g_per_L", "process_params": {"ph_setpoint": 7.2, "temperature_C": 37.0},
+})
+
+
+@pytest.mark.parametrize("path, data", [("/api/run", {}), ("/api/scale/readout", {"target": _SCALE_TARGET})])
+def test_upload_routes_never_read_past_the_size_cap(monkeypatch, path, data):
+    """An oversized body is rejected without being loaded into memory: the
+    route reads at most one byte past MAX_UPLOAD_BYTES, which is enough for
+    `_parse_upload` to know it is too large. Reading it all first let one
+    multi-GB upload exhaust the single engine process."""
+    lengths: list[int] = []
+    real_read = UploadFile.read
+
+    async def _recording_read(self, size: int = -1) -> bytes:
+        chunk = await real_read(self, size)
+        lengths.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(UploadFile, "read", _recording_read)
+    big = b"a,b,c\n" + b"1,2,3\n" * (MAX_UPLOAD_BYTES // 6 + 10)
+
+    resp = client.post(path, files={"file": ("runs.csv", big, "text/csv")}, data=data)
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "The uploaded file is too large."
+    assert lengths and max(lengths) <= MAX_UPLOAD_BYTES + 1
+
+
+# --- the demo routes: bounded work, token when auth is on ------------------- #
+
+@pytest.mark.parametrize("path", ["/api/single", "/api/multi"])
+@pytest.mark.parametrize("params", [{"rounds": 0}, {"rounds": 10_000}, {"q": 0}, {"q": 500}])
+def test_demo_routes_reject_out_of_range_work(path, params):
+    """`rounds`/`q` come straight from the URL; unbounded, one request could
+    queue hours of GP fits (and `rounds=0` crashed with a 500)."""
+    assert client.get(path, params=params).status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/api/single", "/api/multi"])
+def test_demo_routes_need_a_token_when_auth_is_on(monkeypatch, path):
+    monkeypatch.setenv("KALOS_AUTH_TOKENS", json.dumps([{
+        "token_sha256": hashlib.sha256(b"tok").hexdigest(), "subject": "s", "tenant": "t", "scopes": ["read"],
+    }]))
+    monkeypatch.delenv("KALOS_AUTH_TOKENS_FILE", raising=False)
+
+    assert client.get(path, params={"rounds": 1, "q": 1}).status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/api/single", "/api/multi"])
+def test_demo_routes_still_serve_in_bounds_requests(path):
+    resp = client.get(path, params={"rounds": 1, "q": 1})
+    assert resp.status_code == 200
+    assert resp.json()["proposals"]
 
 
 def test_wrong_magic_bytes_rejected_400():
