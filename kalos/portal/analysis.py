@@ -703,6 +703,11 @@ def _analyze(
     from kalos.core.gates import GatesConfig, check_gates
     from kalos.core.optimize import MAX_MIXED_COMBOS, propose
     from kalos.core.surrogate import FitError, Surrogate
+    from kalos.portal.viz_utils import (
+        _embedding_pca,
+        _correlation_spearman,
+        _response_surface_gp,
+    )
 
     _seed_everything()
     df = _dedupe_columns(df.dropna(axis=1, how="all"))
@@ -1473,6 +1478,52 @@ def _analyze(
         rho_floor=RELIABILITY_SPEARMAN_FLOOR,
     ).to_dict()
 
+    # VISUALIZATION PAYLOADS: embedding (PCA), correlation (Spearman), and
+    # response surface from the fitted GP. Computed while the surrogate is alive
+    # (before `del s`) and discarded immediately after — no serialization, no
+    # persistence. Uses the null-with-reason pattern: `None` with a `reason`
+    # when unavailable, otherwise the data structure with `reason=None`.
+    #
+    # These are torch-free (except the response surface which reads from `s`
+    # while it is still alive): PCA and Spearman use only scipy/numpy.
+    # The response surface evaluates the existing GP at a 21x21 grid — fast
+    # because it is a single posterior call, not a second fit.
+    viz_reasons: dict[str, str | None] = {
+        "embedding": None, "correlation": None, "response_surface": None,
+    }
+
+    # PCA embedding
+    _emb = _embedding_pca(X, y, cont_feats, kept_cats, cat_dims_map if kept_cats else None)
+    embedding: dict | None = None
+    if _emb is not None:
+        if "reason" in _emb:
+            viz_reasons["embedding"] = _emb["reason"]
+        else:
+            embedding = _emb
+
+    # Spearman correlation on recipe means
+    _corr = _correlation_spearman(X, y, cont_feats)
+    correlation: dict | None = None
+    if _corr is not None:
+        if "reason" in _corr:
+            viz_reasons["correlation"] = _corr["reason"]
+        else:
+            correlation = _corr
+
+    # Response surface: evaluate the fitted GP on a 21x21 grid over the top
+    # two continuous drivers, fixing all other dims at the incumbent recipe.
+    _surf = _response_surface_gp(
+        s, X_fit, y_fit, cont_feats, kept_cats,
+        cat_dims_map or {}, code_maps, bounds,
+        drv, cat_dims, incumbent, replicate_aware,
+    )
+    response_surface: dict | None = None
+    if _surf is not None:
+        if "reason" in _surf:
+            viz_reasons["response_surface"] = _surf["reason"]
+        else:
+            response_surface = _surf
+
     # Release the fitted GP(s) (hold torch/gpytorch tensors + parameter/prior
     # back-references that can form reference cycles refcounting alone won't
     # break) as soon as their last use is done, rather than waiting on
@@ -1643,6 +1694,10 @@ def _analyze(
         # were physically impossible. Reported, never silent: the client needs to
         # know the box they are being optimized over is not their full data range.
         "design_box_exclusions": box_exclusions,
+        "embedding": embedding,
+        "correlation": correlation,
+        "response_surface": response_surface,
+        "visualization_reasons": viz_reasons,
         "seed": ANALYZE_SEED,
         "timestamp": int(time.time()),
         "engine_version": ENGINE_VERSION,
